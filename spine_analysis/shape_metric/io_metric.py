@@ -91,6 +91,9 @@ class SpineMetricDataset:
                           recalculate: bool = True,
                           processes: int = -1) -> None:
         # TODO: handle metric recalculation
+        processes = 8
+        print('processes ', processes)
+        
         processes = min(processes, os.cpu_count()) if processes > 0 else os.cpu_count()
         chunk_size = int(np.ceil(len(spine_meshes) / processes))
 

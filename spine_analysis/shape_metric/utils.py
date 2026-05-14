@@ -1,14 +1,20 @@
+from __future__ import annotations
+
 import math
 from typing import List, Dict, Any
 
 import numpy as np
+import trimesh
 
 from CGAL.CGAL_Kernel import Vector_3, Point_3
 from CGAL.CGAL_Polygon_mesh_processing import area, face_area
 from CGAL.CGAL_Polyhedron_3 import Polyhedron_3_Facet_handle, Polyhedron_3, Polyhedron_3_Halfedge_handle
-from spine_analysis.mesh.utils import v_f_to_mesh, V_F
+from spine_analysis.mesh.utils import v_f_to_mesh, V_F, _mesh_to_v_f
 from spine_analysis.shape_metric.metric_core import SpineMetric
 from spine_segmentation import point_2_list
+
+
+_MESH_ATTACHMENT_CENTERS: Dict[int, np.ndarray] = {}
 
 
 def _vec_2_point(vector: Vector_3) -> Point_3:
@@ -62,8 +68,16 @@ def get_facet_norm(facet):
     return norm / np.linalg.norm(norm)
 
 
-def _calculate_junction_center(spine_mesh: Polyhedron_3) -> Vector_3:
-    junction_triangles = _get_junction_triangles(spine_mesh)
+def register_attachment_center(spine_mesh: Polyhedron_3, attachment_center: np.ndarray) -> None:
+    _MESH_ATTACHMENT_CENTERS[id(spine_mesh)] = np.asarray(attachment_center, dtype=float)
+
+
+def get_attachment_center(spine_mesh: Polyhedron_3):
+    return _MESH_ATTACHMENT_CENTERS.get(id(spine_mesh))
+
+
+def _calculate_junction_center_old(spine_mesh: Polyhedron_3) -> Vector_3:
+    junction_triangles = _get_junction_triangles_old(spine_mesh)
     if len(junction_triangles) > 0:
         junction_center = Vector_3(0, 0, 0)
         for facet in junction_triangles:
@@ -74,7 +88,7 @@ def _calculate_junction_center(spine_mesh: Polyhedron_3) -> Vector_3:
     return junction_center
 
 
-def _get_junction_triangles(spine_mesh: Polyhedron_3) -> set:
+def _get_junction_triangles_old(spine_mesh: Polyhedron_3) -> set:
     junction_triangles = set()
     for v in spine_mesh.vertices():
         if v.vertex_degree() > 10:
@@ -83,6 +97,158 @@ def _get_junction_triangles(spine_mesh: Polyhedron_3) -> set:
                 if h.vertex() == v:
                     junction_triangles.add(h.facet())
     return junction_triangles
+
+
+def _get_junction_triangles(spine_mesh: Polyhedron_3, use_old: bool = False) -> set:
+    if use_old:
+        return _get_junction_triangles_old(spine_mesh)
+
+    attachment_center = get_attachment_center(spine_mesh)
+    if attachment_center is None:
+        return _get_junction_triangles_old(spine_mesh)
+
+    vertices, faces = _mesh_to_v_f(spine_mesh)
+    triangles = vertices[faces]
+    finite_mask = np.isfinite(triangles).all(axis=(1, 2))
+    triangle_norms = np.linalg.norm(
+        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        axis=1,
+    )
+    valid_mask = finite_mask & (triangle_norms > 1e-12)
+    if not np.any(valid_mask):
+        return _get_junction_triangles_old(spine_mesh)
+
+    valid_indices = np.flatnonzero(valid_mask)
+    valid_triangles = triangles[valid_mask]
+    repeated_points = np.repeat(np.asarray(attachment_center, dtype=float).reshape(1, 3), len(valid_triangles), axis=0)
+    projected_points = trimesh.triangles.closest_point(valid_triangles, repeated_points)
+    finite_projected = np.isfinite(projected_points).all(axis=1)
+    if not np.any(finite_projected):
+        return _get_junction_triangles_old(spine_mesh)
+
+    candidate_indices = valid_indices[finite_projected]
+    candidate_points = repeated_points[finite_projected]
+    candidate_projections = projected_points[finite_projected]
+    distances = np.linalg.norm(candidate_projections - candidate_points, axis=1)
+    seed_face_index = int(candidate_indices[int(np.argmin(distances))])
+
+    facet_handles = [facet for facet in spine_mesh.facets()]
+    for i, facet in enumerate(facet_handles):
+        facet.set_id(i)
+    if seed_face_index >= len(facet_handles):
+        return _get_junction_triangles_old(spine_mesh)
+
+    seed_face = faces[seed_face_index]
+    seed_vertex_ids = set(int(v) for v in seed_face.tolist())
+    junction_triangles = set()
+    for facet in facet_handles:
+        circulator = facet.facet_begin()
+        begin = facet.facet_begin()
+        facet_vertex_ids = set()
+        while circulator.hasNext():
+            halfedge = circulator.next()
+            facet_vertex_ids.add(int(halfedge.vertex().id()))
+            if circulator == begin or len(facet_vertex_ids) == 3:
+                break
+        if seed_vertex_ids.intersection(facet_vertex_ids):
+            junction_triangles.add(facet)
+
+    ##### DEBUG VISUALIZATION START #####
+#     try:
+#         from IPython.display import display
+#         import plotly.io as pio
+#         import plotly.graph_objects as go
+
+#         try:
+#             if pio.renderers.default in ("", None):
+#                 pio.renderers.default = "notebook_connected"
+#         except Exception:
+#             pass
+
+#         fig = go.Figure()
+#         fig.add_trace(
+#             go.Mesh3d(
+#                 x=vertices[:, 0],
+#                 y=vertices[:, 1],
+#                 z=vertices[:, 2],
+#                 i=faces[:, 0],
+#                 j=faces[:, 1],
+#                 k=faces[:, 2],
+#                 color="#8cb6d9",
+#                 opacity=0.35,
+#                 name="mesh",
+#                 showscale=False,
+#             )
+#         )
+
+#         junction_face_indices = []
+#         for facet in junction_triangles:
+#             junction_face_indices.append(facet.id())
+#         if junction_face_indices:
+#             junction_faces = faces[np.asarray(junction_face_indices, dtype=int)]
+#             fig.add_trace(
+#                 go.Mesh3d(
+#                     x=vertices[:, 0],
+#                     y=vertices[:, 1],
+#                     z=vertices[:, 2],
+#                     i=junction_faces[:, 0],
+#                     j=junction_faces[:, 1],
+#                     k=junction_faces[:, 2],
+#                     color="#39ff14",
+#                     opacity=0.85,
+#                     name="junction_triangles",
+#                     showscale=False,
+#                 )
+#             )
+
+#         fig.add_trace(
+#             go.Scatter3d(
+#                 x=[attachment_center[0]],
+#                 y=[attachment_center[1]],
+#                 z=[attachment_center[2]],
+#                 mode="markers+text",
+#                 marker={"size": 6, "color": "purple"},
+#                 text=["attachment"],
+#                 textposition="top center",
+#                 name="attachment_center",
+#             )
+#         )
+
+#         all_points = np.vstack([vertices, attachment_center.reshape(1, 3)])
+#         mins = all_points.min(axis=0)
+#         maxs = all_points.max(axis=0)
+#         center = (mins + maxs) / 2.0
+#         radius = np.max(maxs - mins) / 2.0
+#         if radius == 0:
+#             radius = 1.0
+
+#         fig.update_layout(
+#             title="Debug junction triangles",
+#             scene={
+#                 "xaxis": {"range": [center[0] - radius, center[0] + radius], "title": "X"},
+#                 "yaxis": {"range": [center[1] - radius, center[1] + radius], "title": "Y"},
+#                 "zaxis": {"range": [center[2] - radius, center[2] + radius], "title": "Z"},
+#                 "aspectmode": "cube",
+#             },
+#             margin={"l": 0, "r": 0, "t": 40, "b": 0},
+#         )
+#         display(fig)
+#         fig.show()
+#     except Exception:
+#         pass
+    ##### DEBUG VISUALIZATION END #####
+
+    return junction_triangles if len(junction_triangles) > 0 else {facet_handles[seed_face_index]}
+
+
+def _calculate_junction_center(spine_mesh: Polyhedron_3, use_old: bool = False) -> Vector_3:
+    if use_old:
+        return _calculate_junction_center_old(spine_mesh)
+
+    attachment_center = get_attachment_center(spine_mesh)
+    if attachment_center is None:
+        return _calculate_junction_center_old(spine_mesh)
+    return Vector_3(float(attachment_center[0]), float(attachment_center[1]), float(attachment_center[2]))
 
 
 def calculate_surface_center(mesh: Polyhedron_3) -> np.ndarray:

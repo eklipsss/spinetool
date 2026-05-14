@@ -79,12 +79,34 @@ class SGSample:
     sg_coefficients: List[float]
 
 
-class SphericalGarmonicsSpineMetric(ApproximationSpineMetric):
+def _mesh_to_v_f(mesh: Polyhedron_3) -> Tuple[np.ndarray, np.ndarray]:
+    vertices = np.ndarray((mesh.size_of_vertices(), 3))
+    for i, vertex in enumerate(mesh.vertices()):
+        vertex.set_id(i)
+        vertices[i, :] = point_2_list(vertex.point())
+
+    facets = np.ndarray((mesh.size_of_facets(), 3)).astype("uint")
+    for i, facet in enumerate(mesh.facets()):
+        circulator = facet.facet_begin()
+        j = 0
+        begin = facet.facet_begin()
+        while circulator.hasNext():
+            halfedge = circulator.next()
+            v = halfedge.vertex()
+            facets[i, j] = (v.id())
+            j += 1
+            if circulator == begin or j == 3:
+                break
+    return vertices, facets
+
+
+
+class SphericalGarmonicsSpineMetric(SpineMetric):
     DEFAULT_L_SIZE: int = 10
     _m_l_map: Dict[int, Tuple[int, int]]
     _mc_samples: List[SGSample] = None
 
-    def __init__(self, spine_mesh: Polyhedron_3 = None, l_range: Iterable = None, sqrt_sample_size: int = 100):
+    def __init__(self, spine_mesh: Polyhedron_3 = None, l_range: Iterable = None, sqrt_sample_size: int = 140):
         if l_range is None:
             l_range = range(self.DEFAULT_L_SIZE)
         self._m_l_map = {}
@@ -235,7 +257,7 @@ class SphericalGarmonicsSpineMetric(ApproximationSpineMetric):
         viewer.add_mesh(v, f)
         viewer._renderer.layout = widgets.Layout(border="solid 1px")
         return viewer._renderer
-
+    
     @classmethod
     def get_distribution(cls, metrics: List["SpineMetric"]) -> np.ndarray:
         pass
@@ -272,9 +294,9 @@ class SphericalGarmonicsSpineMetric(ApproximationSpineMetric):
         return [*self.value]
 
 
-# TODO: move from Approximation class
+
 class LightFieldZernikeMomentsSpineMetric(SpineMetric):
-    def __init__(self, spine_mesh: Polyhedron_3 = None, radius: int = 1, view_points: int = 5, order: int = 15):
+    def __init__(self, spine_mesh: Polyhedron_3 = None, radius: int = 1, view_points: int = 5, order: int = 10):
         #v, _ = icosphere.icosphere(view_points // 5)
         #_, elev, az = cart2polar(v[:, 0], v[:, 1], v[:, 2])
         #self._view_points = np.array([[az[i], elev[i], radius*2]
@@ -365,24 +387,36 @@ class LightFieldZernikeMomentsSpineMetric(SpineMetric):
         cv2.fillPoly(mask, pts=[contour], color=(255,255,255))
         return mask
     
+#     def get_projections(self, spine_mesh: Polyhedron_3) -> Iterable[np.ndarray]:
+#         result = []
+#         mp.plot(*_mesh_to_v_f(spine_mesh))
+#         fig, ax = plt.subplots(ncols=2, nrows=(len(self._view_points) + 1) // 2, figsize=(12, 6 * (len(self._view_points) + 1) // 2))
+#         for i in range(len(self._view_points)):
+#             normal = polar2cart(self._view_points[i, 0, ...], self._view_points[i, 1, ...], self._view_points[i, 2, ...])
+#             contour = self._get_contour(normal, spine_mesh)
+#             result.append(self._get_image(contour))
+#             ax[i // 2, i % 2].imshow(result[-1])
+#             ax[i // 2, i % 2].set_title(f'view_point#{i}')
+#         plt.savefig("projectionsss.pdf", dpi=600)
+#         plt.show()
+#         return result
+
     def get_projections(self, spine_mesh: Polyhedron_3) -> Iterable[np.ndarray]:
         result = []
-        #mp.plot(*_mesh_to_v_f(spine_mesh))
-        #fig, ax = plt.subplots(ncols=2, nrows=(len(self._view_points) + 1) // 2, figsize=(12, 6 * (len(self._view_points) + 1) // 2))
         for i in range(len(self._view_points)):
-            normal = polar2cart(self._view_points[i, 0, ...], self._view_points[i, 1, ...], self._view_points[i, 2, ...])
+            normal = polar2cart(
+                self._view_points[i, 0, ...],
+                self._view_points[i, 1, ...],
+                self._view_points[i, 2, ...]
+            )
             contour = self._get_contour(normal, spine_mesh)
             result.append(self._get_image(contour))
-            #ax[i // 2, i % 2].imshow(result[-1])
-            #ax[i // 2, i % 2].set_title(f'view_point#{i}')
-        #plt.savefig("projectionsss.pdf", dpi=600)
-        #plt.show()
         return result
     
     def _get_contour(self, normal, mesh: Polyhedron_3):
         rotation_matrix = self._get_rotation(normal)
         res_poly = MultiPolygon()
-        facet_points = map(lambda facet: np.array([_point_2_list(h.vertex().point()) for h in [facet.halfedge(), facet.halfedge().next(), facet.halfedge().next().next()]]), mesh.facets())
+        facet_points = map(lambda facet: np.array([point_2_list(h.vertex().point()) for h in [facet.halfedge(), facet.halfedge().next(), facet.halfedge().next().next()]]), mesh.facets())
         facet_points = map(lambda points: np.matmul(points, rotation_matrix)[...,[0,1]], facet_points)
         
         for facet_2d in facet_points:
@@ -440,12 +474,12 @@ class LightFieldZernikeMomentsSpineMetric(SpineMetric):
 
     def show(self, image_size: int = 30) -> widgets.Widget:
         out = widgets.Output()
-        # with out:
-        #     fig, ax = plt.subplots(ncols=2, nrows=(len(self.value) + 1) // 2, figsize=(12, 6 * (len(self.value) + 1) // 2))
-        #     for i, projection in enumerate(self.value):
-        #         ax[i // 2, i % 2].imshow(self._recover_projection(projection, image_size))
-        #     plt.savefig("zernike_moments_images.pdf", dpi=600)
-        #     #plt.show()
+        with out:
+            fig, ax = plt.subplots(ncols=2, nrows=(len(self.value) + 1) // 2, figsize=(12, 6 * (len(self.value) + 1) // 2))
+            for i, projection in enumerate(self.value):
+                ax[i // 2, i % 2].imshow(self._recover_projection(projection, image_size))
+            plt.savefig("zernike_moments_images.pdf", dpi=600)
+            plt.show()
         return out
 
     @staticmethod

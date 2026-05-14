@@ -139,4 +139,11 @@ test/
 
 .idea/
 .DS_Store
-CGAL/
+/Mouse_basal
+/Mouse_Apical_1
+/Mouse_Apical_2
+/Mouse_Apical_3
+/Human_age40_apical_OFF
+/Human_age40_basal_OFF
+/Human_age85_apical_OFF
+/Human_age85_basal_OFF

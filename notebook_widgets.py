@@ -4,6 +4,7 @@ import json
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 import numpy as np
+import pandas as pd
 from ipywidgets import widgets
 from sklearn.decomposition import PCA
 
@@ -12,13 +13,13 @@ from typing import List, Tuple, Dict, Set, Iterable, Callable
 
 from spine_analysis.clusterization.hierarchial_clusterizer import HierarchicalSpineClusterizer
 from spine_analysis.mesh.utils import MeshDataset, LineSet, preprocess_meshes, _mesh_to_v_f, polylines_to_line_set, \
-    rotate
+    rotate, write_off
 from spine_analysis.mesh.vizualization import _add_line_set_to_viewer, _add_mesh_to_viewer_as_wireframe
 from spine_analysis.shape_metric import OldChordDistributionSpineMetric, HistogramSpineMetric, FloatSpineMetric, \
     SpineMetric
 from spine_analysis.shape_metric.io_metric import SpineMetricDataset
 from spine_analysis.shape_metric.utils import calculate_metrics, _get_junction_triangles, get_facet_norm, \
-    get_rotation_matrix
+    get_rotation_matrix, register_attachment_center
 from spine_analysis.spine.grouping import SpineGrouping
 from spine_segmentation import point_2_list, list_2_point, hash_point, \
     Segmentation, segmentation_by_distance, local_threshold_3d,\
@@ -38,6 +39,8 @@ from CGAL.CGAL_Polygon_mesh_processing import Polylines, face_area
 from CGAL.CGAL_Surface_mesh_skeletonization import surface_mesh_skeletonization
 from scipy.spatial.distance import euclidean
 import csv
+import tempfile #
+import shutil #
 
 
 Color = Tuple[float, float, float]
@@ -65,20 +68,30 @@ class SpineMeshDataset:
     spine_v_f: Dict[str, V_F]
     # dendrite name -> v f
     dendrite_v_f: Dict[str, V_F]
+    spine_attachment_centers: Dict[str, np.ndarray]
+    dataset_root_path: Path
 
     def __init__(self, spine_meshes: MeshDataset = None, dendrite_meshes: MeshDataset = None,
-                 spine_to_dendrite: Dict[str, str] = None) -> None:
+                 spine_to_dendrite: Dict[str, str] = None,
+                 spine_attachment_centers: Dict[str, np.ndarray] = None,
+                 dataset_root_path: Path = None) -> None:
         if spine_meshes is None:
             spine_meshes = {}
         if dendrite_meshes is None:
             dendrite_meshes = {}
         if spine_to_dendrite is None:
             spine_to_dendrite = {}
+        if spine_attachment_centers is None:
+            spine_attachment_centers = {}
+        if dataset_root_path is None:
+            dataset_root_path = Path.cwd()
             
         # set fields
         self.spine_meshes = spine_meshes
         self.dendrite_meshes = dendrite_meshes
         self.spine_to_dendrite = spine_to_dendrite
+        self.spine_attachment_centers = spine_attachment_centers
+        self.dataset_root_path = Path(dataset_root_path)
 
         # generate mapping of dendrites to their spines
         self.dendrite_to_spines = {name: set() for name in dendrite_meshes.keys()}
@@ -113,29 +126,74 @@ class SpineMeshDataset:
     @staticmethod
     def _orient_spine(mesh):
         target_normal = [0, -1, 0]
+
+        print("##### ORIENT DEBUG START #####", flush=True)
+        attachment_center = None
+        try:
+            from spine_analysis.shape_metric.utils import get_attachment_center
+            attachment_center = get_attachment_center(mesh)
+        except Exception:
+            attachment_center = None
+        print("attachment_center:", None if attachment_center is None else attachment_center.tolist(), flush=True)
         junction_triangles = _get_junction_triangles(mesh)
+        print("junction_triangles_count:", len(junction_triangles), flush=True)
 
         mean_norm = np.zeros(3)
+        valid_triangle_count = 0
+        invalid_triangle_count = 0
+        total_junction_area = 0.0
         for triangle in junction_triangles:
             cur_norm = get_facet_norm(triangle)
+            cur_area = face_area(triangle, mesh)
             if np.isnan(cur_norm).any():
+                invalid_triangle_count += 1
+                print("triangle_norm: invalid", flush=True)
                 continue
-            mean_norm += cur_norm * face_area(triangle, mesh)
-        mean_norm = mean_norm / np.linalg.norm(mean_norm)
+            valid_triangle_count += 1
+            total_junction_area += cur_area
+#             print(f"triangle_norm: {cur_norm.tolist()} area: {cur_area}", flush=True)
+            mean_norm += cur_norm * cur_area
+
+        mean_norm_length = np.linalg.norm(mean_norm)
+        print("valid_triangle_count:", valid_triangle_count, flush=True)
+        print("invalid_triangle_count:", invalid_triangle_count, flush=True)
+        print("total_junction_area:", total_junction_area, flush=True)
+        print("mean_norm_before_normalization:", mean_norm.tolist(), flush=True)
+        print("mean_norm_length:", float(mean_norm_length), flush=True)
+
+        if not np.isfinite(mean_norm_length) or mean_norm_length <= 1e-12:
+            print("cant calculate norm: junction normal length is zero or non-finite", flush=True)
+            print("##### ORIENT DEBUG END #####", flush=True)
+            return mesh, False
+
+        mean_norm = mean_norm / mean_norm_length
 
         if np.isnan(mean_norm).any():
-            print("cant calculate norm")
-            return mesh
+            print("cant calculate norm: normalized mean norm contains NaN", flush=True)
+            print("##### ORIENT DEBUG END #####", flush=True)
+            return mesh, False
+
+        print("mean_norm_normalized:", mean_norm.tolist(), flush=True)
 
         rotation_axis = np.cross(mean_norm, target_normal)
+        rotation_axis_length = np.linalg.norm(rotation_axis)
+        print("rotation_axis_before_normalization:", rotation_axis.tolist(), flush=True)
+        print("rotation_axis_length:", float(rotation_axis_length), flush=True)
 
-        t = np.arcsin(np.linalg.norm(rotation_axis))
+        t = np.arcsin(rotation_axis_length)
         if np.dot(mean_norm, target_normal) < 0:
             t = np.pi - t
         if mean_norm[0] < target_normal[0] < 0:
             t = 2 * np.pi - t
 
-        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+        if not np.isfinite(rotation_axis_length) or rotation_axis_length <= 1e-12:
+            print("rotation_axis is zero or non-finite, skip first rotation", flush=True)
+            print("##### ORIENT DEBUG END #####", flush=True)
+            return mesh, False
+
+        rotation_axis = rotation_axis / rotation_axis_length
+        print("rotation_axis_normalized:", rotation_axis.tolist(), flush=True)
+        print("rotation_angle_t:", float(t), flush=True)
         r_matrix = get_rotation_matrix(t, rotation_axis)
 
         result_mesh = rotate(mesh, r_matrix)
@@ -146,31 +204,207 @@ class SpineMeshDataset:
         pca = PCA(n_components=1)
         pca.fit(data)
         t = np.arctan2(pca.components_[0][0], pca.components_[0][1])
+        print("pca_component:", pca.components_[0].tolist(), flush=True)
+        print("second_rotation_angle_t:", float(t), flush=True)
 
         r_matrix = get_rotation_matrix(t, target_normal)
+        final_mesh = rotate(result_mesh, r_matrix)
 
-        return rotate(result_mesh, r_matrix)
+        ##### ORIENT VISUALIZATION START #####
+#         try:
+#             import plotly.graph_objects as go
+#             from plotly.subplots import make_subplots
+#             from IPython.display import display
+#             import plotly.io as pio
+
+#             try:
+#                 if pio.renderers.default in ("", None):
+#                     pio.renderers.default = "notebook_connected"
+#             except Exception:
+#                 pass
+
+#             original_vertices, original_faces = _mesh_to_v_f(mesh)
+#             oriented_vertices, oriented_faces = _mesh_to_v_f(final_mesh)
+
+#             fig = make_subplots(
+#                 rows=1,
+#                 cols=2,
+#                 specs=[[{"type": "scene"}, {"type": "scene"}]],
+#                 subplot_titles=("Original spine", "Oriented spine"),
+#             )
+#             fig.add_trace(
+#                 go.Mesh3d(
+#                     x=original_vertices[:, 0],
+#                     y=original_vertices[:, 1],
+#                     z=original_vertices[:, 2],
+#                     i=original_faces[:, 0],
+#                     j=original_faces[:, 1],
+#                     k=original_faces[:, 2],
+#                     color="#8cb6d9",
+#                     opacity=0.7,
+#                     name="original",
+#                     showscale=False,
+#                 ),
+#                 row=1,
+#                 col=1,
+#             )
+#             fig.add_trace(
+#                 go.Mesh3d(
+#                     x=oriented_vertices[:, 0],
+#                     y=oriented_vertices[:, 1],
+#                     z=oriented_vertices[:, 2],
+#                     i=oriented_faces[:, 0],
+#                     j=oriented_faces[:, 1],
+#                     k=oriented_faces[:, 2],
+#                     color="#f28e2b",
+#                     opacity=0.7,
+#                     name="oriented",
+#                     showscale=False,
+#                 ),
+#                 row=1,
+#                 col=2,
+#             )
+
+#             original_all = original_vertices
+#             oriented_all = oriented_vertices
+
+#             def _scene(points):
+#                 mins = points.min(axis=0)
+#                 maxs = points.max(axis=0)
+#                 center = (mins + maxs) / 2.0
+#                 radius = np.max(maxs - mins) / 2.0
+#                 if radius == 0:
+#                     radius = 1.0
+#                 return {
+#                     "xaxis": {"range": [center[0] - radius, center[0] + radius], "title": "X"},
+#                     "yaxis": {"range": [center[1] - radius, center[1] + radius], "title": "Y"},
+#                     "zaxis": {"range": [center[2] - radius, center[2] + radius], "title": "Z"},
+#                     "aspectmode": "cube",
+#                 }
+
+#             fig.update_layout(
+#                 title="Orientation debug: original vs oriented",
+#                 scene=_scene(original_all),
+#                 scene2=_scene(oriented_all),
+#                 margin={"l": 0, "r": 0, "t": 40, "b": 0},
+#             )
+#             display(fig)
+#             fig.show()
+#         except Exception:
+#             pass
+        ##### ORIENT VISUALIZATION END #####
+
+        print("##### ORIENT DEBUG END #####", flush=True)
+        return final_mesh, True
 
     def orient_spines(self) -> None:
         """ Rotate the spikes so the polygons of the dendrite junction are maximally parallel to the xy plane,
         and the most wide axis is directed along x """
+        orient_dir = self.dataset_root_path / "orient"
+        orient_dir.mkdir(parents=True, exist_ok=True)
+        original_names = []
         for (name, mesh) in self.spine_meshes.items():
-            self.spine_meshes[name] = self._orient_spine(mesh)
+            oriented_mesh, was_oriented = self._orient_spine(mesh)
+            self.spine_meshes[name] = oriented_mesh
+            if not was_oriented:
+                original_names.append(Path(name).name)
+            vertices, facets = _mesh_to_v_f(oriented_mesh)
+            output_path = orient_dir / Path(name).name
+            with output_path.open("w", encoding="utf-8") as fd:
+                write_off(fd, vertices, facets)
+        original_file = orient_dir / "original.txt"
+        with original_file.open("w", encoding="utf-8") as fd:
+            for spine_name in sorted(original_names):
+                fd.write(f"{spine_name}\n")
+
+
+    @staticmethod
+    def capture_native_stderr(callable_, *args, **kwargs):
+        fd = 2  # stderr
+        saved = os.dup(fd)
+        try:
+            with tempfile.TemporaryFile(mode="w+b") as tmp:
+                os.dup2(tmp.fileno(), fd)  # stderr -> tmp
+                try:
+                    result = callable_(*args, **kwargs)
+                finally:
+                    os.dup2(saved, fd)      # вернуть stderr
+                tmp.seek(0)
+                err = tmp.read().decode("utf-8", errors="replace")
+            return result, err
+        finally:
+            os.close(saved)
 
     def load(self, folder_path: str = "output",
-             spine_file_pattern: str = "**/spine_*.off") -> "SpineMeshDataset":
+             spine_file_pattern: str = "**/spine_*.off",
+             load_attachment_centers: bool = False) -> "SpineMeshDataset":
         spine_meshes = {}
         dendrite_meshes = {}
         spine_to_dendrite = {}
+        spine_attachment_centers = {}
+
+        failed_spines = []
+
         path = Path(folder_path)
         spine_names = list(path.glob(spine_file_pattern))
+        attachment_centers = {}
+        attachment_centers_path = path.parent / "attachment_centers.pkl"
+        if load_attachment_centers and attachment_centers_path.exists():
+            attachment_obj = pd.read_pickle(attachment_centers_path)
+            if hasattr(attachment_obj, "to_dict"):
+                attachment_centers = attachment_obj.to_dict()
+            elif isinstance(attachment_obj, dict):
+                attachment_centers = attachment_obj
+
+        # папка для некорректных шипов (создадим только если появятся ошибки)
+        incorrect_dir = path / "incorrect spines"
+        incorrect_dir_created = False
+
+
         for spine_name in spine_names:
-            spine_meshes[str(spine_name).replace('\\', '/')] = Polyhedron_3(str(spine_name).replace('\\', '/'))
+            spine_path = str(spine_name).replace('\\', '/')
+            print("spine_name", spine_name, flush=True)
+
+            poly, err = self.capture_native_stderr(Polyhedron_3, spine_path)
+            if "input error" in err or "cannot open file" in err:
+                print(f"\n❌ CGAL error while reading SPINE: {spine_name}\n{err}\n", flush=True)
+                failed_spines.append(spine_path)
+
+                if not incorrect_dir_created:
+                    incorrect_dir.mkdir(parents=True, exist_ok=True)
+                    incorrect_dir_created = True
+
+                try:
+                    shutil.copy2(spine_name, incorrect_dir / spine_name.name)
+                except Exception as copy_err:
+                    print(f"⚠️ Не удалось скопировать {spine_name} в '{incorrect_dir}': {copy_err}", flush=True)
+                    
+                continue
+
+            spine_meshes[spine_path] = poly
+            if load_attachment_centers:
+                spine_key = spine_name.stem
+                if spine_key in attachment_centers:
+                    attachment_center = np.asarray(attachment_centers[spine_key], dtype=float)
+                    spine_attachment_centers[spine_path] = attachment_center
+                    register_attachment_center(poly, attachment_center)
+            # spine_meshes[str(spine_name).replace('\\', '/')] = Polyhedron_3(str(spine_name).replace('\\', '/'))
+
             dendrite_path = os.path.join(spine_name.parent, "surface_mesh.off").replace('\\', '/')
             if dendrite_path not in dendrite_meshes:
                 dendrite_meshes[dendrite_path] = Polyhedron_3(dendrite_path)
             spine_to_dendrite[str(spine_name).replace('\\', '/')] = dendrite_path
-        self.__init__(spine_meshes, dendrite_meshes, spine_to_dendrite)
+
+        if failed_spines:
+            print("\n====== Итог: шипы с ошибкой чтения (❌ CGAL error while reading SPINE) ======", flush=True)
+            for p in failed_spines:
+                print(p, flush=True)
+            print(f"Всего: {len(failed_spines)}", flush=True)
+            print("============================================================================\n", flush=True)
+        else:
+            print("\n✅ Итог: ошибок чтения шипов не было.\n", flush=True)
+            
+        self.__init__(spine_meshes, dendrite_meshes, spine_to_dendrite, spine_attachment_centers, path)
         return self
 
     def _calculate_v_f(self) -> None:
@@ -1648,4 +1882,3 @@ def inspect_saved_groupings_widget(folder_path: str, spine_dataset: SpineMeshDat
     groupings_dropdown = widgets.Dropdown(options=grouping_paths)
 
     return widgets.interactive(inspect_grouping, grouping_path=groupings_dropdown)
-
