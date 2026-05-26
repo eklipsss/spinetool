@@ -2,6 +2,7 @@ from .dependencies import *
 from .config import *
 from .metrics import *
 from .spine import Spine
+from .surface_distances import save_distance_method_comparison, calculate_spine_distance_matrices
 
 class Dendrite:
     name: str
@@ -561,6 +562,38 @@ class Dendrite:
         #     "average_clustering": average_clustering,
         #     "modularity": modularity
         # }
+
+    def calculate_spine_distance_matrices(self, methods=None, output_dir=None, pair_for_path=None):
+        if methods is None:
+            methods = ("cylinder", "stem_graph", "mesh_graph", "heat")
+
+        if not hasattr(self, "mesh"):
+            raise ValueError("Surface distance methods require Dendrite.mesh. Create Dendrite with dendrite_meshes, not only from saved input JSON.")
+
+        attachment_points = [s.junction_center_coord for s in self.spines]
+        cylindrical_points = None
+        if self.cylindr_flag:
+            cylindrical_points = [s.center_coord_c for s in self.spines]
+
+        if output_dir is not None:
+            return save_distance_method_comparison(
+                dendrite_mesh=self.mesh,
+                attachment_points=attachment_points,
+                cylindrical_points=cylindrical_points,
+                output_dir=output_dir,
+                methods=methods,
+                radius=self.radius,
+                pair_for_path=pair_for_path,
+            )
+
+        return calculate_spine_distance_matrices(
+            dendrite_mesh=self.mesh,
+            attachment_points=attachment_points,
+            cylindrical_points=cylindrical_points,
+            methods=methods,
+            radius=self.radius,
+            pair_for_path=pair_for_path,
+        )
 
     def save_spine_coords(self) -> None:
         # with open('spine_coords.json', 'w') as f:
