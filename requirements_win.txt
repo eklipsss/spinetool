@@ -38,4 +38,12 @@ numba==0.56.2
 pytest
 shapely
 umap-learn
-#icosphere pip
+pandas
+seaborn
+trimesh
+pyvista
+esda
+libpysal
+python-louvain
+lightgbm
+tabulate

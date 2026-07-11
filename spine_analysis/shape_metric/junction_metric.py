@@ -31,6 +31,12 @@ class JunctionSpineMetric(FloatSpineMetric, ABC):
             self._surface_vectors.append(_point_2_vec(point) - self._junction_center)
 
 
+class JunctionCenterSpineMetric(JunctionSpineMetric):
+    def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
+        super()._calculate(spine_mesh)
+        return self._junction_center
+
+
 class JunctionAreaSpineMetric(JunctionSpineMetric):
     def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
         super()._calculate(spine_mesh)
@@ -68,6 +74,27 @@ class LengthSpineMetric(JunctionDistanceSpineMetric):
         super()._calculate(spine_mesh)
         q = np.quantile(self._distances, 0.95)
         return np.mean([d for d in self._distances if d >= q])
+
+
+class CenterSpineMetric(JunctionDistanceSpineMetric):
+    def _calculate(self, spine_mesh: Polyhedron_3) -> Vector_3:
+        super()._calculate(spine_mesh)
+        q = np.quantile(self._distances, 0.95)
+
+        center = Vector_3(0, 0, 0)
+        count = 0
+        for vert in spine_mesh.vertices():
+            point = vert.point()
+            vec = Vector_3(point.x(), point.y(), point.z())
+            dist = math.sqrt((vec - self._junction_center).squared_length())
+            if dist > q:
+                count += 1
+                center += vec
+
+        center /= count
+        center += self._junction_center
+        center /= 2
+        return center
 
 
 class LengthVolumeRatioSpineMetric(LengthSpineMetric):
