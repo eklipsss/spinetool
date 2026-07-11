@@ -25,13 +25,29 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     umap = None
 
 
-DATASET_PATTERN = re.compile(r"Human_age_?(?P<age>\d+)_(?P<compartment>apical|basal)_OFF")
-DEFAULT_DATASETS = [
+HUMAN_DATASET_PATTERN = re.compile(
+    r"Human_age_?(?P<age>\d+)_(?P<compartment>apical|basal)_OFF",
+    flags=re.IGNORECASE,
+)
+MOUSE_APICAL_DATASET_PATTERN = re.compile(
+    r"Mouse_Apical/Mouse_Apical_(?P<series>\d+)",
+    flags=re.IGNORECASE,
+)
+HUMAN_DATASETS = [
     "Human_age40_apical_OFF",
     "Human_age40_basal_OFF",
     "Human_age85_apical_OFF",
     "Human_age85_basal_OFF",
 ]
+MOUSE_DATASETS = [
+    "Mouse_Apical/Mouse_Apical_1",
+    "Mouse_Apical/Mouse_Apical_2",
+    "Mouse_Apical/Mouse_Apical_3",
+    "Mouse_basal",
+]
+HUMAN_AND_MOUSE_DATASETS = [*HUMAN_DATASETS, *MOUSE_DATASETS]
+# Backwards-compatible name used by the original human-only notebook cells.
+DEFAULT_DATASETS = HUMAN_DATASETS
 DEFAULT_THRESHOLDS = (0.99, 0.9, 0.8, 0.7, 0.6, 0.5)
 DEFAULT_COVARIANCE_TYPES = ("full", "tied", "diag", "spherical")
 CLUSTER_COLORS = [
@@ -67,10 +83,15 @@ def cluster_color(cluster_id: int) -> str:
 
 def resolve_spine_mesh_path(base_dir: Path, spine_key: str) -> Path:
     normalized = normalize_spine_key(spine_key)
-    dataset_name, spine_name = normalized.split("/", 1)
+    parts = normalized.split("/")
+    if len(parts) < 2:
+        raise ValueError(f"Spine key must include a dataset path: {spine_key}")
+    dataset_parts = parts[:-1]
+    spine_name = parts[-1]
+    dataset_dir = base_dir.joinpath(*dataset_parts)
     candidates = [
-        base_dir / dataset_name / "z-corr" / f"{spine_name}.off",
-        base_dir / dataset_name / f"{spine_name}.off",
+        dataset_dir / "z-corr" / f"{spine_name}.off",
+        dataset_dir / f"{spine_name}.off",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -105,19 +126,42 @@ def load_off_mesh(mesh_path: Path) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(vertices, dtype=float), np.asarray(faces, dtype=int)
 
 
-def parse_dataset_metadata(dataset_name: str) -> dict[str, str | int]:
-    match = DATASET_PATTERN.fullmatch(dataset_name)
-    if not match:
-        raise ValueError(f"Cannot parse age/compartment from dataset name: {dataset_name}")
-    age = int(match.group("age"))
-    compartment = match.group("compartment")
-    return {
-        "dataset": dataset_name,
-        "age": age,
-        "compartment": compartment,
-        "age_label": str(age),
-        "group": f"{compartment}{age}",
-    }
+def parse_dataset_metadata(dataset_name: str) -> dict[str, object]:
+    normalized_name = str(dataset_name).strip().replace("\\", "/").strip("/")
+    human_match = HUMAN_DATASET_PATTERN.fullmatch(normalized_name)
+    if human_match:
+        age = int(human_match.group("age"))
+        compartment = human_match.group("compartment").lower()
+        return {
+            "dataset": normalized_name,
+            "type": "human",
+            "age": age,
+            "compartment": compartment,
+            "age_label": str(age),
+            "group": f"{compartment}{age}",
+        }
+
+    if MOUSE_APICAL_DATASET_PATTERN.fullmatch(normalized_name):
+        return {
+            "dataset": normalized_name,
+            "type": "mouse",
+            "age": pd.NA,
+            "compartment": "apical",
+            "age_label": pd.NA,
+            "group": pd.NA,
+        }
+
+    if normalized_name.lower() == "mouse_basal":
+        return {
+            "dataset": normalized_name,
+            "type": "mouse",
+            "age": pd.NA,
+            "compartment": "basal",
+            "age_label": pd.NA,
+            "group": pd.NA,
+        }
+
+    raise ValueError(f"Cannot parse dataset metadata from name: {dataset_name}")
 
 
 def ensure_metadata_columns(metadata: pd.DataFrame) -> pd.DataFrame:
@@ -127,18 +171,26 @@ def ensure_metadata_columns(metadata: pd.DataFrame) -> pd.DataFrame:
         if "dataset_label" in frame.columns:
             frame["dataset"] = frame["dataset_label"].astype(str)
         else:
-            frame["dataset"] = [normalize_spine_key(index).split("/")[0] for index in frame.index]
+            frame["dataset"] = [
+                "/".join(normalize_spine_key(index).split("/")[:-1])
+                for index in frame.index
+            ]
 
-    if "compartment" not in frame.columns or frame["compartment"].isna().any():
-        parsed = frame["dataset"].map(lambda value: parse_dataset_metadata(str(value)))
-        frame["compartment"] = [item["compartment"] for item in parsed]
-    if "age" not in frame.columns or frame["age"].isna().any():
-        parsed = frame["dataset"].map(lambda value: parse_dataset_metadata(str(value)))
-        frame["age"] = [item["age"] for item in parsed]
-    if "age_label" not in frame.columns or frame["age_label"].isna().any():
-        frame["age_label"] = frame["age"].astype(int).astype(str)
-    if "group" not in frame.columns or frame["group"].isna().any():
-        frame["group"] = frame["compartment"].astype(str) + frame["age_label"].astype(str)
+    parsed = pd.DataFrame(
+        [parse_dataset_metadata(str(value)) for value in frame["dataset"]],
+        index=frame.index,
+    )
+    for column in ("type", "compartment", "age", "age_label", "group"):
+        if column not in frame.columns:
+            frame[column] = parsed[column]
+        elif column in ("type", "compartment"):
+            frame[column] = frame[column].fillna(parsed[column])
+
+    frame["age"] = pd.to_numeric(frame["age"], errors="coerce").astype("Int64")
+    frame["age_label"] = frame["age"].astype("string")
+    frame["group"] = (
+        frame["compartment"].astype("string") + frame["age_label"]
+    ).where(frame["age"].notna(), pd.NA)
 
     return frame
 
@@ -184,10 +236,32 @@ def load_volume_from_metrics(metrics_csv_path: Path) -> pd.Series:
     return volume
 
 
+def canonicalize_dataset_index(
+    frame: pd.DataFrame | pd.Series,
+    dataset_name: str,
+) -> pd.DataFrame | pd.Series:
+    normalized_dataset = str(dataset_name).strip().replace("\\", "/").strip("/")
+    result = frame.copy()
+    result.index = pd.Index(
+        [
+            f"{normalized_dataset}/{normalize_spine_key(value).split('/')[-1]}"
+            for value in result.index
+        ],
+        name="spine_key",
+    )
+    if result.index.has_duplicates:
+        duplicates = sorted(set(result.index[result.index.duplicated()].tolist()))
+        raise ValueError(
+            f"Duplicate spine names in dataset {normalized_dataset}: {duplicates[:5]}"
+        )
+    return result
+
+
 def load_dataset_features(
     dataset_dir: Path,
+    dataset_name: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    dataset_name = dataset_dir.name
+    dataset_name = dataset_dir.name if dataset_name is None else dataset_name
     metadata_info = parse_dataset_metadata(dataset_name)
     zcorr_dir = dataset_dir / "z-corr"
     metrics_path = zcorr_dir / "metrics.csv"
@@ -197,8 +271,14 @@ def load_dataset_features(
     if not sphharm_path.exists():
         raise FileNotFoundError(f"Missing file: {sphharm_path}")
 
-    sphharm = load_spherical_harmonics(sphharm_path)
-    metrics_volume = load_volume_from_metrics(metrics_path)
+    sphharm = canonicalize_dataset_index(
+        load_spherical_harmonics(sphharm_path),
+        dataset_name,
+    )
+    metrics_volume = canonicalize_dataset_index(
+        load_volume_from_metrics(metrics_path),
+        dataset_name,
+    )
     volume = metrics_volume.reindex(sphharm.index)
 
     features = sphharm.copy()
@@ -234,6 +314,7 @@ def load_all_datasets(
         log_progress(f"  - Dataset {index}/{len(dataset_names)}: {dataset_name}", verbose)
         features, metadata, diagnostic = load_dataset_features(
             dataset_dir=base_dir / dataset_name,
+            dataset_name=dataset_name,
         )
         feature_frames.append(features)
         metadata_frames.append(metadata)
@@ -246,6 +327,16 @@ def load_all_datasets(
         )
 
     combined_features = pd.concat(feature_frames, axis=0).sort_index()
+    if combined_features.index.has_duplicates:
+        duplicates = sorted(set(combined_features.index[combined_features.index.duplicated()].tolist()))
+        raise ValueError(f"Duplicate spine keys across datasets: {duplicates[:5]}")
+    missing_feature_count = int(combined_features.isna().sum().sum())
+    if missing_feature_count:
+        missing_columns = combined_features.columns[combined_features.isna().any()].tolist()
+        raise ValueError(
+            "Feature tables have incompatible columns or missing values after combining datasets. "
+            f"Columns with missing values: {missing_columns[:10]}"
+        )
     combined_metadata = pd.concat(metadata_frames, axis=0).loc[combined_features.index]
     diagnostics_frame = pd.DataFrame(diagnostics)
     log_progress(
@@ -412,6 +503,169 @@ def build_umap_plot(
     return fig
 
 
+def build_umap_type_plot(
+    embedding: np.ndarray,
+    metadata: pd.DataFrame,
+) -> plt.Figure:
+    typed_metadata = metadata.copy()
+    if "type" not in typed_metadata.columns:
+        typed_metadata = ensure_metadata_columns(typed_metadata)
+    type_values = typed_metadata["type"].astype("string").fillna("unknown")
+    palette = {
+        "human": "#1f77b4",
+        "mouse": "#ff7f0e",
+        "unknown": "#7f7f7f",
+    }
+    fallback_palette = plt.get_cmap("tab10")
+    unique_types = sorted(pd.unique(type_values))
+    type_colors = {
+        type_name: palette.get(type_name, to_hex(fallback_palette(index % 10)))
+        for index, type_name in enumerate(unique_types)
+    }
+    point_colors = [type_colors[type_name] for type_name in type_values]
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.scatter(
+        embedding[:, 0],
+        embedding[:, 1],
+        embedding[:, 2],
+        c=point_colors,
+        s=18,
+        alpha=0.8,
+    )
+    ax.set_title("UMAP(3D) colored by spine type")
+    ax.set_xlabel("UMAP-1")
+    ax.set_ylabel("UMAP-2")
+    ax.set_zlabel("UMAP-3")
+    handles = [
+        plt.Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            markerfacecolor=color,
+            markeredgecolor=color,
+            label=str(type_name),
+        )
+        for type_name, color in type_colors.items()
+    ]
+    ax.legend(handles=handles, title="Type", loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def build_interactive_umap_type_plot(
+    embedding: np.ndarray,
+    metadata: pd.DataFrame,
+    assignments: pd.DataFrame | None = None,
+) -> object:
+    import plotly.graph_objects as go
+    import plotly.io as pio
+
+    try:
+        if pio.renderers.default in ("", None):
+            pio.renderers.default = "notebook_connected"
+    except Exception:
+        pass
+
+    typed_metadata = metadata.copy()
+    if "type" not in typed_metadata.columns:
+        typed_metadata = ensure_metadata_columns(typed_metadata)
+
+    frame = pd.DataFrame(
+        embedding,
+        index=typed_metadata.index,
+        columns=["UMAP_1", "UMAP_2", "UMAP_3"],
+    )
+    frame = frame.join(typed_metadata[[column for column in ("dataset", "type", "compartment") if column in typed_metadata.columns]])
+    frame["type"] = frame["type"].astype("string").fillna("unknown")
+
+    if assignments is not None:
+        available_columns = [
+            column
+            for column in ("assigned_cluster", "p_star")
+            if column in assignments.columns
+        ]
+        if available_columns:
+            frame = frame.join(assignments[available_columns])
+
+    palette = {
+        "human": "#1f77b4",
+        "mouse": "#ff7f0e",
+        "unknown": "#7f7f7f",
+    }
+    fallback_palette = plt.get_cmap("tab10")
+    type_counts = frame["type"].value_counts()
+    unique_types = sorted(
+        pd.unique(frame["type"]),
+        key=lambda type_name: (type_counts.get(type_name, 0), str(type_name)),
+    )
+    type_colors = {
+        type_name: palette.get(type_name, to_hex(fallback_palette(index % 10)))
+        for index, type_name in enumerate(unique_types)
+    }
+
+    fig = go.Figure()
+    for type_name in unique_types:
+        subset = frame[frame["type"] == type_name]
+        customdata = np.column_stack(
+            [
+                subset.index.astype(str),
+                subset["type"].astype(str),
+                subset.get("dataset", pd.Series("", index=subset.index)).astype(str),
+                subset.get("compartment", pd.Series("", index=subset.index)).astype(str),
+                subset.get("assigned_cluster", pd.Series("", index=subset.index)).astype(str),
+                subset.get("p_star", pd.Series("", index=subset.index)).astype(str),
+            ]
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                x=subset["UMAP_1"],
+                y=subset["UMAP_2"],
+                z=subset["UMAP_3"],
+                mode="markers",
+                name=f"{type_name} (n={len(subset)})",
+                customdata=customdata,
+                marker=dict(
+                    size=2.5,
+                    color=type_colors[type_name],
+                    opacity=0.58,
+                ),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "type=%{customdata[1]}<br>"
+                    "dataset=%{customdata[2]}<br>"
+                    "compartment=%{customdata[3]}<br>"
+                    "assigned_cluster=%{customdata[4]}<br>"
+                    "p_star=%{customdata[5]}<br>"
+                    "UMAP-1=%{x:.3f}<br>"
+                    "UMAP-2=%{y:.3f}<br>"
+                    "UMAP-3=%{z:.3f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        title=(
+            "Interactive UMAP(3D) colored by spine type"
+            + " — "
+            + ", ".join(f"{type_name}: n={int(type_counts[type_name])}" for type_name in unique_types)
+        ),
+        scene=dict(
+            xaxis_title="UMAP-1",
+            yaxis_title="UMAP-2",
+            zaxis_title="UMAP-3",
+            aspectmode="cube",
+        ),
+        legend=dict(title="Type"),
+        height=780,
+        margin=dict(l=0, r=0, t=55, b=0),
+    )
+    return fig
+
+
 def distribution_table(
     assignments: pd.DataFrame,
     metadata: pd.DataFrame,
@@ -430,7 +684,15 @@ def distribution_table(
             }
         )
 
-    contingency = pd.crosstab(merged[group_column], merged["assigned_cluster"]).sort_index(axis=0).sort_index(axis=1)
+    grouped = merged.dropna(subset=[group_column])
+    if grouped.empty:
+        return pd.DataFrame(columns=["group", "cluster", "percentage", "count"])
+
+    contingency = (
+        pd.crosstab(grouped[group_column], grouped["assigned_cluster"])
+        .sort_index(axis=0)
+        .sort_index(axis=1)
+    )
     percentages = contingency.div(contingency.sum(axis=1), axis=0) * 100.0
     frame = percentages.reset_index().melt(
         id_vars=[group_column],
@@ -443,6 +705,7 @@ def distribution_table(
         value_name="count",
     )
     frame["count"] = counts["count"]
+    frame["cluster"] = frame["cluster"].astype(int)
     if group_column == "group":
         return frame
     frame["group"] = frame[group_column]
@@ -540,18 +803,39 @@ def p_value_to_stars(p_value: float) -> str:
     return "-"
 
 
+def cramers_v(contingency: pd.DataFrame, chi2_value: float) -> float:
+    observations = float(contingency.to_numpy().sum())
+    degrees = min(contingency.shape[0] - 1, contingency.shape[1] - 1)
+    if observations <= 0 or degrees <= 0:
+        return float("nan")
+    return float(math.sqrt(chi2_value / (observations * degrees)))
+
+
 def chi_square_summary(
     assignments: pd.DataFrame,
     metadata: pd.DataFrame,
-    group_columns: Sequence[str] = ("compartment", "age_label", "group"),
+    group_columns: Sequence[str] = ("compartment", "age_label", "group", "type"),
     verbose: bool = True,
 ) -> pd.DataFrame:
     merged = ensure_metadata_columns(metadata).join(assignments[["assigned_cluster"]])
     rows: list[dict[str, object]] = []
     log_progress("[6/8] Running chi-square tests for grouped distributions", verbose)
     for group_column in group_columns:
+        grouped = merged.dropna(subset=[group_column])
+        if grouped[group_column].nunique() < 2:
+            log_progress(
+                f"  - Skipping '{group_column}': fewer than two groups",
+                verbose,
+            )
+            continue
         log_progress(f"  - Comparing distributions by '{group_column}'", verbose)
-        contingency = pd.crosstab(merged[group_column], merged["assigned_cluster"])
+        contingency = pd.crosstab(grouped[group_column], grouped["assigned_cluster"])
+        if contingency.shape[1] < 2:
+            log_progress(
+                f"  - Skipping '{group_column}': fewer than two represented clusters",
+                verbose,
+            )
+            continue
         chi2, p_value, dof, _ = chi2_contingency(contingency)
         rows.append(
             {
@@ -559,15 +843,19 @@ def chi_square_summary(
                 "chi2": float(chi2),
                 "dof": int(dof),
                 "p_value": float(p_value),
+                "cramers_v": cramers_v(contingency, float(chi2)),
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(
+        rows,
+        columns=["comparison", "chi2", "dof", "p_value", "cramers_v"],
+    )
 
 
 def per_cluster_independence_tests(
     assignments: pd.DataFrame,
     metadata: pd.DataFrame,
-    group_columns: Sequence[str] = ("compartment", "age_label", "group"),
+    group_columns: Sequence[str] = ("compartment", "age_label", "group", "type"),
     verbose: bool = True,
 ) -> pd.DataFrame:
     merged = ensure_metadata_columns(metadata).join(assignments[["assigned_cluster"]])
@@ -582,7 +870,15 @@ def per_cluster_independence_tests(
         log_progress(f"  - Cluster {cluster_id} ({index}/{len(cluster_ids)})", verbose)
         in_cluster = (merged["assigned_cluster"] == cluster_id).astype(int)
         for group_column in group_columns:
-            contingency = pd.crosstab(merged[group_column], in_cluster)
+            grouped = merged.dropna(subset=[group_column])
+            if grouped[group_column].nunique() < 2:
+                continue
+            contingency = pd.crosstab(
+                grouped[group_column],
+                in_cluster.loc[grouped.index],
+            )
+            if contingency.shape[1] < 2:
+                continue
             chi2, p_value, dof, _ = chi2_contingency(contingency)
             rows.append(
                 {
@@ -591,10 +887,22 @@ def per_cluster_independence_tests(
                     "chi2": float(chi2),
                     "dof": int(dof),
                     "p_value": float(p_value),
+                    "cramers_v": cramers_v(contingency, float(chi2)),
                     "significance": p_value_to_stars(float(p_value)),
                 }
             )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "cluster",
+            "comparison",
+            "chi2",
+            "dof",
+            "p_value",
+            "cramers_v",
+            "significance",
+        ],
+    )
 
 
 def covariance_matrix_for_component(model: GaussianMixture, component_id: int) -> np.ndarray:
@@ -700,9 +1008,23 @@ def classical_mds(distance_matrix: np.ndarray, n_components: int = 2) -> np.ndar
     return eigenvectors[:, :n_components] * np.sqrt(positive)
 
 
+def normalize_membership_probabilities(probabilities: np.ndarray) -> np.ndarray:
+    normalized = np.asarray(probabilities, dtype=float)
+    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+    normalized = np.clip(normalized, 0.0, None)
+    row_sums = normalized.sum(axis=1, keepdims=True)
+    return np.divide(
+        normalized,
+        row_sums,
+        out=np.full_like(normalized, 1.0 / normalized.shape[1]),
+        where=row_sums > 0,
+    )
+
+
 def blended_cluster_colors(probabilities: np.ndarray, palette: Sequence[str]) -> list[str]:
+    probabilities = normalize_membership_probabilities(probabilities)
     base_colors = np.array([to_rgb(color) for color in palette])
-    mixed = probabilities @ base_colors
+    mixed = np.clip(probabilities @ base_colors, 0.0, 1.0)
     return [to_hex(color) for color in mixed]
 
 
@@ -714,6 +1036,7 @@ def build_membership_mds_plot(
     log_progress("[7/8] Building Bhattacharyya distance matrix and MDS projection", verbose)
     distance_frame = compute_bhattacharyya_matrix(model)
     cluster_positions = classical_mds(distance_frame.to_numpy(), n_components=2)
+    probabilities = normalize_membership_probabilities(probabilities)
     object_positions = probabilities @ cluster_positions
     palette = [cluster_color(index) for index in range(model.n_components)]
     colors = blended_cluster_colors(probabilities, palette)
@@ -1011,6 +1334,12 @@ def save_figure(fig: plt.Figure, output_path: Path) -> None:
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
 
 
+def save_interactive_figure(fig: object, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if hasattr(fig, "write_html"):
+        fig.write_html(output_path)
+
+
 def select_representative_spines(
     assignments: pd.DataFrame,
     top_n: int = 5,
@@ -1222,11 +1551,23 @@ def run_full_experiment(
     covariance_types: Sequence[str] = DEFAULT_COVARIANCE_TYPES,
     thresholds: Sequence[float] = DEFAULT_THRESHOLDS,
     random_state: int = 0,
+    include_age_analysis: bool = True,
     verbose: bool = True,
 ) -> dict[str, object]:
     base_dir = Path(base_dir).resolve()
     output_dir = (base_dir / "gmm_human_spine_outputs") if output_dir is None else Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    if not include_age_analysis:
+        stale_age_outputs = (
+            "cluster_distribution_by_age.csv",
+            "cluster_distribution_by_group.csv",
+            "hist_age.png",
+            "hist_group.png",
+            "hist_age_stacked.png",
+            "hist_group_stacked.png",
+        )
+        for filename in stale_age_outputs:
+            (output_dir / filename).unlink(missing_ok=True)
     log_progress("[0/8] Starting full GMM clustering experiment", verbose)
 
     features, metadata, diagnostics = load_all_datasets(
@@ -1255,33 +1596,73 @@ def run_full_experiment(
     log_progress("[5/8] Building plots and cluster distribution tables", verbose)
     bic_fig = build_bic_plot(bic_frame)
     umap_fig = build_umap_plot(umap_embedding, assignments, metadata)
+    umap_type_fig = (
+        build_umap_type_plot(umap_embedding, metadata)
+        if metadata["type"].nunique(dropna=True) > 1
+        else None
+    )
+    umap_type_interactive_fig = (
+        build_interactive_umap_type_plot(umap_embedding, metadata, assignments)
+        if metadata["type"].nunique(dropna=True) > 1
+        else None
+    )
 
-    overall_distribution = distribution_table(assignments, metadata)
-    compartment_distribution = distribution_table(assignments, metadata, "compartment")
-    age_distribution = distribution_table(assignments, metadata, "age_label")
-    group_distribution = distribution_table(assignments, metadata, "group")
-
-    histogram_figures = {
-        "overall": build_histogram(overall_distribution, "Cluster distribution: all spines"),
-        "compartment": build_histogram(compartment_distribution, "Cluster distribution by dendritic compartment"),
-        "age": build_histogram(age_distribution, "Cluster distribution by age"),
-        "group": build_histogram(group_distribution, "Cluster distribution by compartment + age"),
-        "compartment_stacked": build_grouped_type_histogram(
-            compartment_distribution,
-            "Cluster distribution grouped by dendritic compartment",
-        ),
-        "age_stacked": build_grouped_type_histogram(
-            age_distribution,
-            "Cluster distribution grouped by age",
-        ),
-        "group_stacked": build_grouped_type_histogram(
-            group_distribution,
-            "Cluster distribution grouped by compartment + age",
-        ),
+    distributions = {
+        "overall": distribution_table(assignments, metadata),
+        "compartment": distribution_table(assignments, metadata, "compartment"),
     }
+    if include_age_analysis and metadata["age_label"].notna().any():
+        distributions["age"] = distribution_table(assignments, metadata, "age_label")
+    if include_age_analysis and metadata["group"].notna().any():
+        distributions["group"] = distribution_table(assignments, metadata, "group")
+    if metadata["type"].nunique(dropna=True) > 1:
+        distributions["type"] = distribution_table(assignments, metadata, "type")
 
-    comparison_tests = chi_square_summary(assignments, metadata, verbose=verbose)
-    per_cluster_tests = per_cluster_independence_tests(assignments, metadata, verbose=verbose)
+    distribution_titles = {
+        "overall": "Cluster distribution: all spines",
+        "compartment": "Cluster distribution by dendritic compartment",
+        "age": "Cluster distribution by age",
+        "group": "Cluster distribution by compartment + age",
+        "type": "Cluster distribution by type",
+    }
+    grouped_distribution_titles = {
+        "compartment": "Cluster distribution grouped by dendritic compartment",
+        "age": "Cluster distribution grouped by age",
+        "group": "Cluster distribution grouped by compartment + age",
+        "type": "Cluster distribution grouped by type",
+    }
+    histogram_figures = {
+        key: build_histogram(distribution, distribution_titles[key])
+        for key, distribution in distributions.items()
+    }
+    histogram_figures.update(
+        {
+            f"{key}_stacked": build_grouped_type_histogram(
+                distribution,
+                grouped_distribution_titles[key],
+            )
+            for key, distribution in distributions.items()
+            if key != "overall"
+        }
+    )
+
+    comparison_columns = ["compartment"]
+    if include_age_analysis:
+        comparison_columns.extend(["age_label", "group"])
+    if metadata["type"].nunique(dropna=True) > 1:
+        comparison_columns.append("type")
+    comparison_tests = chi_square_summary(
+        assignments,
+        metadata,
+        group_columns=comparison_columns,
+        verbose=verbose,
+    )
+    per_cluster_tests = per_cluster_independence_tests(
+        assignments,
+        metadata,
+        group_columns=comparison_columns,
+        verbose=verbose,
+    )
     mds_fig, bhattacharyya_frame, cluster_mds_positions = build_membership_mds_plot(
         best_model,
         probabilities,
@@ -1334,10 +1715,15 @@ def run_full_experiment(
         index=features.index,
         columns=["UMAP_1", "UMAP_2", "UMAP_3"],
     ).to_csv(output_dir / "umap_embedding.csv")
-    overall_distribution.to_csv(output_dir / "cluster_distribution_all.csv", index=False)
-    compartment_distribution.to_csv(output_dir / "cluster_distribution_by_compartment.csv", index=False)
-    age_distribution.to_csv(output_dir / "cluster_distribution_by_age.csv", index=False)
-    group_distribution.to_csv(output_dir / "cluster_distribution_by_group.csv", index=False)
+    distribution_output_names = {
+        "overall": "cluster_distribution_all.csv",
+        "compartment": "cluster_distribution_by_compartment.csv",
+        "age": "cluster_distribution_by_age.csv",
+        "group": "cluster_distribution_by_group.csv",
+        "type": "cluster_distribution_by_type.csv",
+    }
+    for key, distribution in distributions.items():
+        distribution.to_csv(output_dir / distribution_output_names[key], index=False)
     comparison_tests.to_csv(output_dir / "distribution_comparison_pvalues.csv", index=False)
     per_cluster_tests.to_csv(output_dir / "per_cluster_independence_tests.csv", index=False)
     bhattacharyya_frame.to_csv(output_dir / "bhattacharyya_distances.csv")
@@ -1351,13 +1737,26 @@ def run_full_experiment(
 
     save_figure(bic_fig, output_dir / "bic_sweep.png")
     save_figure(umap_fig, output_dir / "umap_3d_clusters.png")
-    save_figure(histogram_figures["overall"], output_dir / "hist_all.png")
-    save_figure(histogram_figures["compartment"], output_dir / "hist_compartment.png")
-    save_figure(histogram_figures["age"], output_dir / "hist_age.png")
-    save_figure(histogram_figures["group"], output_dir / "hist_group.png")
-    save_figure(histogram_figures["compartment_stacked"], output_dir / "hist_compartment_stacked.png")
-    save_figure(histogram_figures["age_stacked"], output_dir / "hist_age_stacked.png")
-    save_figure(histogram_figures["group_stacked"], output_dir / "hist_group_stacked.png")
+    if umap_type_fig is not None:
+        save_figure(umap_type_fig, output_dir / "umap_3d_by_type.png")
+    if umap_type_interactive_fig is not None:
+        save_interactive_figure(
+            umap_type_interactive_fig,
+            output_dir / "umap_3d_by_type_interactive.html",
+        )
+    histogram_output_names = {
+        "overall": "hist_all.png",
+        "compartment": "hist_compartment.png",
+        "age": "hist_age.png",
+        "group": "hist_group.png",
+        "type": "hist_type.png",
+        "compartment_stacked": "hist_compartment_stacked.png",
+        "age_stacked": "hist_age_stacked.png",
+        "group_stacked": "hist_group_stacked.png",
+        "type_stacked": "hist_type_stacked.png",
+    }
+    for key, figure in histogram_figures.items():
+        save_figure(figure, output_dir / histogram_output_names[key])
     save_figure(mds_fig, output_dir / "membership_mds.png")
     save_figure(covariance_volume_fig, output_dir / "cluster_covariance_log_volume.png")
 
@@ -1375,6 +1774,18 @@ def run_full_experiment(
     best_model_summary.to_csv(output_dir / "best_model.csv", index=False)
     log_progress("[done] Experiment finished", verbose)
 
+    figures = {
+        "bic": bic_fig,
+        "umap": umap_fig,
+        **histogram_figures,
+        "mds": mds_fig,
+        "covariance_volume": covariance_volume_fig,
+    }
+    if umap_type_fig is not None:
+        figures["umap_by_type"] = umap_type_fig
+    if umap_type_interactive_fig is not None:
+        figures["umap_by_type_interactive"] = umap_type_interactive_fig
+
     return {
         "features": features,
         "metadata": metadata,
@@ -1385,19 +1796,8 @@ def run_full_experiment(
         "assignments": assignments,
         "full_table": full_table,
         "umap_embedding": umap_embedding,
-        "figures": {
-            "bic": bic_fig,
-            "umap": umap_fig,
-            **histogram_figures,
-            "mds": mds_fig,
-            "covariance_volume": covariance_volume_fig,
-        },
-        "distributions": {
-            "overall": overall_distribution,
-            "compartment": compartment_distribution,
-            "age": age_distribution,
-            "group": group_distribution,
-        },
+        "figures": figures,
+        "distributions": distributions,
         "comparison_tests": comparison_tests,
         "per_cluster_tests": per_cluster_tests,
         "bhattacharyya_distances": bhattacharyya_frame,
