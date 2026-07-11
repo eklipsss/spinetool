@@ -5,7 +5,7 @@ import numpy as np
 
 from CGAL.CGAL_Kernel import Point_3
 from CGAL.CGAL_Polygon_mesh_processing import Polylines
-from CGAL.CGAL_Polyhedron_3 import Polyhedron_3, Polyhedron_3_Modifier_3, Integer_triple
+from CGAL.CGAL_Polyhedron_3 import Polyhedron_3, Polyhedron_modifier
 from spine_segmentation import point_2_list
 
 MeshDataset = Dict[str, Polyhedron_3]
@@ -74,11 +74,17 @@ def polylines_to_line_set(polylines: Polylines) -> LineSet:
 
 def v_f_to_mesh(v: np.ndarray, f: np.ndarray) -> Polyhedron_3:
     p = Polyhedron_3()
-    modifier = Polyhedron_3_Modifier_3()
-    point_list = [Point_3(*vertex.tolist()) for vertex in v]
-    triple_list = [Integer_triple(*facet.tolist()) for facet in f]
-    modifier.set_modifier_data(point_list, triple_list)
-    p.delegate(modifier.get_modifier())
+    modifier = Polyhedron_modifier()
+    modifier.begin_surface(len(v), len(f))
+    for vertex in v:
+        modifier.add_vertex(Point_3(*vertex.tolist()))
+    for facet in f:
+        modifier.begin_facet()
+        for vi in facet.tolist():
+            modifier.add_vertex_to_facet(int(vi))
+        modifier.end_facet()
+    modifier.end_surface()
+    p.delegate(modifier)
     return p
 
 def write_off(fd, v, f):
@@ -90,3 +96,44 @@ def write_off(fd, v, f):
 
     for facet in f:
         fd.write(f'3 {facet[0]} {facet[1]} {facet[2]}\n')
+
+
+def v_f_to_mesh_isolated(v: np.ndarray, f: np.ndarray, timeout: float = 600.0) -> Polyhedron_3:
+    import subprocess
+    import sys
+    import os
+    import tempfile
+
+    worker_path = os.path.join(os.path.dirname(__file__), "_v_f_to_off_worker.py")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        npz_path = os.path.join(tmp_dir, "v_f.npz")
+        off_path = os.path.join(tmp_dir, "mesh.off")
+        np.savez(npz_path, v=np.asarray(v, dtype=float), f=np.asarray(f, dtype=int))
+
+        try:
+            result = subprocess.run(
+                [sys.executable, worker_path, npz_path, off_path],
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"v_f_to_mesh_isolated: building Polyhedron_3 did not finish within "
+                f"{timeout}s and was terminated."
+            ) from exc
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"v_f_to_mesh_isolated: building Polyhedron_3 crashed the worker "
+                f"process (exit code {result.returncode}) — the input is likely "
+                "non-manifold or otherwise invalid for CGAL's incremental builder. "
+                f"stderr:\n{result.stderr}"
+            )
+        if not os.path.exists(off_path):
+            raise RuntimeError(
+                "v_f_to_mesh_isolated: worker exited cleanly but produced no output. "
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        return Polyhedron_3(off_path)

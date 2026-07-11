@@ -20,7 +20,7 @@ import networkx as nx
 import community as community_louvain
 
 from CGAL.CGAL_Polyhedron_3 import Polyhedron_3
-from CGAL.CGAL_Polygon_mesh_processing import volume
+from CGAL.CGAL_Polygon_mesh_processing import volume, does_self_intersect
 from CGAL.CGAL_Kernel import Vector_3
 from CGAL.CGAL_Polygon_mesh_processing import Polylines
 from CGAL.CGAL_Surface_mesh_skeletonization import surface_mesh_skeletonization

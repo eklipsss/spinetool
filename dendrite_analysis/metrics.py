@@ -1,5 +1,6 @@
 from .dependencies import *
 from .config import *
+from spine_analysis.shape_metric.utils import _point_2_vec
 
 def make_viewer(width: int = 600, height: int = 600) -> mp.Viewer:
     return mp.Viewer({"width": width, "height": height})
@@ -32,6 +33,17 @@ def get_dendr_vecs(dendr_mesh: Polyhedron_3) -> List[Vector_3]:
 
 
 def get_sceleton_vecs(dendr_mesh: Polyhedron_3) -> List[Vector_3]:
+    if not bool(dendr_mesh.is_closed()):
+        raise RuntimeError(
+            "surface_mesh_skeletonization requires a closed (watertight) mesh; "
+            "the input mesh has open boundaries."
+        )
+    if bool(does_self_intersect(dendr_mesh)):
+        raise RuntimeError(
+            "surface_mesh_skeletonization requires a non-self-intersecting mesh; "
+            "the input mesh has self-intersecting faces."
+        )
+
     skeleton_polylines = Polylines()
     correspondence_polylines = Polylines()
     surface_mesh_skeletonization(dendr_mesh, skeleton_polylines, correspondence_polylines)
@@ -49,7 +61,20 @@ def get_sceleton_vecs(dendr_mesh: Polyhedron_3) -> List[Vector_3]:
     return sceleton_vecs, skeleton_line_set
 
 
-def calculate_RadiusDendriteMetric(dendr_vecs: List[Vector_3], sceleton_vecs: List[Vector_3]) -> float:    
+def fallback_dendrite_length(dendr_mesh: Polyhedron_3) -> float:
+    from spine_analysis.mesh.utils import _mesh_to_v_f
+
+    vertices, _ = _mesh_to_v_f(dendr_mesh)
+    center = vertices.mean(axis=0)
+    _, _, vh = np.linalg.svd(vertices - center, full_matrices=False)
+    axis = vh[0]
+    projections = (vertices - center) @ axis
+    length = float(projections.max() - projections.min())
+    print(f"  length (PCA fallback, no skeleton) = {length:.2f}")
+    return length
+
+
+def calculate_RadiusDendriteMetric(dendr_vecs: List[Vector_3], sceleton_vecs: List[Vector_3]) -> float:
     min_dists_list = []
     
     for sceleton_vec in sceleton_vecs:

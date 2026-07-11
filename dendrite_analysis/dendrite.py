@@ -181,12 +181,33 @@ class Dendrite:
             self.name = dendr_name
             print(f'Dendrite {dendr_name}')
             self.mesh = dendr_mesh
-            self.volume = volume(dendr_mesh)
+            raw_vol = volume(dendr_mesh)
+            if raw_vol < 0:
+                import warnings
+                warnings.warn(
+                    f"Volume for '{dendr_name}' is negative ({raw_vol:.2f}) — mesh may not be "
+                    "closed or face normals may be inverted. Using abs(volume) as approximation.",
+                    stacklevel=2,
+                )
+            self.volume = abs(raw_vol)
             print(f'  dendr_volume = {self.volume:.2f}')
 
-            sceleton_vecs, skeleton_line_set = get_sceleton_vecs(dendr_mesh)  # векторы скелета дендрита (без шипиков)
-            
-        self.length = calculate_LengthDendriteMetric(sceleton_vecs, skeleton_line_set) 
+            try:
+                sceleton_vecs, skeleton_line_set = get_sceleton_vecs(dendr_mesh)  # векторы скелета дендрита (без шипиков)
+                skeleton_ok = True
+            except Exception as exc:
+                import warnings
+                warnings.warn(
+                    f"Skeleton-based length calculation unavailable for '{dendr_name}' "
+                    f"({exc}); falling back to a PCA-based length approximation.",
+                    stacklevel=2,
+                )
+                skeleton_ok = False
+
+        if skeleton_ok:
+            self.length = calculate_LengthDendriteMetric(sceleton_vecs, skeleton_line_set)
+        else:
+            self.length = fallback_dendrite_length(dendr_mesh)
         self.radius = math.sqrt(self.volume/(math.pi*self.length))
         # print(f'  dendr_len = {self.length:.2f}')
         # print(f'  dendr_radius = {self.radius:.2f}')
@@ -199,6 +220,7 @@ class Dendrite:
         junction_center_coords = [] 
 
         for (spine_name, spine_mesh) in self.spine_meshes.items():
+            print(f"  junction/center metrics: {spine_name}", flush=True)
             # середина области крепления шипика
             junction_center_vec = junction_center_klass(spine_mesh)._value
             junction_center_coord = (junction_center_vec.x(), junction_center_vec.y(), junction_center_vec.z())  # tuple, тк неизменяемый

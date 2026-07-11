@@ -14,9 +14,22 @@ from scipy.sparse.linalg import spsolve
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import pdist, squareform
 
-from CGAL.CGAL_Polygon_mesh_processing import Polylines
+from CGAL.CGAL_Polygon_mesh_processing import Polylines, does_self_intersect
 from CGAL.CGAL_Surface_mesh_skeletonization import surface_mesh_skeletonization
 from spine_analysis.mesh.utils import _mesh_to_v_f
+
+try:
+    import plotly.graph_objects as _go
+    from plotly.subplots import make_subplots as _make_subplots
+    _PLOTLY_AVAILABLE = True
+except ImportError:
+    _PLOTLY_AVAILABLE = False
+
+try:
+    from tqdm.auto import tqdm as _tqdm
+    _TQDM_AVAILABLE = True
+except ImportError:
+    _TQDM_AVAILABLE = False
 
 
 @dataclass
@@ -29,6 +42,8 @@ class DistanceMatrixResult:
     point_vertex_indices: Optional[np.ndarray] = None
     paths: Optional[Dict[Tuple[int, int], np.ndarray]] = None
     metadata: Optional[Dict[str, Any]] = None
+    predecessors: Optional[np.ndarray] = None
+    heat_fields: Optional[Dict[int, np.ndarray]] = None
 
 
 def _as_points(points: Sequence[Sequence[float]]) -> np.ndarray:
@@ -93,6 +108,18 @@ def _default_pair(distance_matrix: np.ndarray) -> Tuple[int, int]:
     return int(pair[0]), int(pair[1])
 
 
+def _min_pair(distance_matrix: np.ndarray) -> Tuple[int, int]:
+    """Return (i, j) with the smallest non-zero finite distance."""
+    if distance_matrix.shape[0] < 2:
+        return 0, 0
+    m = np.where(np.isfinite(distance_matrix) & (distance_matrix > 0), distance_matrix, np.inf)
+    np.fill_diagonal(m, np.inf)
+    if not np.isfinite(m).any():
+        return 0, 1
+    pair = np.unravel_index(np.argmin(m), m.shape)
+    return int(pair[0]), int(pair[1])
+
+
 def _shortest_paths_on_mesh(
     mesh: trimesh.Trimesh,
     points: np.ndarray,
@@ -131,6 +158,7 @@ def _shortest_paths_on_mesh(
         projected_points=np.asarray(mesh.vertices[projected_vertex_indices], dtype=float),
         point_vertex_indices=projected_vertex_indices,
         paths=paths,
+        predecessors=predecessors,
         metadata={"pair_for_path": pair_for_path},
     )
 
@@ -151,6 +179,22 @@ def _point_to_array(point: Any) -> np.ndarray:
 
 
 def _skeleton_segments(dendrite_mesh: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
+    # CGAL's mean-curvature-flow skeletonization requires a closed, manifold,
+    # non-self-intersecting triangle mesh. Feeding it anything else can hard-crash
+    # the interpreter (a native abort/segfault, not a catchable exception), so we
+    # check the documented preconditions ourselves and fail in plain Python instead
+    # — the caller already falls back to `_fallback_centerline` on any exception here.
+    if not bool(dendrite_mesh.is_closed()):
+        raise RuntimeError(
+            "surface_mesh_skeletonization requires a closed (watertight) mesh; "
+            "the input mesh has open boundaries."
+        )
+    if bool(does_self_intersect(dendrite_mesh)):
+        raise RuntimeError(
+            "surface_mesh_skeletonization requires a non-self-intersecting mesh; "
+            "the input mesh has self-intersecting faces."
+        )
+
     skeleton_polylines = Polylines()
     correspondence_polylines = Polylines()
     surface_mesh_skeletonization(dendrite_mesh, skeleton_polylines, correspondence_polylines)
@@ -505,66 +549,214 @@ def calculate_heat_distance_matrix(
         projected_points=np.asarray(mesh.vertices[projected_vertex_indices], dtype=float),
         point_vertex_indices=projected_vertex_indices,
         paths=paths,
+        heat_fields=heat_fields,
         metadata={"pair_for_path": pair_for_path, "t": t},
     )
 
 
+def _recompute_path_for_result(
+    result: DistanceMatrixResult,
+    pair: Tuple[int, int],
+) -> Optional[np.ndarray]:
+    i, j = pair
+    if result.method in ("mesh_graph", "stem_graph"):
+        if (
+            result.predecessors is not None
+            and result.point_vertex_indices is not None
+            and result.mesh is not None
+        ):
+            path_vertices = _reconstruct_path(
+                result.predecessors[i],
+                int(result.point_vertex_indices[i]),
+                int(result.point_vertex_indices[j]),
+            )
+            if len(path_vertices) > 0:
+                return np.asarray(result.mesh.vertices[path_vertices], dtype=float)
+    elif result.method == "heat":
+        if (
+            result.heat_fields is not None
+            and result.point_vertex_indices is not None
+            and result.mesh is not None
+        ):
+            phi = result.heat_fields.get(i)
+            if phi is not None:
+                path = _heat_descent_path(
+                    result.mesh,
+                    phi,
+                    int(result.point_vertex_indices[i]),
+                    int(result.point_vertex_indices[j]),
+                )
+                if len(path) > 0:
+                    return path
+    elif result.method == "cylinder":
+        raw = (result.metadata or {}).get("cylindrical_points")
+        if raw is not None:
+            raw = np.asarray(raw)
+            n = len(raw)
+            if i < n and j < n:
+                local_path = _cylindrical_path(raw[i], raw[j])
+                pca_basis = (result.metadata or {}).get("pca_basis")
+                if pca_basis is not None:
+                    w, u_ax, v_ax, mean_3d = pca_basis
+                    return _cylinder_local_to_3d(local_path, w, u_ax, v_ax, mean_3d)
+                return local_path
+    return None
+
+
+def select_shared_pair(
+    results: Dict[str, DistanceMatrixResult],
+    preferred_methods: Sequence[str] = ("mesh_graph", "stem_graph", "cylinder"),
+) -> Tuple[int, int]:
+    """Pick a single representative point pair from the best available method."""
+    for method in preferred_methods:
+        if method in results:
+            return _default_pair(results[method].distance_matrix)
+    if results:
+        return _default_pair(next(iter(results.values())).distance_matrix)
+    return (0, 1)
+
+
 def _cylindrical_distance(point1: np.ndarray, point2: np.ndarray) -> float:
-    x1, y1, z1 = point1
-    x2, y2, z2 = point2
-    r = (np.sqrt(x1 ** 2 + y1 ** 2) + np.sqrt(x2 ** 2 + y2 ** 2)) / 2.0
-    phi1 = np.arctan2(y1, x1)
-    phi2 = np.arctan2(y2, x2)
-    delta_phi = np.abs(phi1 - phi2)
-    delta_phi = min(delta_phi, 2 * np.pi - delta_phi)
-    return float(np.sqrt((r * delta_phi) ** 2 + (z1 - z2) ** 2))
+    # Input format: (r, h, theta) — radius, height along dendrite axis, angle
+    r1, h1, theta1 = point1
+    r2, h2, theta2 = point2
+    r_avg = (r1 + r2) / 2.0
+    delta_theta = abs(theta1 - theta2)
+    delta_theta = min(delta_theta, 2 * np.pi - delta_theta)
+    arc = r_avg * delta_theta
+    return float(np.sqrt(arc ** 2 + (h1 - h2) ** 2))
 
 
 def _cylinder_mesh_from_points(points: np.ndarray, sections: int = 64) -> trimesh.Trimesh:
-    radii = np.linalg.norm(points[:, :2], axis=1)
-    radius = float(np.mean(radii[radii > 0])) if np.any(radii > 0) else 1.0
-    z_min = float(np.min(points[:, 2]))
-    z_max = float(np.max(points[:, 2]))
-    height = max(z_max - z_min, radius)
+    # Input format: (r, h, theta) — radius col 0, height col 1, angle col 2
+    radius = float(np.mean(points[:, 0])) if len(points) else 1.0
+    h_min = float(np.min(points[:, 1]))
+    h_max = float(np.max(points[:, 1]))
+    height = max(h_max - h_min, radius)
     mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
-    mesh.apply_translation((0, 0, (z_min + z_max) / 2.0))
+    mesh.apply_translation((0, 0, (h_min + h_max) / 2.0))
     return mesh
 
 
 def _cylindrical_path(point1: np.ndarray, point2: np.ndarray, steps: int = 80) -> np.ndarray:
-    phi1 = np.arctan2(point1[1], point1[0])
-    phi2 = np.arctan2(point2[1], point2[0])
-    delta = (phi2 - phi1 + np.pi) % (2 * np.pi) - np.pi
-    radii = np.linspace(np.linalg.norm(point1[:2]), np.linalg.norm(point2[:2]), steps)
-    phis = phi1 + np.linspace(0, delta, steps)
-    z = np.linspace(point1[2], point2[2], steps)
-    return np.column_stack((radii * np.cos(phis), radii * np.sin(phis), z))
+    # Input format: (r, h, theta) — radius, height along dendrite axis, angle
+    r1, h1, theta1 = point1
+    r2, h2, theta2 = point2
+    delta = (theta2 - theta1 + np.pi) % (2 * np.pi) - np.pi
+    radii = np.linspace(r1, r2, steps)
+    thetas = theta1 + np.linspace(0, delta, steps)
+    heights = np.linspace(h1, h2, steps)
+    # Local Cartesian: x=r·cosθ (along u), y=r·sinθ (along v), z=h (along w)
+    return np.column_stack((radii * np.cos(thetas), radii * np.sin(thetas), heights))
+
+
+def _cylinder_local_to_3d(
+    path_local: np.ndarray,
+    w: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    mean: np.ndarray,
+) -> np.ndarray:
+    """Map local cylinder Cartesian (r·cosθ, r·sinθ, h) to 3D world space."""
+    return (
+        mean[np.newaxis, :]
+        + np.outer(path_local[:, 0], u)
+        + np.outer(path_local[:, 1], v)
+        + np.outer(path_local[:, 2], w)
+    )
+
+
+def _make_oriented_cylinder(
+    raw_points: np.ndarray,
+    w: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    mean: np.ndarray,
+    sections: int = 64,
+) -> trimesh.Trimesh:
+    """Create a cylinder aligned with dendrite axis *w*, centred at *mean*."""
+    radius = float(np.mean(raw_points[:, 0])) if len(raw_points) else 1.0
+    h_min = float(np.min(raw_points[:, 1]))
+    h_max = float(np.max(raw_points[:, 1]))
+    height = max(h_max - h_min, radius)
+    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
+    # trimesh creates a Z-aligned cylinder; rotate so Z maps to w (dendrite axis)
+    rot = np.column_stack([u, v, w])
+    transform = np.eye(4)
+    transform[:3, :3] = rot
+    mesh.apply_transform(transform)
+    mesh.apply_translation(mean + (h_min + h_max) / 2.0 * w)
+    return mesh
 
 
 def calculate_cylindrical_distance_matrix(
     cylindrical_points: Sequence[Sequence[float]],
     pair_for_path: Optional[Tuple[int, int]] = None,
+    original_points: Optional[Sequence[Sequence[float]]] = None,
 ) -> DistanceMatrixResult:
-    """Existing cylindrical distance model, kept as the baseline method."""
     start = perf_counter()
-    points = _as_points(cylindrical_points)
-    distance_matrix = squareform(pdist(points, lambda u, v: _cylindrical_distance(u, v)))
+    raw_points = _as_points(cylindrical_points)  # (r, h, θ)
+    distance_matrix = squareform(pdist(raw_points, lambda u, v: _cylindrical_distance(u, v)))
     if pair_for_path is None:
         pair_for_path = _default_pair(distance_matrix)
 
+    # Optionally recompute PCA basis from original 3D points for correct orientation
+    pca_basis: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None
+    if original_points is not None:
+        orig = np.asarray(original_points, dtype=float)
+        if orig.ndim == 2 and orig.shape[1] == 3 and len(orig) >= 3:
+            try:
+                from sklearn.decomposition import PCA as _PCA
+                _pca = _PCA(n_components=3, random_state=42)
+                _pca.fit(orig)
+                w = _pca.components_[0]
+                u_ax = _pca.components_[1]
+                v_ax = _pca.components_[2]
+                mean_3d = _pca.mean_
+                pca_basis = (w, u_ax, v_ax, mean_3d)
+            except Exception:
+                pca_basis = None
+
+    # Local Cartesian: x = r·cosθ, y = r·sinθ, z = h
+    cart_local = np.column_stack((
+        raw_points[:, 0] * np.cos(raw_points[:, 2]),
+        raw_points[:, 0] * np.sin(raw_points[:, 2]),
+        raw_points[:, 1],
+    ))
+
+    if pca_basis is not None:
+        w, u_ax, v_ax, mean_3d = pca_basis
+        cart_points = _cylinder_local_to_3d(cart_local, w, u_ax, v_ax, mean_3d)
+        cyl_mesh = _make_oriented_cylinder(raw_points, w, u_ax, v_ax, mean_3d)
+    else:
+        cart_points = cart_local
+        cyl_mesh = _cylinder_mesh_from_points(raw_points)
+
     paths: Dict[Tuple[int, int], np.ndarray] = {}
-    if len(points) >= 2:
+    if len(raw_points) >= 2:
         i, j = pair_for_path
-        paths[(i, j)] = _cylindrical_path(points[i], points[j])
+        local_path = _cylindrical_path(raw_points[i], raw_points[j])
+        if pca_basis is not None:
+            w, u_ax, v_ax, mean_3d = pca_basis
+            paths[(i, j)] = _cylinder_local_to_3d(local_path, w, u_ax, v_ax, mean_3d)
+        else:
+            paths[(i, j)] = local_path
+
+    meta: Dict[str, Any] = {
+        "pair_for_path": pair_for_path,
+        "cylindrical_points": raw_points,
+    }
+    if pca_basis is not None:
+        meta["pca_basis"] = pca_basis
 
     return DistanceMatrixResult(
         method="cylinder",
         distance_matrix=distance_matrix,
         elapsed_seconds=perf_counter() - start,
-        mesh=_cylinder_mesh_from_points(points),
-        projected_points=points,
+        mesh=cyl_mesh,
+        projected_points=cart_points,
         paths=paths,
-        metadata={"pair_for_path": pair_for_path},
+        metadata=meta,
     )
 
 
@@ -580,11 +772,19 @@ def calculate_spine_distance_matrices(
     results: Dict[str, DistanceMatrixResult] = {}
     points = _as_points(attachment_points)
 
-    for method in methods:
+    methods_list = list(methods)
+    if _TQDM_AVAILABLE:
+        methods_iter: Any = _tqdm(methods_list, desc="distance methods", unit="method", leave=False)
+    else:
+        methods_iter = methods_list
+
+    for method in methods_iter:
         if method == "cylinder":
             if cylindrical_points is None:
                 continue
-            results[method] = calculate_cylindrical_distance_matrix(cylindrical_points, pair_for_path)
+            results[method] = calculate_cylindrical_distance_matrix(
+                cylindrical_points, pair_for_path, original_points=points
+            )
         elif method == "stem_graph":
             results[method] = calculate_stem_graph_distance_matrix(
                 dendrite_mesh, points, radius=radius, centerline=centerline, pair_for_path=pair_for_path
@@ -623,39 +823,62 @@ def visualize_distance_result(
     original_mesh: Any,
     attachment_points: Sequence[Sequence[float]],
     result: DistanceMatrixResult,
-    pair: Optional[Tuple[int, int]] = None,
+    min_pair: Optional[Tuple[int, int]] = None,
+    max_pair: Optional[Tuple[int, int]] = None,
     save_path: Optional[str] = None,
 ) -> plt.Figure:
+    """Three-panel matplotlib figure: plain mesh | min-distance path (green) | max-distance path (red)."""
     original = polyhedron_to_trimesh(original_mesh)
     points = _as_points(attachment_points)
-    if pair is None:
-        pair = (result.metadata or {}).get("pair_for_path") or _default_pair(result.distance_matrix)
 
-    fig = plt.figure(figsize=(14, 6))
-    left = fig.add_subplot(1, 2, 1, projection="3d")
-    right = fig.add_subplot(1, 2, 2, projection="3d")
-
-    _plot_mesh(left, original, alpha=0.18)
-    left.scatter(points[:, 0], points[:, 1], points[:, 2], c="#1f77b4", s=24)
-    left.scatter(points[list(pair), 0], points[list(pair), 1], points[list(pair), 2], c="#d62728", s=55)
-    left.set_title("Original dendrite mesh")
-    _set_axes_equal(left, np.vstack((original.vertices, points)))
+    if min_pair is None:
+        min_pair = _min_pair(result.distance_matrix)
+    if max_pair is None:
+        max_pair = _default_pair(result.distance_matrix)
 
     method_mesh = result.mesh if result.mesh is not None else original
-    _plot_mesh(right, method_mesh, alpha=0.18)
     projected = result.projected_points if result.projected_points is not None else points
-    right.scatter(projected[:, 0], projected[:, 1], projected[:, 2], c="#1f77b4", s=24)
-    right.scatter(projected[list(pair), 0], projected[list(pair), 1], projected[list(pair), 2], c="#d62728", s=55)
 
-    path = (result.paths or {}).get(tuple(pair))
-    if path is not None and len(path) > 0:
-        right.plot(path[:, 0], path[:, 1], path[:, 2], color="#d62728", linewidth=2.5)
+    min_dist = result.distance_matrix[min_pair[0], min_pair[1]] if result.distance_matrix.size else np.nan
+    max_dist = result.distance_matrix[max_pair[0], max_pair[1]] if result.distance_matrix.size else np.nan
 
-    distance = result.distance_matrix[pair[0], pair[1]] if result.distance_matrix.size else np.nan
-    right.set_title(f"{result.method}: d={distance:.3f}, t={result.elapsed_seconds:.3f}s")
-    _set_axes_equal(right, np.vstack((method_mesh.vertices, projected)))
+    fig = plt.figure(figsize=(21, 6))
+    ax_mesh = fig.add_subplot(1, 3, 1, projection="3d")
+    ax_min  = fig.add_subplot(1, 3, 2, projection="3d")
+    ax_max  = fig.add_subplot(1, 3, 3, projection="3d")
 
-    for ax in (left, right):
+    # Panel 1 — plain dendrite mesh
+    _plot_mesh(ax_mesh, original, alpha=0.22)
+    ax_mesh.set_title("Dendrite mesh")
+    _set_axes_equal(ax_mesh, original.vertices)
+
+    # Panel 2 — minimum distance pair (green)
+    _plot_mesh(ax_min, method_mesh, alpha=0.18)
+    ax_min.scatter(projected[:, 0], projected[:, 1], projected[:, 2], c="#1f77b4", s=24)
+    ax_min.scatter(
+        projected[list(min_pair), 0], projected[list(min_pair), 1], projected[list(min_pair), 2],
+        c="#2ca02c", s=65,
+    )
+    min_path = (result.paths or {}).get(tuple(min_pair))
+    if min_path is not None and len(min_path) > 0:
+        ax_min.plot(min_path[:, 0], min_path[:, 1], min_path[:, 2], color="#2ca02c", linewidth=2.5)
+    ax_min.set_title(f"{result.method} — min d={min_dist:.3f}")
+    _set_axes_equal(ax_min, np.vstack((method_mesh.vertices, projected)))
+
+    # Panel 3 — maximum distance pair (red)
+    _plot_mesh(ax_max, method_mesh, alpha=0.18)
+    ax_max.scatter(projected[:, 0], projected[:, 1], projected[:, 2], c="#1f77b4", s=24)
+    ax_max.scatter(
+        projected[list(max_pair), 0], projected[list(max_pair), 1], projected[list(max_pair), 2],
+        c="#d62728", s=65,
+    )
+    max_path = (result.paths or {}).get(tuple(max_pair))
+    if max_path is not None and len(max_path) > 0:
+        ax_max.plot(max_path[:, 0], max_path[:, 1], max_path[:, 2], color="#d62728", linewidth=2.5)
+    ax_max.set_title(f"{result.method} — max d={max_dist:.3f}, t={result.elapsed_seconds:.3f}s")
+    _set_axes_equal(ax_max, np.vstack((method_mesh.vertices, projected)))
+
+    for ax in (ax_mesh, ax_min, ax_max):
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_zlabel("z")
@@ -664,6 +887,129 @@ def visualize_distance_result(
     if save_path is not None:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=200)
+    return fig
+
+
+def visualize_distance_result_3d(
+    original_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    result: DistanceMatrixResult,
+    min_pair: Optional[Tuple[int, int]] = None,
+    max_pair: Optional[Tuple[int, int]] = None,
+    save_path: Optional[str] = None,
+) -> Optional[Any]:
+    """Interactive Plotly 3-D figure: plain mesh | min-distance path (green) | max-distance path (red)."""
+    if not _PLOTLY_AVAILABLE:
+        return None
+
+    original = polyhedron_to_trimesh(original_mesh)
+    points = _as_points(attachment_points)
+
+    if min_pair is None:
+        min_pair = _min_pair(result.distance_matrix)
+    if max_pair is None:
+        max_pair = _default_pair(result.distance_matrix)
+
+    method_mesh = result.mesh if result.mesh is not None else original
+    projected = result.projected_points if result.projected_points is not None else points
+    min_dist = result.distance_matrix[min_pair[0], min_pair[1]] if result.distance_matrix.size else float("nan")
+    max_dist = result.distance_matrix[max_pair[0], max_pair[1]] if result.distance_matrix.size else float("nan")
+
+    fig = _make_subplots(
+        rows=1,
+        cols=3,
+        specs=[[{"type": "scene"}, {"type": "scene"}, {"type": "scene"}]],
+        subplot_titles=(
+            "Dendrite mesh",
+            f"{result.method} — min d={min_dist:.3f}",
+            f"{result.method} — max d={max_dist:.3f}, t={result.elapsed_seconds:.3f}s",
+        ),
+    )
+
+    def _add_mesh(mesh: trimesh.Trimesh, col: int, color: str = "lightgray") -> None:
+        v = np.asarray(mesh.vertices, dtype=float)
+        f = np.asarray(mesh.faces, dtype=int)
+        fig.add_trace(
+            _go.Mesh3d(
+                x=v[:, 0], y=v[:, 1], z=v[:, 2],
+                i=f[:, 0], j=f[:, 1], k=f[:, 2],
+                opacity=0.25, color=color, showscale=False,
+                hoverinfo="skip", name="mesh",
+            ),
+            row=1, col=col,
+        )
+
+    # Col 1 — plain dendrite mesh
+    _add_mesh(original, col=1)
+
+    # Col 2 — minimum distance pair (green)
+    _add_mesh(method_mesh, col=2, color="lightsteelblue")
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[:, 0], y=projected[:, 1], z=projected[:, 2],
+            mode="markers", marker=dict(size=4, color="steelblue"),
+            showlegend=False,
+        ),
+        row=1, col=2,
+    )
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[list(min_pair), 0], y=projected[list(min_pair), 1], z=projected[list(min_pair), 2],
+            mode="markers", marker=dict(size=10, color="green"),
+            showlegend=False,
+        ),
+        row=1, col=2,
+    )
+    min_path = (result.paths or {}).get(tuple(min_pair))
+    if min_path is not None and len(min_path) > 0:
+        fig.add_trace(
+            _go.Scatter3d(
+                x=min_path[:, 0], y=min_path[:, 1], z=min_path[:, 2],
+                mode="lines", line=dict(color="green", width=6),
+                showlegend=False,
+            ),
+            row=1, col=2,
+        )
+
+    # Col 3 — maximum distance pair (red)
+    _add_mesh(method_mesh, col=3, color="lightsteelblue")
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[:, 0], y=projected[:, 1], z=projected[:, 2],
+            mode="markers", marker=dict(size=4, color="steelblue"),
+            showlegend=False,
+        ),
+        row=1, col=3,
+    )
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[list(max_pair), 0], y=projected[list(max_pair), 1], z=projected[list(max_pair), 2],
+            mode="markers", marker=dict(size=10, color="crimson"),
+            showlegend=False,
+        ),
+        row=1, col=3,
+    )
+    max_path = (result.paths or {}).get(tuple(max_pair))
+    if max_path is not None and len(max_path) > 0:
+        fig.add_trace(
+            _go.Scatter3d(
+                x=max_path[:, 0], y=max_path[:, 1], z=max_path[:, 2],
+                mode="lines", line=dict(color="crimson", width=6),
+                showlegend=False,
+            ),
+            row=1, col=3,
+        )
+
+    fig.update_layout(
+        title=f"{result.method} — min d={min_dist:.4f}  |  max d={max_dist:.4f}  |  t={result.elapsed_seconds:.3f}s",
+        height=620,
+        margin=dict(l=0, r=0, b=0, t=70),
+    )
+
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+
     return fig
 
 
@@ -708,17 +1054,45 @@ def save_distance_method_comparison(
         pair_for_path=pair_for_path,
     )
 
+    # Compute per-result min and max pairs and their paths
+    for result in results.values():
+        min_p = _min_pair(result.distance_matrix)
+        max_p = _default_pair(result.distance_matrix)
+        min_path = _recompute_path_for_result(result, min_p)
+        max_path = _recompute_path_for_result(result, max_p)
+        result.paths = {}
+        if min_path is not None:
+            result.paths[min_p] = min_path
+        if max_path is not None:
+            result.paths[max_p] = max_path
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata["min_pair"] = min_p
+        result.metadata["max_pair"] = max_p
+
     summary = summarize_distance_results(results)
     summary.to_csv(output_path / "distance_methods_summary.csv", index=False)
 
     original = polyhedron_to_trimesh(dendrite_mesh)
     for method, result in results.items():
         np.savetxt(output_path / f"{method}_distance_matrix.csv", result.distance_matrix, delimiter=",")
+        min_p = (result.metadata or {}).get("min_pair")
+        max_p = (result.metadata or {}).get("max_pair")
         visualize_distance_result(
             original,
             attachment_points,
             result,
+            min_pair=min_p,
+            max_pair=max_p,
             save_path=str(output_path / f"{method}_visualization.png"),
+        )
+        visualize_distance_result_3d(
+            original,
+            attachment_points,
+            result,
+            min_pair=min_p,
+            max_pair=max_p,
+            save_path=str(output_path / f"{method}_visualization_3d.html"),
         )
         plt.close("all")
 
