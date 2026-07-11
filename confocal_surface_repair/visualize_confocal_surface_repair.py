@@ -13,11 +13,12 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from confocal_surface_repair.run_confocal_surface_repair import (
     DATASETS,
-    RESOURCES_DIR,
     Z_SCALE,
     combine_pickles,
     convex_bridge,
     distance3d,
+    get_lookup_name,
+    get_pickle_dir,
     get_spine_long,
     project_point_to_mesh_surface,
     union_meshes,
@@ -27,6 +28,11 @@ from spine_analysis.shape_metric.utils import _calculate_junction_center, _get_j
 
 
 DATASET_BY_FOLDER = {dataset.folder: dataset for dataset in DATASETS}
+
+
+def get_dataset_for_dir(project_root: Path, dataset_dir: Path):
+    dataset_folder = dataset_dir.relative_to(project_root).as_posix()
+    return DATASET_BY_FOLDER[dataset_folder]
 
 
 def load_name_mapping(dataset_dir: Path) -> tuple[dict[str, str], dict[str, str]]:
@@ -47,19 +53,25 @@ def load_name_mapping(dataset_dir: Path) -> tuple[dict[str, str], dict[str, str]
 
 
 def resolve_spine_identifier(project_root: Path, spine_id: str) -> tuple[Path, str, str]:
-    if "/" not in spine_id:
-        raise ValueError("Use spine id in format 'Mouse_basal/spine_0' or 'Mouse_basal/original_name'.")
+    matching_folders = [
+        folder for folder in DATASET_BY_FOLDER if spine_id.startswith(f"{folder}/")
+    ]
+    if not matching_folders:
+        raise ValueError(
+            "Use a known dataset path followed by a mesh name, for example "
+            "'Mouse_basal/spine_0' or 'Mouse_Apical/Mouse_Apical_1/spine_0'."
+        )
 
-    dataset_folder, spine_name = spine_id.split("/", 1)
-    if dataset_folder not in DATASET_BY_FOLDER:
-        raise ValueError(f"Unknown dataset folder: {dataset_folder}")
+    dataset_folder = max(matching_folders, key=len)
+    spine_name = spine_id[len(dataset_folder) + 1 :]
+    dataset = DATASET_BY_FOLDER[dataset_folder]
 
     dataset_dir = project_root / dataset_folder
     new_to_original, original_to_new = load_name_mapping(dataset_dir)
 
     if (dataset_dir / f"{spine_name}.off").exists():
         current_name = spine_name
-        lookup_name = new_to_original.get(spine_name, spine_name)
+        lookup_name = get_lookup_name(dataset, spine_name, new_to_original)
         return dataset_dir, current_name, lookup_name
 
     if spine_name in original_to_new:
@@ -75,8 +87,8 @@ def resolve_spine_identifier(project_root: Path, spine_id: str) -> tuple[Path, s
 
 def get_spine_points(project_root: Path, spine_id: str) -> tuple[np.ndarray, Path, Path]:
     dataset_dir, current_name, lookup_name = resolve_spine_identifier(project_root, spine_id)
-    dataset = DATASET_BY_FOLDER[dataset_dir.name]
-    longs_df = combine_pickles(RESOURCES_DIR, dataset.pkl_files)
+    dataset = get_dataset_for_dir(project_root, dataset_dir)
+    longs_df = combine_pickles(get_pickle_dir(dataset, project_root), dataset.pkl_files)
     path_points = np.asarray(longs_df["longs"][lookup_name], dtype=float).copy()
     path_points[:, 2] *= Z_SCALE
 
@@ -830,8 +842,8 @@ def plot_repair_comparison_interactive(
 def debug_spine_repair(project_root: str | Path, spine_id: str, project_attachment_to_surface: bool = False) -> dict:
     project_root = Path(project_root)
     dataset_dir, current_name, lookup_name = resolve_spine_identifier(project_root, spine_id)
-    dataset = DATASET_BY_FOLDER[dataset_dir.name]
-    longs_df = combine_pickles(RESOURCES_DIR, dataset.pkl_files)
+    dataset = get_dataset_for_dir(project_root, dataset_dir)
+    longs_df = combine_pickles(get_pickle_dir(dataset, project_root), dataset.pkl_files)
 
     mesh_path = dataset_dir / f"{current_name}.off"
     mesh = trimesh.load(mesh_path, force="mesh")

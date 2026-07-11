@@ -31,26 +31,38 @@ class DatasetConfig:
     radius: float
     pkl_files: tuple[str, ...]
     renamed_meshes: bool = False
+    pkl_folder: str | None = None
+    lookup_prefix: str = ""
+    lookup_suffix: str = ""
 
 
 DATASETS: tuple[DatasetConfig, ...] = (
     DatasetConfig(
-        folder="Mouse_Apical_1",
+        folder="Mouse_Apical/Mouse_Apical_1",
         repair_kind="mouse",
         radius=0.14,
         pkl_files=("SpineID2longs.pkl",),
+        pkl_folder="Mouse_Apical",
+        lookup_prefix="apical1_",
+        lookup_suffix="_R",
     ),
     DatasetConfig(
-        folder="Mouse_Apical_2",
+        folder="Mouse_Apical/Mouse_Apical_2",
         repair_kind="mouse",
         radius=0.14,
         pkl_files=("SpineID2longs.pkl",),
+        pkl_folder="Mouse_Apical",
+        lookup_prefix="apical2_",
+        lookup_suffix="_R",
     ),
     DatasetConfig(
-        folder="Mouse_Apical_3",
+        folder="Mouse_Apical/Mouse_Apical_3",
         repair_kind="mouse",
         radius=0.14,
         pkl_files=("SpineID2longs.pkl",),
+        pkl_folder="Mouse_Apical",
+        lookup_prefix="apical3_",
+        lookup_suffix="_R",
     ),
     DatasetConfig(
         folder="Mouse_basal",
@@ -120,6 +132,25 @@ def combine_pickles(resource_dir: Path, pickle_names: Iterable[str]) -> pd.DataF
     if len(frames) == 1:
         return frames[0]
     return pd.concat(frames, axis=0)
+
+
+def get_pickle_dir(dataset: DatasetConfig, project_root: Path) -> Path:
+    if dataset.pkl_folder is not None:
+        return project_root / dataset.pkl_folder
+    return RESOURCES_DIR
+
+
+def get_lookup_name(dataset: DatasetConfig, mesh_name: str, name_mapping: dict[str, str]) -> str:
+    lookup_name = name_mapping.get(mesh_name, mesh_name)
+    if not dataset.lookup_prefix and not dataset.lookup_suffix:
+        return lookup_name
+
+    match = re.fullmatch(r"spine_(\d+)", lookup_name)
+    if match is None:
+        raise ValueError(
+            f"Expected mesh name in format 'spine_N' for {dataset.folder}, got: {mesh_name}"
+        )
+    return f"{dataset.lookup_prefix}{match.group(1)}{dataset.lookup_suffix}"
 
 
 def init_worker(resource_dir: str, pickle_names: tuple[str, ...], project_attachment_to_surface: bool) -> None:
@@ -294,6 +325,12 @@ def run_dataset(dataset: DatasetConfig, project_root: Path) -> dict[str, int]:
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Dataset folder not found: {dataset_dir}")
 
+    pickle_dir = get_pickle_dir(dataset, project_root)
+    for pickle_name in dataset.pkl_files:
+        pickle_path = pickle_dir / pickle_name
+        if not pickle_path.is_file():
+            raise FileNotFoundError(f"Attachment points file not found: {pickle_path}")
+
     name_mapping = load_name_mapping(dataset_dir) if dataset.renamed_meshes else {}
     mesh_paths = sorted(dataset_dir.glob("*.off"), key=lambda path: natural_keys(path.name))
 
@@ -316,7 +353,7 @@ def run_dataset(dataset: DatasetConfig, project_root: Path) -> dict[str, int]:
             str(mesh_path),
             dataset.radius,
             dataset.repair_kind,
-            name_mapping.get(mesh_path.stem, mesh_path.stem),
+            get_lookup_name(dataset, mesh_path.stem, name_mapping),
             str(dataset_dir / "repair" / mesh_path.name),
             dataset.folder,
         )
@@ -332,7 +369,7 @@ def run_dataset(dataset: DatasetConfig, project_root: Path) -> dict[str, int]:
     )
 
     if processes <= 1 or len(tasks) <= 1:
-        init_worker(str(RESOURCES_DIR), dataset.pkl_files, PROJECT_ATTACHMENT_TO_SURFACE)
+        init_worker(str(pickle_dir), dataset.pkl_files, PROJECT_ATTACHMENT_TO_SURFACE)
         for completed, task in enumerate(tasks, start=1):
             status, mesh_name, projected_attachment_center = process_mesh_task(task)
             stats[status] += 1
@@ -351,7 +388,7 @@ def run_dataset(dataset: DatasetConfig, project_root: Path) -> dict[str, int]:
         with Pool(
             processes=processes,
             initializer=init_worker,
-            initargs=(str(RESOURCES_DIR), dataset.pkl_files, PROJECT_ATTACHMENT_TO_SURFACE),
+            initargs=(str(pickle_dir), dataset.pkl_files, PROJECT_ATTACHMENT_TO_SURFACE),
         ) as pool:
             for completed, (status, mesh_name, projected_attachment_center) in enumerate(
                 pool.imap_unordered(process_mesh_task, tasks, chunksize=chunk_size),
