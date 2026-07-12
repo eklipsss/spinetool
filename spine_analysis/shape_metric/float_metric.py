@@ -12,6 +12,25 @@ from CGAL.CGAL_Polyhedron_3 import Polyhedron_3
 from spine_analysis.shape_metric.metric_core import SpineMetric
 
 
+def _safe_trimesh_volume(spine_mesh: trimesh.Trimesh) -> float:
+    value = float(spine_mesh.volume)
+    if not np.isfinite(value):
+        return 0.0
+    return abs(value)
+
+
+def _safe_trimesh_convex_hull_volume(spine_mesh: trimesh.Trimesh) -> float:
+    vertices = np.asarray(spine_mesh.vertices, dtype=float)
+    finite_vertices = vertices[np.isfinite(vertices).all(axis=1)]
+    if len(np.unique(finite_vertices, axis=0)) < 4:
+        return 0.0
+    try:
+        value = float(spine_mesh.convex_hull.volume)
+    except Exception:
+        return 0.0
+    return value if np.isfinite(value) else 0.0
+
+
 class FloatSpineMetric(SpineMetric, ABC):
     def show(self) -> widgets.Widget:
         return widgets.Label(f"{self._value:.2f}")
@@ -28,14 +47,14 @@ class FloatSpineMetric(SpineMetric, ABC):
 class VolumeSpineMetric(FloatSpineMetric):
     def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
         if isinstance(spine_mesh, trimesh.Trimesh):
-            return abs(float(spine_mesh.volume))
+            return _safe_trimesh_volume(spine_mesh)
         return abs(volume(spine_mesh))
 
 
 class ConvexHullVolumeSpineMetric(FloatSpineMetric):
     def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
         if isinstance(spine_mesh, trimesh.Trimesh):
-            return float(spine_mesh.convex_hull.volume)
+            return _safe_trimesh_convex_hull_volume(spine_mesh)
         hull_mesh = Polyhedron_3()
         convex_hull_3(spine_mesh.points(), hull_mesh)
         return volume(hull_mesh)
@@ -44,10 +63,10 @@ class ConvexHullVolumeSpineMetric(FloatSpineMetric):
 class ConvexHullRatioSpineMetric(FloatSpineMetric):
     def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
         if isinstance(spine_mesh, trimesh.Trimesh):
-            v = abs(float(spine_mesh.volume))
+            v = _safe_trimesh_volume(spine_mesh)
             if v <= 0:
                 return np.nan
-            return (float(spine_mesh.convex_hull.volume) - v) / v
+            return (_safe_trimesh_convex_hull_volume(spine_mesh) - v) / v
         hull_mesh = Polyhedron_3()
         convex_hull_3(spine_mesh.points(), hull_mesh)
         v = abs(volume(spine_mesh))
