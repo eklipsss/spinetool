@@ -2,11 +2,62 @@ from .dependencies import *
 from .config import *
 from .metrics import *
 from .spine import Spine
-from .surface_distances import save_distance_method_comparison, calculate_spine_distance_matrices
+from .surface_distances import (
+    calculate_spine_distance_matrices,
+    polyhedron_to_trimesh,
+    save_distance_method_comparison,
+)
+
+
+def _fallback_dendrite_length_any_mesh(dendr_mesh: Any) -> float:
+    tm = polyhedron_to_trimesh(dendr_mesh)
+    vertices = np.asarray(tm.vertices, dtype=float)
+    if len(vertices) < 2:
+        return 0.0
+    center = vertices.mean(axis=0)
+    _, _, vh = np.linalg.svd(vertices - center, full_matrices=False)
+    axis = vh[0]
+    projections = (vertices - center) @ axis
+    length = float(projections.max() - projections.min())
+    print(f"  length (PCA fallback, no skeleton) = {length:.2f}")
+    return length
+
+
+def _fallback_dendrite_volume_any_mesh(dendr_mesh: Any) -> float:
+    tm = polyhedron_to_trimesh(dendr_mesh)
+    raw_volume = getattr(tm, "volume", None)
+    if raw_volume is not None and np.isfinite(raw_volume) and abs(float(raw_volume)) > 0:
+        return abs(float(raw_volume))
+
+    try:
+        hull_volume = float(tm.convex_hull.volume)
+        if np.isfinite(hull_volume) and hull_volume > 0:
+            import warnings
+            warnings.warn(
+                "Dendrite volume is unavailable for this mesh; using convex-hull volume "
+                "as an approximation.",
+                stacklevel=2,
+            )
+            return hull_volume
+    except Exception:
+        pass
+
+    vertices = np.asarray(tm.vertices, dtype=float)
+    if len(vertices) < 3:
+        return 0.0
+    length = max(_fallback_dendrite_length_any_mesh(tm), 1e-12)
+    center = vertices.mean(axis=0)
+    _, _, vh = np.linalg.svd(vertices - center, full_matrices=False)
+    axis = vh[0]
+    axial = (vertices - center) @ axis
+    projected = np.outer(axial, axis)
+    radial_distances = np.linalg.norm((vertices - center) - projected, axis=1)
+    radius = float(np.median(radial_distances))
+    return float(math.pi * radius * radius * length)
 
 class Dendrite:
     name: str
-    mesh: Polyhedron_3
+    mesh: Any
     spines: List[Spine] = []
     spine_meshes: MeshDataset
 
@@ -157,7 +208,7 @@ class Dendrite:
 
         if dendrite_meshes is not None:
             spines_len = [spine.metrics['Length'] for spine in self.spines]
-            self.dr = max(spines_len)/2
+            self.dr = max(spines_len)/2 if spines_len else 0
             self.volume_around_dendr = math.pi*self.length*((self.radius + self.dr)**2 - self.radius**2)
 
         # if self.cylindr_flag:
@@ -181,7 +232,19 @@ class Dendrite:
             self.name = dendr_name
             print(f'Dendrite {dendr_name}')
             self.mesh = dendr_mesh
-            raw_vol = volume(dendr_mesh)
+            try:
+                if isinstance(dendr_mesh, Polyhedron_3):
+                    raw_vol = volume(dendr_mesh)
+                else:
+                    raw_vol = _fallback_dendrite_volume_any_mesh(dendr_mesh)
+            except Exception as exc:
+                import warnings
+                warnings.warn(
+                    f"CGAL/trimesh volume calculation unavailable for '{dendr_name}' "
+                    f"({exc}); using fallback volume approximation.",
+                    stacklevel=2,
+                )
+                raw_vol = _fallback_dendrite_volume_any_mesh(dendr_mesh)
             if raw_vol < 0:
                 import warnings
                 warnings.warn(
@@ -193,8 +256,13 @@ class Dendrite:
             print(f'  dendr_volume = {self.volume:.2f}')
 
             try:
+                if not isinstance(dendr_mesh, Polyhedron_3):
+                    raise TypeError(
+                        "CGAL skeletonization requires Polyhedron_3; "
+                        f"got {type(dendr_mesh).__name__}"
+                    )
                 sceleton_vecs, skeleton_line_set = get_sceleton_vecs(dendr_mesh)  # векторы скелета дендрита (без шипиков)
-                skeleton_ok = True
+                self.length = calculate_LengthDendriteMetric(sceleton_vecs, skeleton_line_set)
             except Exception as exc:
                 import warnings
                 warnings.warn(
@@ -202,13 +270,16 @@ class Dendrite:
                     f"({exc}); falling back to a PCA-based length approximation.",
                     stacklevel=2,
                 )
-                skeleton_ok = False
-
-        if skeleton_ok:
-            self.length = calculate_LengthDendriteMetric(sceleton_vecs, skeleton_line_set)
-        else:
-            self.length = fallback_dendrite_length(dendr_mesh)
-        self.radius = math.sqrt(self.volume/(math.pi*self.length))
+                self.length = _fallback_dendrite_length_any_mesh(dendr_mesh)
+            if self.length <= 0:
+                import warnings
+                warnings.warn(
+                    f"Length for '{dendr_name}' is non-positive ({self.length}); "
+                    "using 1.0 to avoid division by zero in radius calculation.",
+                    stacklevel=2,
+                )
+                self.length = 1.0
+            self.radius = math.sqrt(self.volume/(math.pi*self.length))
         # print(f'  dendr_len = {self.length:.2f}')
         # print(f'  dendr_radius = {self.radius:.2f}')
 
