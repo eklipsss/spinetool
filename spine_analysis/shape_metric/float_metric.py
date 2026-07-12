@@ -2,6 +2,7 @@ from abc import ABC
 from typing import List, Any
 
 import numpy as np
+import trimesh
 from ipywidgets import widgets
 from matplotlib import pyplot as plt
 
@@ -26,11 +27,15 @@ class FloatSpineMetric(SpineMetric, ABC):
 
 class VolumeSpineMetric(FloatSpineMetric):
     def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
+        if isinstance(spine_mesh, trimesh.Trimesh):
+            return abs(float(spine_mesh.volume))
         return abs(volume(spine_mesh))
 
 
 class ConvexHullVolumeSpineMetric(FloatSpineMetric):
     def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
+        if isinstance(spine_mesh, trimesh.Trimesh):
+            return float(spine_mesh.convex_hull.volume)
         hull_mesh = Polyhedron_3()
         convex_hull_3(spine_mesh.points(), hull_mesh)
         return volume(hull_mesh)
@@ -38,6 +43,11 @@ class ConvexHullVolumeSpineMetric(FloatSpineMetric):
 
 class ConvexHullRatioSpineMetric(FloatSpineMetric):
     def _calculate(self, spine_mesh: Polyhedron_3) -> Any:
+        if isinstance(spine_mesh, trimesh.Trimesh):
+            v = abs(float(spine_mesh.volume))
+            if v <= 0:
+                return np.nan
+            return (float(spine_mesh.convex_hull.volume) - v) / v
         hull_mesh = Polyhedron_3()
         convex_hull_3(spine_mesh.points(), hull_mesh)
         v = abs(volume(spine_mesh))

@@ -206,14 +206,67 @@ def _skeleton_segments(dendrite_mesh: Any) -> List[Tuple[np.ndarray, np.ndarray]
     return segments
 
 
-def _fallback_centerline(mesh: trimesh.Trimesh, samples: int = 32) -> np.ndarray:
+def _pca_centerline(mesh: trimesh.Trimesh, samples: int = 32) -> np.ndarray:
     vertices = np.asarray(mesh.vertices, dtype=float)
+    if len(vertices) == 0:
+        return np.zeros((0, 3), dtype=float)
     center = vertices.mean(axis=0)
     _, _, vh = np.linalg.svd(vertices - center, full_matrices=False)
     axis = vh[0]
     positions = (vertices - center) @ axis
     line_values = np.linspace(positions.min(), positions.max(), samples)
     return center + line_values[:, None] * axis[None, :]
+
+
+def _graph_diameter_centerline(mesh: trimesh.Trimesh) -> np.ndarray:
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    if len(vertices) < 2:
+        return vertices.copy()
+
+    graph = _mesh_edge_graph(mesh)
+    if graph.shape[0] < 2 or graph.nnz == 0:
+        return _pca_centerline(mesh)
+
+    seed = int(np.argmax(np.linalg.norm(vertices - vertices.mean(axis=0), axis=1)))
+    distances = dijkstra(graph, directed=False, indices=seed)
+    finite = np.isfinite(distances)
+    if not np.any(finite):
+        return _pca_centerline(mesh)
+    endpoint_a = int(np.argmax(np.where(finite, distances, -np.inf)))
+
+    distances, predecessors = dijkstra(
+        graph,
+        directed=False,
+        indices=endpoint_a,
+        return_predecessors=True,
+    )
+    finite = np.isfinite(distances)
+    if not np.any(finite):
+        return _pca_centerline(mesh)
+    endpoint_b = int(np.argmax(np.where(finite, distances, -np.inf)))
+
+    path_ids = _reconstruct_path(predecessors, endpoint_a, endpoint_b)
+    if len(path_ids) < 2:
+        return _pca_centerline(mesh)
+    return vertices[np.asarray(path_ids, dtype=int)]
+
+
+def _fallback_centerline(mesh: trimesh.Trimesh, samples: int = 32) -> np.ndarray:
+    try:
+        centerline = _graph_diameter_centerline(mesh)
+        if len(centerline) >= 2:
+            return centerline
+    except Exception:
+        pass
+    return _pca_centerline(mesh, samples=samples)
+
+
+def centerline_length_from_mesh(mesh: Any) -> float:
+    tm = polyhedron_to_trimesh(mesh)
+    centerline = _fallback_centerline(tm)
+    if len(centerline) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(centerline, axis=0), axis=1).sum())
 
 
 def _ordered_centerline_from_segments(

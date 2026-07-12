@@ -4,22 +4,15 @@ from .metrics import *
 from .spine import Spine
 from .surface_distances import (
     calculate_spine_distance_matrices,
+    centerline_length_from_mesh,
     polyhedron_to_trimesh,
     save_distance_method_comparison,
 )
 
 
 def _fallback_dendrite_length_any_mesh(dendr_mesh: Any) -> float:
-    tm = polyhedron_to_trimesh(dendr_mesh)
-    vertices = np.asarray(tm.vertices, dtype=float)
-    if len(vertices) < 2:
-        return 0.0
-    center = vertices.mean(axis=0)
-    _, _, vh = np.linalg.svd(vertices - center, full_matrices=False)
-    axis = vh[0]
-    projections = (vertices - center) @ axis
-    length = float(projections.max() - projections.min())
-    print(f"  length (PCA fallback, no skeleton) = {length:.2f}")
+    length = centerline_length_from_mesh(dendr_mesh)
+    print(f"  length (mesh-graph centerline fallback) = {length:.2f}")
     return length
 
 
