@@ -23,9 +23,19 @@ plt.rcParams['axes.facecolor'] = 'white'
 
 plt.rcParams.update({'font.size': 18})
 
-spine_metrics_name = ["OpenAngle", "CVD", "AverageDistance",
-        "LengthVolumeRatio", "LengthAreaRatio", "JunctionArea",
-        "Length", "Area", "Volume", "ConvexHullVolume", "ConvexHullRatio"]
+spine_metrics_name = [
+    # "OpenAngle",
+    # "CVD",
+    # "AverageDistance",
+    # "LengthVolumeRatio",
+    # "LengthAreaRatio",
+    # "JunctionArea",
+    "Length",
+    # "Area",
+    "Volume",
+    # "ConvexHullVolume",
+    # "ConvexHullRatio",
+]
 
 spine_metric_classes = {
     "OpenAngleSpineMetric": OpenAngleSpineMetric,

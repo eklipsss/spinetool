@@ -3,6 +3,7 @@ from .config import *
 from .metrics import *
 from .spine import Spine
 from .surface_distances import (
+    calculate_mesh_graph_distance_matrix,
     calculate_spine_distance_matrices,
     centerline_length_from_mesh,
     polyhedron_to_trimesh,
@@ -342,17 +343,9 @@ class Dendrite:
             s.add_spine_cluster()
 
     def load_grouping_metrics(self) -> None:
-        metric_dict_for_autocorr = { "OpenAngle" : [spine.metrics['OpenAngle'] for spine in self.spines], 
-                                    "CVD" : [spine.metrics['CVD'] for spine in self.spines],
-                                    "AverageDistance" : [spine.metrics['AverageDistance'] for spine in self.spines],
-                                    "LengthVolumeRatio" : [spine.metrics['LengthVolumeRatio'] for spine in self.spines],
-                                    "LengthAreaRatio" : [spine.metrics['LengthAreaRatio'] for spine in self.spines],
-                                    "JunctionArea" : [spine.metrics['JunctionArea'] for spine in self.spines],
-                                    "Length" :  [spine.metrics['Length'] for spine in self.spines],  
-                                    "Area" :  [spine.metrics['Area'] for spine in self.spines],  
-                                    "Volume" :  [spine.metrics['Volume'] for spine in self.spines], 
-                                    "ConvexHullVolume" :  [spine.metrics['ConvexHullVolume'] for spine in self.spines],  
-                                    "ConvexHullRatio" :  [spine.metrics['ConvexHullRatio'] for spine in self.spines] } 
+        metric_dict_for_autocorr = {
+            "Volume": [spine.metrics['Volume'] for spine in self.spines],
+        }
                 
         # with open('metrics/grouping_dendr_metrics.json', 'r') as f:
         with open('input/grouping_dendr_metrics.json', 'r') as f:
@@ -376,15 +369,17 @@ class Dendrite:
 
 
         if self.cylindr_flag:
-            self.nndist_c = loaded_dict[self.name]['NNdist_c']
-            self.nndist_norm_c = loaded_dict[self.name]['NNdist_norm_c']
-            self.r_values_c = loaded_dict[self.name]['r_values_c']
-            self.pcf_values_c = loaded_dict[self.name]['PCF_values_c']
-            self.entropy_c = loaded_dict[self.name]['Entropy_c']
+            # Старые файлы могли хранить отдельные cylindrical-метрики с суффиксом _c.
+            # В новых файлах они не сохраняются: mesh_graph-метрики лежат в обычных полях.
+            self.nndist_c = loaded_dict[self.name].get('NNdist_c', self.nndist)
+            self.nndist_norm_c = loaded_dict[self.name].get('NNdist_norm_c', self.nndist_norm)
+            self.r_values_c = loaded_dict[self.name].get('r_values_c', self.r_values)
+            self.pcf_values_c = loaded_dict[self.name].get('PCF_values_c', self.pcf_values)
+            self.entropy_c = loaded_dict[self.name].get('Entropy_c', self.entropy)
 
-            self.moran_I_c = loaded_dict[self.name]['Moran_I_c']
-            self.moran_z_c = loaded_dict[self.name]['Moran_zI_c']
-            self.moran_p_c = loaded_dict[self.name]['Moran_p_c']
+            self.moran_I_c = loaded_dict[self.name].get('Moran_I_c', self.moran_I)
+            self.moran_z_c = loaded_dict[self.name].get('Moran_zI_c', self.moran_z)
+            self.moran_p_c = loaded_dict[self.name].get('Moran_p_c', self.moran_p)
 
             # self.getis_ord_G_c = loaded_dict[self.name]['Getis_Ord_G_c']
             # self.getis_ord_z_c = loaded_dict[self.name]['Getis_Ord_zG_c']
@@ -403,37 +398,73 @@ class Dendrite:
         self.dbscan_noise = loaded_dict[self.name]['DBscan_noise']
 
         if self.cylindr_flag:
-            self.dbscan_eps_c = loaded_dict[self.name]['DBscan_eps_c']
-            self.dbscan_min_samples_c = loaded_dict[self.name]['DBscan_min_samples_c']
-            self.dbscan_statistic_c = loaded_dict[self.name]['DBscan_statistic_c']
-            self.dbscan_p_value_c = loaded_dict[self.name]['DBscan_p_value_c']
-            self.dbscan_noise_c = loaded_dict[self.name]['DBscan_noise_c']
+            # Старые файлы могли хранить отдельные cylindrical-метрики с суффиксом _c.
+            # В новых файлах они не сохраняются: mesh_graph-метрики лежат в обычных полях.
+            self.dbscan_eps_c = loaded_dict[self.name].get('DBscan_eps_c', self.dbscan_eps)
+            self.dbscan_min_samples_c = loaded_dict[self.name].get('DBscan_min_samples_c', self.dbscan_min_samples)
+            self.dbscan_statistic_c = loaded_dict[self.name].get('DBscan_statistic_c', self.dbscan_statistic)
+            self.dbscan_p_value_c = loaded_dict[self.name].get('DBscan_p_value_c', self.dbscan_p_value)
+            self.dbscan_noise_c = loaded_dict[self.name].get('DBscan_noise_c', self.dbscan_noise)
+
+    def get_spine_distance_points(self) -> List[Tuple[float, float, float]]:
+        return [s.junction_center_coord for s in self.spines]
+
+    def get_mesh_graph_distance_matrix(self) -> np.ndarray:
+        if hasattr(self, "mesh_graph_distance_matrix"):
+            return self.mesh_graph_distance_matrix
+        if not hasattr(self, "mesh"):
+            raise ValueError(
+                "Mesh-graph distances require Dendrite.mesh. "
+                "Create Dendrite with dendrite_meshes."
+            )
+        points = self.get_spine_distance_points()
+        if len(points) == 0:
+            self.mesh_graph_distance_matrix = np.zeros((0, 0), dtype=float)
+            return self.mesh_graph_distance_matrix
+        result = calculate_mesh_graph_distance_matrix(self.mesh, points)
+        self.mesh_graph_distance_matrix = np.asarray(result.distance_matrix, dtype=float)
+        return self.mesh_graph_distance_matrix
 
     def calculate_grouping_metrics(self) -> None:
         # metric_dict_for_autocorr = { 'Volume': [spine.metrics['Volume'] for spine in self.spines] } 
-        metric_dict_for_autocorr = { "OpenAngle" : [spine.metrics['OpenAngle'] for spine in self.spines], 
-                                    "CVD" : [spine.metrics['CVD'] for spine in self.spines],
-                                    "AverageDistance" : [spine.metrics['AverageDistance'] for spine in self.spines],
-                                    "LengthVolumeRatio" : [spine.metrics['LengthVolumeRatio'] for spine in self.spines],
-                                    "LengthAreaRatio" : [spine.metrics['LengthAreaRatio'] for spine in self.spines],
-                                    "JunctionArea" : [spine.metrics['JunctionArea'] for spine in self.spines],
-                                    "Length" :  [spine.metrics['Length'] for spine in self.spines],  
-                                    "Area" :  [spine.metrics['Area'] for spine in self.spines],  
-                                    "Volume" :  [spine.metrics['Volume'] for spine in self.spines], 
-                                    "ConvexHullVolume" :  [spine.metrics['ConvexHullVolume'] for spine in self.spines],  
-                                    "ConvexHullRatio" :  [spine.metrics['ConvexHullRatio'] for spine in self.spines] } 
+        metric_dict_for_autocorr = {
+            "Volume": [spine.metrics['Volume'] for spine in self.spines],
+        }
 
-        self.nndist, self.nndist_norm = calculate_NNDist(self.center_coords, self.volume_around_dendr, 0)
-        self.r_values, self.pcf_values = calculate_PCF(self.center_coords, self.volume_around_dendr, self.radius, self.dr, self.length, False)
+        mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
+        distance_points = self.get_spine_distance_points()
+        self.nndist, self.nndist_norm = calculate_NNDist(
+            distance_points,
+            self.volume_around_dendr,
+            0,
+            distance_matrix=mesh_graph_distance_matrix,
+        )
+        self.r_values, self.pcf_values = calculate_PCF(
+            distance_points,
+            self.volume_around_dendr,
+            self.radius,
+            self.dr,
+            self.length,
+            False,
+            distance_matrix=mesh_graph_distance_matrix,
+        )
         self.entropy = calculate_Shannon_entropy(self.pcf_values)
-        self.moran_I, self.moran_z, self.moran_p = calculate_Morans_I(self.center_coords, metric_dict_for_autocorr, False, threshold_distance = 5)['Volume']
+        self.moran_I, self.moran_z, self.moran_p = calculate_Morans_I(
+            distance_points,
+            metric_dict_for_autocorr,
+            False,
+            threshold_distance=5,
+            distance_matrix=mesh_graph_distance_matrix,
+            distance_label="mesh_graph",
+        )['Volume']
         # self.getis_ord_G, self.getis_ord_z, self.getis_ord_p = calculate_Getis_Ord_G(self.center_coords, metric_dict_for_autocorr, False, threshold_distance = 5)['Volume']
         
         if self.cylindr_flag:
-            self.nndist_c, self.nndist_norm_c = calculate_NNDist(self.center_coords_c, self.volume_around_dendr, 1)
-            self.r_values_c, self.pcf_values_c = calculate_PCF(self.center_coords_c, self.volume_around_dendr, self.radius, self.dr, self.length, True)
-            self.entropy_c = calculate_Shannon_entropy(self.pcf_values_c)
-            self.moran_I_c, self.moran_z_c, self.moran_p_c = calculate_Morans_I(self.center_coords_c, metric_dict_for_autocorr, True, threshold_distance = 5)['Volume']
+            # Backwards-compatible *_c fields now mirror mesh_graph-based metrics.
+            self.nndist_c, self.nndist_norm_c = self.nndist, self.nndist_norm
+            self.r_values_c, self.pcf_values_c = self.r_values, self.pcf_values
+            self.entropy_c = self.entropy
+            self.moran_I_c, self.moran_z_c, self.moran_p_c = self.moran_I, self.moran_z, self.moran_p
             # self.getis_ord_G_c, self.getis_ord_z_c, self.getis_ord_p_c = calculate_Getis_Ord_G(self.center_coords_c, metric_dict_for_autocorr, True, threshold_distance = 5)['Volume']
         
     def calculate_cluster_metrics(self) -> None:
@@ -441,8 +472,16 @@ class Dendrite:
         for s in self.spines:
             spine_metrics_dict_for_dbscan[(s.center_coord[0], s.center_coord[1], s.center_coord[2])] = { 'Volume' : s.metrics['Volume'] }
         points = [[s.center_coord[0], s.center_coord[1], s.center_coord[2]] for s in self.spines]
+        mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
 
-        self.dbscan_labels, self.dbscan_eps, self.dbscan_min_samples, self.dbscan_statistic, self.dbscan_p_value = dbscan(points, spine_metrics_dict_for_dbscan, 0, 'graphics/dbscan/' + self.name)
+        self.dbscan_labels, self.dbscan_eps, self.dbscan_min_samples, self.dbscan_statistic, self.dbscan_p_value = dbscan(
+            points,
+            spine_metrics_dict_for_dbscan,
+            0,
+            'graphics/dbscan/' + self.name,
+            distance_matrix=mesh_graph_distance_matrix,
+            distance_label="mesh_graph",
+        )
 
         points = np.array([s.center_coord for s in self.spines])
 
@@ -451,18 +490,13 @@ class Dendrite:
         self.dbscan_noise = len(filtered_points)/len(points)
 
         if self.cylindr_flag:
-            spine_metrics_dict_for_dbscan_c = {}
-            for s in self.spines:
-                spine_metrics_dict_for_dbscan_c[(s.center_coord_c[0], s.center_coord_c[1], s.center_coord_c[2])] = { 'Volume' : s.metrics['Volume'] }
-            points_c = [[s.center_coord_c[0], s.center_coord_c[1], s.center_coord_c[2]] for s in self.spines]
-
-            self.dbscan_labels_c, self.dbscan_eps_c, self.dbscan_min_samples_c, self.dbscan_statistic_c, self.dbscan_p_value_c = dbscan(points_c, spine_metrics_dict_for_dbscan_c, 1, 'graphics/dbscan/c_' + self.name)
-
-            points_c = np.array([s.center_coord_c for s in self.spines])
-
-            class_member_mask = (self.dbscan_labels_c == -1)
-            filtered_points_c = points[class_member_mask]
-            self.dbscan_noise_c = len(filtered_points_c)/len(points_c)
+            # Backwards-compatible *_c fields now mirror mesh_graph-based DBSCAN.
+            self.dbscan_labels_c = self.dbscan_labels
+            self.dbscan_eps_c = self.dbscan_eps
+            self.dbscan_min_samples_c = self.dbscan_min_samples
+            self.dbscan_statistic_c = self.dbscan_statistic
+            self.dbscan_p_value_c = self.dbscan_p_value
+            self.dbscan_noise_c = self.dbscan_noise
 
     def cluster_analysis(self) -> None:
         if self.dbscan_labels.size != 0 :
@@ -499,7 +533,7 @@ class Dendrite:
             else:
                 eps = input_eps
 
-            distances = np.linalg.norm(self.center_coords - np.array(spine.center_coord), axis=1)
+            distances = self.get_mesh_graph_distance_matrix()[i]
             neighbors_ind = np.where(distances <= eps)[0]
             neighbors_spines = [self.spines[i] for i in neighbors_ind.tolist()]
             
@@ -517,11 +551,7 @@ class Dendrite:
                     else:
                         eps = 2.5
 
-                neighbors_ind_c = []
-                for j, o_spine in enumerate(self.spines):
-                    distance = cylindrical_distance(spine.center_coord_c, o_spine.center_coord_c)
-                    if distance <= eps:
-                        neighbors_ind_c.append(j)
+                neighbors_ind_c = np.where(distances <= eps)[0].tolist()
                 neighbors_spines_c = [self.spines[i] for i in neighbors_ind_c]
                 counts_c.append(len(neighbors_spines_c))
                 print(f"Точка {i} ({spine.name} - цк {spine.center_coord_c}): соседи {neighbors_spines_c}")
@@ -576,38 +606,29 @@ class Dendrite:
         return matrix_class, matrix_cluster
 
     def graph_analysis(self) -> None:
-        if not self.cylindr_flag:
-            return
-        points = [[s.center_coord_c[0], s.center_coord_c[1], s.center_coord_c[2]] for s in self.spines]
-        
+        # Graph analysis now uses mesh_graph distances along the dendrite mesh.
+        distances = self.get_mesh_graph_distance_matrix()
+
         # Создаем граф
         G = nx.Graph()
-        n = len(points)
+        n = distances.shape[0]
         G.add_nodes_from(range(n))
 
-        # Вычисляем попарные расстояния (евклидовы)
-        distances = np.zeros((n, n))
-        for i in range(n):
-            for j in range(i + 1, n):
-                distances[i][j] = cylindrical_distance(points[i], points[j])
-                # dx = points[i][0] - points[j][0]
-                # dy = points[i][1] - points[j][1]
-                # dz = points[i][2] - points[j][2]
-                # distances[i][j] = np.sqrt(dx**2 + dy**2 + dz**2)
-                distances[j][i] = distances[i][j]
-
-        # Поскольку точки на цилиндре, нужно учесть замыкание (периодичность по одной из координат)
-        # Здесь предполагается, что цилиндр вытянут вдоль оси z, и периодичность по углу (x-y плоскость)
-        # Для простоты будем считать, что минимальное расстояние учитывает периодичность по углу.
-        # Уточните, если нужно другое определение расстояния на цилиндре!
-
-        # Добавляем ребра с весами, обратными расстоянию
+        # Добавляем ребра с весами, обратными mesh_graph-расстоянию по сетке дендрита.
         for i in range(n):
             for j in range(i + 1, n):
                 d = distances[i][j]
-                if d > 0:
+                if np.isfinite(d) and d > 0:
                     w = 1 / d
                     G.add_edge(i, j, weight=w)
+
+        if G.number_of_edges() == 0:
+            self.g_average_clustering = 0
+            self.g_cluster_sizes = []
+            self.g_mean_cluster_size = 0
+            self.g_characteristic_extent = 0
+            self.g_modularity = 0
+            return
 
         # Вычисляем средний коэффициент группировки
         self.g_average_clustering = nx.average_clustering(G, weight='weight')
@@ -624,8 +645,9 @@ class Dendrite:
         self.g_cluster_sizes = [len(comm) for comm in communities.values()]
         self.g_mean_cluster_size = np.mean(self.g_cluster_sizes)
 
-        # Характерная протяженность кластера (среднее расстояние между точками внутри кластера)
+        # Характерная протяженность кластера (среднее mesh_graph-расстояние между точками внутри кластера)
         self.g_characteristic_extent = 0
+        valid_community_count = 0
         for comm_id, nodes in communities.items():
             if len(nodes) < 2:
                 continue
@@ -633,25 +655,22 @@ class Dendrite:
             count = 0
             for i in range(len(nodes)):
                 for j in range(i + 1, len(nodes)):
-                    total_distance += distances[nodes[i]][nodes[j]]
-                    count += 1
-            self.g_characteristic_extent += total_distance / count
-        if len(communities) > 0:
-            self.g_characteristic_extent /= len([c for c in communities.values() if len(c) >= 2])
+                    d = distances[nodes[i]][nodes[j]]
+                    if np.isfinite(d):
+                        total_distance += d
+                        count += 1
+            if count > 0:
+                self.g_characteristic_extent += total_distance / count
+                valid_community_count += 1
+        if valid_community_count > 0:
+            self.g_characteristic_extent /= valid_community_count
 
         # Модульность разбиения
         self.g_modularity = community_louvain.modularity(partition, G, weight='weight')
 
-        # return {
-        #     "clusters": cluster_sizes,
-        #     "characteristic_cluster_extent": characteristic_extent,
-        #     "average_clustering": average_clustering,
-        #     "modularity": modularity
-        # }
-
     def calculate_spine_distance_matrices(self, methods=None, output_dir=None, pair_for_path=None):
         if methods is None:
-            methods = ("cylinder", "stem_graph", "mesh_graph", "heat")
+            methods = ("mesh_graph",)
 
         if not hasattr(self, "mesh"):
             raise ValueError("Surface distance methods require Dendrite.mesh. Create Dendrite with dendrite_meshes, not only from saved input JSON.")
@@ -727,24 +746,6 @@ class Dendrite:
         # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_zG'] = self.getis_ord_z
         # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_p'] = self.getis_ord_p
 
-        if self.cylindr_flag:
-            save_grouping_dendr_metric_dict[self.name]['NNdist_c'] = self.nndist_c
-            save_grouping_dendr_metric_dict[self.name]['NNdist_norm_c'] = self.nndist_norm_c
-
-            save_grouping_dendr_metric_dict[self.name]['PCF_values_c'] = self.pcf_values_c.tolist()
-            save_grouping_dendr_metric_dict[self.name]['r_values_c'] = self.r_values_c.tolist()
-            # save_grouping_dendr_metric_dict[self.name]['PCF_values_c'] = self.pcf_values_c
-            # save_grouping_dendr_metric_dict[self.name]['r_values_c'] = self.r_values_c
-            save_grouping_dendr_metric_dict[self.name]['Entropy_c'] = self.entropy_c
-
-            save_grouping_dendr_metric_dict[self.name]['Moran_I_c'] = self.moran_I_c
-            save_grouping_dendr_metric_dict[self.name]['Moran_zI_c'] = self.moran_z_c
-            save_grouping_dendr_metric_dict[self.name]['Moran_p_c'] = self.moran_p_c
-
-            # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_G_c'] = selfd.getis_ord_G_c
-            # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_zG_c'] = self.getis_ord_z_c
-            # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_p_c'] = self.getis_ord_p_c
-
         # with open('metrics/grouping_dendr_metrics.json', 'w') as f:
         # with open('metrics/9009/grouping_dendr_metrics.json', 'w') as f:
         # with open('metrics/wt_old_st/grouping_dendr_metrics.json', 'w') as f:
@@ -758,13 +759,6 @@ class Dendrite:
         save_cluster_dendr_metric_dict[self.name]['DBscan_statistic'] = self.dbscan_statistic
         save_cluster_dendr_metric_dict[self.name]['DBscan_p_value'] = self.dbscan_p_value
         save_cluster_dendr_metric_dict[self.name]['DBscan_noise'] = self.dbscan_noise
-
-        if self.cylindr_flag:
-            save_cluster_dendr_metric_dict[self.name]['DBscan_eps_c'] = self.dbscan_eps_c
-            save_cluster_dendr_metric_dict[self.name]['DBscan_min_samples_c'] = self.dbscan_min_samples_c
-            save_cluster_dendr_metric_dict[self.name]['DBscan_statistic_c'] = self.dbscan_statistic_c
-            save_cluster_dendr_metric_dict[self.name]['DBscan_p_value_c'] = self.dbscan_p_value_c
-            save_cluster_dendr_metric_dict[self.name]['DBscan_noise_c'] = self.dbscan_noise_c
 
         # with open('metrics/grouping_dendr_metrics.json', 'w') as f:
         # with open('metrics/9009/grouping_dendr_metrics.json', 'w') as f:
@@ -780,12 +774,11 @@ class Dendrite:
         # save_graph_dendr_metric_dict[self.name]['DBscan_p_value'] = self.dbscan_p_value
         # save_graph_dendr_metric_dict[self.name]['DBscan_noise'] = self.dbscan_noise
 
-        if self.cylindr_flag:
-            save_graph_dendr_metric_dict[self.name]['g_cluster_sizes_c'] = self.g_cluster_sizes
-            save_graph_dendr_metric_dict[self.name]['g_mean_cluster_size_c'] = self.g_mean_cluster_size
-            save_graph_dendr_metric_dict[self.name]['g_characteristic_extent_c'] = self.g_characteristic_extent
-            save_graph_dendr_metric_dict[self.name]['g_average_clustering_c'] = self.g_average_clustering
-            save_graph_dendr_metric_dict[self.name]['g_modularity_c'] = self.g_modularity
+        save_graph_dendr_metric_dict[self.name]['g_cluster_sizes'] = self.g_cluster_sizes
+        save_graph_dendr_metric_dict[self.name]['g_mean_cluster_size'] = self.g_mean_cluster_size
+        save_graph_dendr_metric_dict[self.name]['g_characteristic_extent'] = self.g_characteristic_extent
+        save_graph_dendr_metric_dict[self.name]['g_average_clustering'] = self.g_average_clustering
+        save_graph_dendr_metric_dict[self.name]['g_modularity'] = self.g_modularity
 
         # with open('metrics/grouping_dendr_metrics.json', 'w') as f:
         # with open('metrics/9009/grouping_dendr_metrics.json', 'w') as f:
@@ -795,15 +788,15 @@ class Dendrite:
 
     def save_dendr_metrics(self) -> None:
         if self.cylindr_flag:
-            dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist_c, "PCF_entrophy": self.entropy_c, 
-                        "Moran_I": self.moran_I_c, "Moran_zI": self.moran_z_c, "Moran_p": self.moran_p_c,
+            dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist, "PCF_entrophy": self.entropy, 
+                        "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
                         # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,
-                        "Eps": self.dbscan_eps_c, "Min_samples": self.dbscan_min_samples_c,
-                        "DBSCAN_statistic": self.dbscan_statistic_c, "DBSCAN_p_value": self.dbscan_p_value_c, "Noise": self.dbscan_noise_c,
+                        "Eps": self.dbscan_eps, "Min_samples": self.dbscan_min_samples,
+                        "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value, "Noise": self.dbscan_noise,
                         "g_mean_cluster_size": self.g_mean_cluster_size, "g_characteristic_extent": self.g_characteristic_extent, 
                         "g_average_clustering": self.g_average_clustering, "g_modularity": self.g_modularity}
             
-            for k, m in enumerate([self.db_matrix_class_c, self.db_matrix_cluster_c, self.n_matrix_class_c, self.n_matrix_cluster_c]):
+            for k, m in enumerate([self.db_matrix_class, self.db_matrix_cluster, self.n_matrix_class, self.n_matrix_cluster]):
                 matrix = m / m.max()
                 rows, cols = matrix.shape
                 matrix_dict = {}
@@ -827,11 +820,11 @@ class Dendrite:
     def save_dendr_metrics_without_class_cluster(self) -> None:
         if self.cylindr_flag:
                     
-            dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist_c, "PCF_entrophy": self.entropy_c, 
-                        "Moran_I": self.moran_I_c, "Moran_zI": self.moran_z_c, "Moran_p": self.moran_p_c,
+            dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist, "PCF_entrophy": self.entropy, 
+                        "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
                         # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,
-                        "Eps": self.dbscan_eps_c, "Min_samples": self.dbscan_min_samples_c,
-                        "DBSCAN_statistic": self.dbscan_statistic_c, "DBSCAN_p_value": self.dbscan_p_value_c, "Noise": self.dbscan_noise_c,
+                        "Eps": self.dbscan_eps, "Min_samples": self.dbscan_min_samples,
+                        "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value, "Noise": self.dbscan_noise,
                         "g_mean_cluster_size": self.g_mean_cluster_size, "g_characteristic_extent": self.g_characteristic_extent, 
                         "g_average_clustering": self.g_average_clustering, "g_modularity": self.g_modularity}
 

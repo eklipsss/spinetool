@@ -8,7 +8,7 @@ import pandas as pd
 import json
 from esda.moran import Moran
 from esda import G
-from libpysal.weights import DistanceBand
+from libpysal.weights import DistanceBand, W
 import math
 import numpy as np
 from typing import Any, List, Tuple, Dict
@@ -45,4 +45,3 @@ from spine_analysis.shape_metric.junction_metric import (
     OpenAngleSpineMetric,
 )
 from spine_analysis.shape_metric.utils import _point_2_vec
-

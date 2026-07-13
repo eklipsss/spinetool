@@ -113,7 +113,9 @@ def calculate_LengthDendriteMetric(sceleton_vecs: List[Vector_3], skeleton_line_
     return length
 
 
-def calculate_distance_matrix(points, cylindr_flag):
+def calculate_distance_matrix(points, cylindr_flag, distance_matrix=None):
+    if distance_matrix is not None:
+        return np.asarray(distance_matrix, dtype=float)
     if cylindr_flag:
         distance_matrix = squareform(pdist(points, lambda u, v: cylindrical_distance(u, v)))
     else: 
@@ -121,33 +123,28 @@ def calculate_distance_matrix(points, cylindr_flag):
     return distance_matrix
 
 
-def calculate_all_dists(points, cylindr_flag = False):
-    distance_matrix = calculate_distance_matrix(points, cylindr_flag)
+def calculate_all_dists(points, cylindr_flag = False, distance_matrix=None):
+    distance_matrix = calculate_distance_matrix(points, cylindr_flag, distance_matrix=distance_matrix)
     distance_vector = distance_matrix.flatten()  # или arr.ravel()
     distance_vector = distance_vector[distance_vector != 0]
 
     return distance_vector
 
 
-def calculate_NNDist(points, volume: float, cylind_flag: bool = True):
-    min_dist_list = []
+def calculate_NNDist(points, volume: float, cylind_flag: bool = True, distance_matrix=None):
+    distance_matrix = calculate_distance_matrix(points, cylind_flag, distance_matrix=distance_matrix)
+    if distance_matrix.size == 0:
+        return 0.0, 0.0
+
+    finite_distances = np.asarray(distance_matrix, dtype=float).copy()
+    finite_distances[~np.isfinite(finite_distances)] = np.inf
+    np.fill_diagonal(finite_distances, np.inf)
+    min_dist_list = np.min(finite_distances, axis=1)
+    min_dist_list = min_dist_list[np.isfinite(min_dist_list)]
     n = len(points)
-    
-    for i in range(len(points)-1):
-        min_dist = float('inf')
-        for j in range(i+1, len(points)):
-            point = points[i]
-            neigbour_point = points[j]
 
-            if cylind_flag:
-                dist = cylindrical_distance(point, neigbour_point)
-            else: 
-                dist = math.sqrt((point[0] - neigbour_point[0])**2 + (point[1] - neigbour_point[1])**2 + (point[2] - neigbour_point[2])**2)
-
-            if dist < min_dist:
-                min_dist = dist
-
-        min_dist_list.append(min_dist)
+    if len(min_dist_list) == 0:
+        return 0.0, 0.0
 
     mean_dist = np.mean(min_dist_list)
     print("  nndist = ", mean_dist)
@@ -219,18 +216,15 @@ def calculate_shell_volume(pv_cylindrical_shell, r_sph, R_sph, r_cylindr, R_cyli
     return intersection_volume
 
 
-def calculate_PCF(points, volume: float, r_dendr: float, dr_dendr: float, height: float, cylind_flag: bool = True, dr: float = 0.5):
-    dist_list = np.zeros((len(points), len(points)))
-
-    for i, point in enumerate(points):
-        for j, neigbour_point in enumerate(points):
-            if cylind_flag:
-                dist = cylindrical_distance(point, neigbour_point)
-            else: 
-                dist = math.sqrt((point[0] - neigbour_point[0])**2 + (point[1] - neigbour_point[1])**2 + (point[2] - neigbour_point[2])**2)
-            dist_list[i][j] = dist
+def calculate_PCF(points, volume: float, r_dendr: float, dr_dendr: float, height: float, cylind_flag: bool = True, dr: float = 0.5, distance_matrix=None):
+    dist_list = calculate_distance_matrix(points, cylind_flag, distance_matrix=distance_matrix)
+    if dist_list.size == 0:
+        return np.array([]), np.array([])
             
-    r_max = np.amax(dist_list)
+    finite_distances = dist_list[np.isfinite(dist_list)]
+    if len(finite_distances) == 0:
+        return np.array([]), np.array([])
+    r_max = np.amax(finite_distances)
         
     r_values = np.arange(0, r_max, dr)
     pcf_values = np.zeros_like(r_values)
@@ -344,9 +338,11 @@ def param_from_kruskal(points, spine_metrics_dict, distance_matrix, max_dist=5, 
     return best_params
 
 
-def dbscan(points, spine_metrics_dict, cylindr_coords_flag = 0, save_path = None, eps = None, min_samples = None):
+def dbscan(points, spine_metrics_dict, cylindr_coords_flag = 0, save_path = None, eps = None, min_samples = None, distance_matrix=None, distance_label=None):
     print('\n-----------------------------------------------------')
-    if cylindr_coords_flag:
+    if distance_label is not None:
+        print(f'Кластеризация DBSCAN для расстояний: {distance_label}')
+    elif cylindr_coords_flag:
         print('Кластеризация DBSCAN для цилиндрических координат')
     else:
         print('Кластеризация DBSCAN для классических трехмерных координат')
@@ -354,10 +350,20 @@ def dbscan(points, spine_metrics_dict, cylindr_coords_flag = 0, save_path = None
 
     points = np.array(points)
 
-    if cylindr_coords_flag:
-        distance_matrix = squareform(pdist(points, lambda u, v: cylindrical_distance(u, v)))
-    else:
-        distance_matrix = squareform(pdist(points))
+    distance_matrix = calculate_distance_matrix(
+        points,
+        cylindr_coords_flag,
+        distance_matrix=distance_matrix,
+    )
+    if not np.isfinite(distance_matrix).all():
+        finite = distance_matrix[np.isfinite(distance_matrix)]
+        fill_value = float(finite.max() * 10.0) if len(finite) else 1e12
+        distance_matrix = np.nan_to_num(
+            distance_matrix,
+            nan=fill_value,
+            posinf=fill_value,
+            neginf=fill_value,
+        )
 
     if eps is None or min_samples is None:
         print('   Автоматический подбор параметров DBSCAN с помощью теста Крускала-Уоллиса...')
@@ -968,8 +974,32 @@ def cluster_analysis(points, labels, spine_vec_w_name):
     return count_by_type, adjacency_matrix
 
 
-def calculate_Morans_I(points, metrics_dict, cylindr_flag = 0, threshold_distance = 2.0, name = None):
-    if cylindr_flag:
+def _weights_from_distance_matrix(dist_matrix, threshold_distance=None):
+    dist_matrix = np.asarray(dist_matrix, dtype=float)
+    n = dist_matrix.shape[0]
+    neighbours = {}
+    weights = {}
+    for i in range(n):
+        neighbours[i] = []
+        weights[i] = []
+        for j in range(n):
+            if i == j:
+                continue
+            distance = dist_matrix[i, j]
+            if not np.isfinite(distance) or distance <= 0:
+                continue
+            if threshold_distance and distance >= threshold_distance:
+                continue
+            neighbours[i].append(j)
+            weights[i].append(1.0 if threshold_distance else 1.0 / distance)
+    return W(neighbours, weights, silence_warnings=True)
+
+
+def calculate_Morans_I(points, metrics_dict, cylindr_flag = 0, threshold_distance = 2.0, name = None, distance_matrix=None, distance_label=None):
+    if distance_matrix is not None:
+        print(f"  Значение коэффициента автокорреляции Moran's I для расстояний: {distance_label or 'precomputed'}")
+        dist_matrix = calculate_distance_matrix(points, cylindr_flag, distance_matrix=distance_matrix)
+    elif cylindr_flag:
         print("  Значение коэффициента автокорреляции Moran's I для цилиндрических координат:")
         dist_matrix = squareform(pdist(points, lambda u, v: cylindrical_distance(u, v)))
         # print('--- cylindr_dist_matrix\n', dist_matrix)
@@ -1003,6 +1033,9 @@ def calculate_Morans_I(points, metrics_dict, cylindr_flag = 0, threshold_distanc
                 for i in range(n) for j in range(n))
         denom = np.sum((metrics - mean_metric) ** 2)
         W_sum = np.sum(W)
+        if W_sum == 0 or denom == 0:
+            morans_dict[metric_name] = [0, 0, 1] if metric_name == "Volume" else 0
+            continue
         I = (n / W_sum) * (num / denom)
 
         morans_dict[metric_name] = I
@@ -1012,7 +1045,10 @@ def calculate_Morans_I(points, metrics_dict, cylindr_flag = 0, threshold_distanc
         if metric_name == "Volume":
             # print("    morans_dict[Volume] = ", morans_dict['Volume'])
 
-            if cylindr_flag:
+            if distance_matrix is not None:
+                W_n = _weights_from_distance_matrix(dist_matrix, threshold_distance=threshold_distance)
+                dense_matrix = W_n.full()[0]
+            elif cylindr_flag:
                 dist_matrix = cdist(points, points, metric=cylindrical_distance)
                 W_n = DistanceBand.from_array(dist_matrix, threshold=threshold_distance, binary=True)
                 # print('  dist_matrix\n', dist_matrix)
