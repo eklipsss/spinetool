@@ -15,6 +15,7 @@ from spine_segmentation import point_2_list
 
 
 _MESH_ATTACHMENT_CENTERS: Dict[int, np.ndarray] = {}
+_MESH_DENDRITE_SKELETONS: Dict[int, Any] = {}
 
 
 def _vec_2_point(vector: Vector_3) -> Point_3:
@@ -74,6 +75,14 @@ def register_attachment_center(spine_mesh: Polyhedron_3, attachment_center: np.n
 
 def get_attachment_center(spine_mesh: Polyhedron_3):
     return _MESH_ATTACHMENT_CENTERS.get(id(spine_mesh))
+
+
+def register_dendrite_skeleton(dendrite_mesh: Polyhedron_3, skeleton: Any) -> None:
+    _MESH_DENDRITE_SKELETONS[id(dendrite_mesh)] = skeleton
+
+
+def get_dendrite_skeleton(dendrite_mesh: Polyhedron_3):
+    return _MESH_DENDRITE_SKELETONS.get(id(dendrite_mesh))
 
 
 def _calculate_junction_center_old(spine_mesh: Polyhedron_3) -> Vector_3:

@@ -9,12 +9,90 @@ from .surface_distances import (
     polyhedron_to_trimesh,
     save_distance_method_comparison,
 )
+from spine_analysis.shape_metric.utils import get_dendrite_skeleton
 
 
 def _fallback_dendrite_length_any_mesh(dendr_mesh: Any) -> float:
     length = centerline_length_from_mesh(dendr_mesh)
     print(f"  length (mesh-graph centerline fallback) = {length:.2f}")
     return length
+
+
+def _polyline_length(points: Any) -> float:
+    points = np.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[0] < 2 or points.shape[1] < 3:
+        return 0.0
+    points = points[:, :3]
+    finite_mask = np.isfinite(points).all(axis=1)
+    points = points[finite_mask]
+    if len(points) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+
+
+def _skeleton_length_from_object(skeleton: Any) -> float:
+    if skeleton is None:
+        return 0.0
+
+    if isinstance(skeleton, np.ndarray) and skeleton.dtype == object:
+        if skeleton.shape == ():
+            return _skeleton_length_from_object(skeleton.item())
+        return float(sum(_skeleton_length_from_object(item) for item in skeleton.tolist()))
+
+    if isinstance(skeleton, dict):
+        for points_key in ("points", "vertices", "nodes"):
+            if points_key in skeleton and "edges" in skeleton:
+                points = np.asarray(skeleton[points_key], dtype=float)
+                edges = np.asarray(skeleton["edges"], dtype=int)
+                if points.ndim == 2 and points.shape[1] >= 3 and edges.ndim == 2 and edges.shape[1] >= 2:
+                    valid_edges = edges[:, :2]
+                    valid_edges = valid_edges[
+                        (valid_edges >= 0).all(axis=1)
+                        & (valid_edges < len(points)).all(axis=1)
+                    ]
+                    if len(valid_edges) > 0:
+                        segments = points[valid_edges[:, 1], :3] - points[valid_edges[:, 0], :3]
+                        return float(np.linalg.norm(segments, axis=1).sum())
+        for key in ("skeleton", "branches", "polylines", "paths", "lines"):
+            if key in skeleton:
+                length = _skeleton_length_from_object(skeleton[key])
+                if length > 0:
+                    return length
+        return float(sum(_skeleton_length_from_object(value) for value in skeleton.values()))
+
+    if isinstance(skeleton, (list, tuple)):
+        try:
+            numeric = np.asarray(skeleton, dtype=float)
+            if numeric.ndim >= 2:
+                return _skeleton_length_from_object(numeric)
+        except Exception:
+            pass
+        return float(sum(_skeleton_length_from_object(item) for item in skeleton))
+
+    try:
+        array = np.asarray(skeleton, dtype=float)
+    except Exception:
+        return 0.0
+
+    if array.ndim == 2 and array.shape[1] >= 3:
+        return _polyline_length(array)
+
+    if array.ndim == 3 and array.shape[-1] >= 3:
+        if array.shape[1] == 2:
+            segments = array[:, 1, :3] - array[:, 0, :3]
+            return float(np.linalg.norm(segments, axis=1).sum())
+        return float(sum(_polyline_length(polyline) for polyline in array))
+
+    return 0.0
+
+
+def _registered_skeleton_length(dendr_mesh: Any) -> float:
+    skeleton = get_dendrite_skeleton(dendr_mesh)
+    length = _skeleton_length_from_object(skeleton)
+    if np.isfinite(length) and length > 0:
+        print(f"  dendr_len (registered branch_skeleton.npy) = {length:.2f}")
+        return float(length)
+    return 0.0
 
 
 def _fallback_dendrite_volume_any_mesh(dendr_mesh: Any) -> float:
@@ -227,7 +305,7 @@ class Dendrite:
             print(f'Dendrite {dendr_name}')
             self.mesh = dendr_mesh
             try:
-                if isinstance(dendr_mesh, Polyhedron_3):
+                if isinstance(dendr_mesh, Polyhedron_3) and get_dendrite_skeleton(dendr_mesh) is None:
                     raw_vol = volume(dendr_mesh)
                 else:
                     raw_vol = _fallback_dendrite_volume_any_mesh(dendr_mesh)
@@ -249,22 +327,26 @@ class Dendrite:
             self.volume = abs(raw_vol)
             print(f'  dendr_volume = {self.volume:.2f}')
 
-            try:
-                if not isinstance(dendr_mesh, Polyhedron_3):
-                    raise TypeError(
-                        "CGAL skeletonization requires Polyhedron_3; "
-                        f"got {type(dendr_mesh).__name__}"
+            registered_length = _registered_skeleton_length(dendr_mesh)
+            if registered_length > 0:
+                self.length = registered_length
+            else:
+                try:
+                    if not isinstance(dendr_mesh, Polyhedron_3):
+                        raise TypeError(
+                            "CGAL skeletonization requires Polyhedron_3; "
+                            f"got {type(dendr_mesh).__name__}"
+                        )
+                    sceleton_vecs, skeleton_line_set = get_sceleton_vecs(dendr_mesh)  # векторы скелета дендрита (без шипиков)
+                    self.length = calculate_LengthDendriteMetric(sceleton_vecs, skeleton_line_set)
+                except Exception as exc:
+                    import warnings
+                    warnings.warn(
+                        f"Skeleton-based length calculation unavailable for '{dendr_name}' "
+                        f"({exc}); falling back to a PCA-based length approximation.",
+                        stacklevel=2,
                     )
-                sceleton_vecs, skeleton_line_set = get_sceleton_vecs(dendr_mesh)  # векторы скелета дендрита (без шипиков)
-                self.length = calculate_LengthDendriteMetric(sceleton_vecs, skeleton_line_set)
-            except Exception as exc:
-                import warnings
-                warnings.warn(
-                    f"Skeleton-based length calculation unavailable for '{dendr_name}' "
-                    f"({exc}); falling back to a PCA-based length approximation.",
-                    stacklevel=2,
-                )
-                self.length = _fallback_dendrite_length_any_mesh(dendr_mesh)
+                    self.length = _fallback_dendrite_length_any_mesh(dendr_mesh)
             if self.length <= 0:
                 import warnings
                 warnings.warn(

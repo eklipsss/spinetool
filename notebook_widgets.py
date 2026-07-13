@@ -9,17 +9,17 @@ from ipywidgets import widgets
 from sklearn.decomposition import PCA
 
 from CGAL.CGAL_Polyhedron_3 import Polyhedron_3
-from typing import List, Tuple, Dict, Set, Iterable, Callable
+from typing import List, Tuple, Dict, Set, Iterable, Callable, Optional
 
 from spine_analysis.clusterization.hierarchial_clusterizer import HierarchicalSpineClusterizer
 from spine_analysis.mesh.utils import MeshDataset, LineSet, preprocess_meshes, _mesh_to_v_f, polylines_to_line_set, \
     rotate, write_off
 from spine_analysis.mesh.vizualization import _add_line_set_to_viewer, _add_mesh_to_viewer_as_wireframe
 from spine_analysis.shape_metric import OldChordDistributionSpineMetric, HistogramSpineMetric, FloatSpineMetric, \
-    SpineMetric
+    SpineMetric, JunctionCenterSpineMetric
 from spine_analysis.shape_metric.io_metric import SpineMetricDataset
 from spine_analysis.shape_metric.utils import calculate_metrics, _get_junction_triangles, get_facet_norm, \
-    get_rotation_matrix, register_attachment_center
+    get_rotation_matrix, get_attachment_center, register_attachment_center, register_dendrite_skeleton
 from spine_analysis.spine.grouping import SpineGrouping
 from spine_segmentation import point_2_list, list_2_point, hash_point, \
     Segmentation, segmentation_by_distance, local_threshold_3d,\
@@ -335,9 +335,171 @@ class SpineMeshDataset:
         finally:
             os.close(saved)
 
-    def load(self, folder_path: str = "output",
-             spine_file_pattern: str = "**/spine_*.off",
-             load_attachment_centers: bool = False) -> "SpineMeshDataset":
+    @staticmethod
+    def _vector_to_array(vector) -> np.ndarray:
+        return np.asarray([vector.x(), vector.y(), vector.z()], dtype=float)
+
+    @staticmethod
+    def _load_attachment_centers(folder_path: Path, load_attachment_centers: bool) -> Dict[str, np.ndarray]:
+        if not load_attachment_centers:
+            return {}
+        attachment_centers_path = folder_path.parent / "attachment_centers.pkl"
+        if not attachment_centers_path.exists():
+            return {}
+        attachment_obj = pd.read_pickle(attachment_centers_path)
+        if hasattr(attachment_obj, "to_dict"):
+            attachment_obj = attachment_obj.to_dict()
+        if not isinstance(attachment_obj, dict):
+            return {}
+        return {
+            str(key): np.asarray(value, dtype=float)
+            for key, value in attachment_obj.items()
+        }
+
+    @staticmethod
+    def _resolve_attachment_center_for_debug(spine_mesh: Polyhedron_3) -> Tuple[np.ndarray, str]:
+        registered_center = get_attachment_center(spine_mesh)
+        if registered_center is not None:
+            return np.asarray(registered_center, dtype=float), "attachment_centers.pkl"
+
+        center_vec = JunctionCenterSpineMetric(spine_mesh)._value
+        return SpineMeshDataset._vector_to_array(center_vec), "JunctionCenterSpineMetric heuristic"
+
+    @staticmethod
+    def _plot_attachment_debug(
+        spine_name: str,
+        spine_mesh: Polyhedron_3,
+        dendrite_name: str,
+        dendrite_mesh: Polyhedron_3,
+        attachment_center: np.ndarray,
+        source: str,
+    ) -> None:
+        try:
+            import plotly.graph_objects as go
+            import plotly.io as pio
+
+            try:
+                if pio.renderers.default in ("", None):
+                    pio.renderers.default = "notebook_connected"
+            except Exception:
+                pass
+
+            def add_mesh(fig, mesh, name: str, color: str, opacity: float) -> np.ndarray:
+                vertices, faces = _mesh_to_v_f(mesh)
+                fig.add_trace(
+                    go.Mesh3d(
+                        x=vertices[:, 0],
+                        y=vertices[:, 1],
+                        z=vertices[:, 2],
+                        i=faces[:, 0],
+                        j=faces[:, 1],
+                        k=faces[:, 2],
+                        color=color,
+                        opacity=opacity,
+                        name=name,
+                        showscale=False,
+                    )
+                )
+                return vertices
+
+            def add_attachment_point(fig) -> None:
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[attachment_center[0]],
+                        y=[attachment_center[1]],
+                        z=[attachment_center[2]],
+                        mode="markers+text",
+                        marker={"size": 7, "color": "#d62728"},
+                        text=["attachment"],
+                        textposition="top center",
+                        name="attachment point",
+                    )
+                )
+
+            def scene_from_points(points: np.ndarray) -> Dict[str, object]:
+                points = np.asarray(points, dtype=float)
+                finite_points = points[np.isfinite(points).all(axis=1)]
+                if len(finite_points) == 0:
+                    finite_points = np.zeros((1, 3), dtype=float)
+                mins = finite_points.min(axis=0)
+                maxs = finite_points.max(axis=0)
+                center = (mins + maxs) / 2.0
+                radius = float(np.max(maxs - mins) / 2.0)
+                if not np.isfinite(radius) or radius <= 0:
+                    radius = 1.0
+                return {
+                    "xaxis": {"range": [center[0] - radius, center[0] + radius], "title": "X"},
+                    "yaxis": {"range": [center[1] - radius, center[1] + radius], "title": "Y"},
+                    "zaxis": {"range": [center[2] - radius, center[2] + radius], "title": "Z"},
+                    "aspectmode": "cube",
+                }
+
+            spine_fig = go.Figure()
+            spine_vertices = add_mesh(spine_fig, spine_mesh, "spine", "#8cb6d9", 0.65)
+            add_attachment_point(spine_fig)
+            spine_points = np.vstack([spine_vertices, attachment_center.reshape(1, 3)])
+            spine_fig.update_layout(
+                title=f"Attachment point on spine<br>{spine_name}<br>source: {source}",
+                scene=scene_from_points(spine_points),
+                margin={"l": 0, "r": 0, "t": 80, "b": 0},
+            )
+            display(spine_fig)
+
+            combined_fig = go.Figure()
+            dendrite_vertices = add_mesh(combined_fig, dendrite_mesh, "dendrite", "#bdbdbd", 0.28)
+            spine_vertices = add_mesh(combined_fig, spine_mesh, "spine", "#8cb6d9", 0.72)
+            add_attachment_point(combined_fig)
+            combined_points = np.vstack([
+                dendrite_vertices,
+                spine_vertices,
+                attachment_center.reshape(1, 3),
+            ])
+            combined_fig.update_layout(
+                title=f"Attachment point with dendrite<br>{dendrite_name}<br>{spine_name}<br>source: {source}",
+                scene=scene_from_points(combined_points),
+                margin={"l": 0, "r": 0, "t": 95, "b": 0},
+            )
+            display(combined_fig)
+        except Exception as exc:
+            print(f"⚠️ Не удалось построить attachment debug-график для {spine_name}: {exc}", flush=True)
+
+    @staticmethod
+    def _maybe_show_attachment_debug(
+        spine_name: str,
+        spine_mesh: Polyhedron_3,
+        dendrite_name: str,
+        dendrite_mesh: Polyhedron_3,
+        debug_attachment_points: bool,
+        debug_index: int,
+        attachment_debug_limit: Optional[int],
+    ) -> None:
+        if not debug_attachment_points:
+            return
+        if attachment_debug_limit is not None and debug_index >= attachment_debug_limit:
+            return
+
+        attachment_center, source = SpineMeshDataset._resolve_attachment_center_for_debug(spine_mesh)
+        print(
+            f"[attachment] {spine_name}: source={source}, point={attachment_center.tolist()}",
+            flush=True,
+        )
+        SpineMeshDataset._plot_attachment_debug(
+            spine_name=spine_name,
+            spine_mesh=spine_mesh,
+            dendrite_name=dendrite_name,
+            dendrite_mesh=dendrite_mesh,
+            attachment_center=attachment_center,
+            source=source,
+        )
+
+    def _load_labid(
+        self,
+        folder_path: str,
+        spine_file_pattern: str,
+        load_attachment_centers: bool,
+        debug_attachment_points: bool,
+        attachment_debug_limit: Optional[int],
+    ) -> "SpineMeshDataset":
         spine_meshes = {}
         dendrite_meshes = {}
         spine_to_dendrite = {}
@@ -347,20 +509,13 @@ class SpineMeshDataset:
 
         path = Path(folder_path)
         spine_names = list(path.glob(spine_file_pattern))
-        attachment_centers = {}
-        attachment_centers_path = path.parent / "attachment_centers.pkl"
-        if load_attachment_centers and attachment_centers_path.exists():
-            attachment_obj = pd.read_pickle(attachment_centers_path)
-            if hasattr(attachment_obj, "to_dict"):
-                attachment_centers = attachment_obj.to_dict()
-            elif isinstance(attachment_obj, dict):
-                attachment_centers = attachment_obj
+        attachment_centers = self._load_attachment_centers(path, load_attachment_centers)
 
         # папка для некорректных шипов (создадим только если появятся ошибки)
         incorrect_dir = path / "incorrect spines"
         incorrect_dir_created = False
 
-
+        debug_index = 0
         for spine_name in spine_names:
             spine_path = str(spine_name).replace('\\', '/')
             print("spine_name", spine_name, flush=True)
@@ -378,7 +533,7 @@ class SpineMeshDataset:
                     shutil.copy2(spine_name, incorrect_dir / spine_name.name)
                 except Exception as copy_err:
                     print(f"⚠️ Не удалось скопировать {spine_name} в '{incorrect_dir}': {copy_err}", flush=True)
-                    
+
                 continue
 
             spine_meshes[spine_path] = poly
@@ -388,12 +543,22 @@ class SpineMeshDataset:
                     attachment_center = np.asarray(attachment_centers[spine_key], dtype=float)
                     spine_attachment_centers[spine_path] = attachment_center
                     register_attachment_center(poly, attachment_center)
-            # spine_meshes[str(spine_name).replace('\\', '/')] = Polyhedron_3(str(spine_name).replace('\\', '/'))
 
             dendrite_path = os.path.join(spine_name.parent, "surface_mesh.off").replace('\\', '/')
             if dendrite_path not in dendrite_meshes:
                 dendrite_meshes[dendrite_path] = Polyhedron_3(dendrite_path)
-            spine_to_dendrite[str(spine_name).replace('\\', '/')] = dendrite_path
+            spine_to_dendrite[spine_path] = dendrite_path
+
+            self._maybe_show_attachment_debug(
+                spine_name=spine_path,
+                spine_mesh=poly,
+                dendrite_name=dendrite_path,
+                dendrite_mesh=dendrite_meshes[dendrite_path],
+                debug_attachment_points=debug_attachment_points,
+                debug_index=debug_index,
+                attachment_debug_limit=attachment_debug_limit,
+            )
+            debug_index += 1
 
         if failed_spines:
             print("\n====== Итог: шипы с ошибкой чтения (❌ CGAL error while reading SPINE) ======", flush=True)
@@ -403,9 +568,137 @@ class SpineMeshDataset:
             print("============================================================================\n", flush=True)
         else:
             print("\n✅ Итог: ошибок чтения шипов не было.\n", flush=True)
-            
+
         self.__init__(spine_meshes, dendrite_meshes, spine_to_dendrite, spine_attachment_centers, path)
         return self
+
+    def _load_microns(
+        self,
+        folder_path: str,
+        spine_file_pattern: str,
+        load_attachment_centers: bool,
+        debug_attachment_points: bool,
+        attachment_debug_limit: Optional[int],
+    ) -> "SpineMeshDataset":
+        spine_meshes = {}
+        dendrite_meshes = {}
+        spine_to_dendrite = {}
+        spine_attachment_centers = {}
+        failed_spines = []
+
+        branch_path = Path(folder_path)
+        spines_dir = branch_path / "spines"
+        dendrite_mesh_path = branch_path / "branch_mesh.off"
+        skeleton_path = branch_path / "branch_skeleton.npy"
+
+        if not spines_dir.exists():
+            print(f"⏭️ MICrONS branch пропущен, нет папки spines: {branch_path}", flush=True)
+            self.__init__({}, {}, {}, {}, branch_path)
+            return self
+        if not dendrite_mesh_path.exists():
+            print(f"⏭️ MICrONS branch пропущен, нет branch_mesh.off: {branch_path}", flush=True)
+            self.__init__({}, {}, {}, {}, branch_path)
+            return self
+
+        dendrite_path = str(dendrite_mesh_path).replace('\\', '/')
+        dendrite_poly, dendrite_err = self.capture_native_stderr(Polyhedron_3, dendrite_path)
+        if "input error" in dendrite_err or "cannot open file" in dendrite_err:
+            print(f"\n❌ CGAL error while reading DENDRITE: {dendrite_mesh_path}\n{dendrite_err}\n", flush=True)
+            self.__init__({}, {}, {}, {}, branch_path)
+            return self
+        dendrite_meshes[dendrite_path] = dendrite_poly
+
+        if skeleton_path.exists():
+            try:
+                skeleton = np.load(skeleton_path, allow_pickle=True)
+                register_dendrite_skeleton(dendrite_poly, skeleton)
+                print(f"[microns] registered branch_skeleton.npy: {skeleton_path}", flush=True)
+            except Exception as exc:
+                print(f"⚠️ Не удалось загрузить branch_skeleton.npy для {branch_path}: {exc}", flush=True)
+
+        attachment_centers = self._load_attachment_centers(spines_dir, load_attachment_centers)
+        incorrect_dir = spines_dir / "incorrect spines"
+        incorrect_dir_created = False
+
+        spine_names = sorted(spines_dir.glob(spine_file_pattern))
+        debug_index = 0
+        for spine_name in spine_names:
+            if not spine_name.is_file():
+                continue
+            spine_path = str(spine_name).replace('\\', '/')
+            print("spine_name", spine_name, flush=True)
+
+            poly, err = self.capture_native_stderr(Polyhedron_3, spine_path)
+            if "input error" in err or "cannot open file" in err:
+                print(f"\n❌ CGAL error while reading SPINE: {spine_name}\n{err}\n", flush=True)
+                failed_spines.append(spine_path)
+
+                if not incorrect_dir_created:
+                    incorrect_dir.mkdir(parents=True, exist_ok=True)
+                    incorrect_dir_created = True
+
+                try:
+                    shutil.copy2(spine_name, incorrect_dir / spine_name.name)
+                except Exception as copy_err:
+                    print(f"⚠️ Не удалось скопировать {spine_name} в '{incorrect_dir}': {copy_err}", flush=True)
+                continue
+
+            spine_meshes[spine_path] = poly
+            if load_attachment_centers:
+                spine_key = spine_name.stem
+                if spine_key in attachment_centers:
+                    attachment_center = np.asarray(attachment_centers[spine_key], dtype=float)
+                    spine_attachment_centers[spine_path] = attachment_center
+                    register_attachment_center(poly, attachment_center)
+            spine_to_dendrite[spine_path] = dendrite_path
+
+            self._maybe_show_attachment_debug(
+                spine_name=spine_path,
+                spine_mesh=poly,
+                dendrite_name=dendrite_path,
+                dendrite_mesh=dendrite_poly,
+                debug_attachment_points=debug_attachment_points,
+                debug_index=debug_index,
+                attachment_debug_limit=attachment_debug_limit,
+            )
+            debug_index += 1
+
+        if failed_spines:
+            print("\n====== Итог: шипы с ошибкой чтения (❌ CGAL error while reading SPINE) ======", flush=True)
+            for p in failed_spines:
+                print(p, flush=True)
+            print(f"Всего: {len(failed_spines)}", flush=True)
+            print("============================================================================\n", flush=True)
+        else:
+            print("\n✅ Итог: ошибок чтения шипов не было.\n", flush=True)
+
+        self.__init__(spine_meshes, dendrite_meshes, spine_to_dendrite, spine_attachment_centers, branch_path)
+        return self
+
+    def load(self, folder_path: str = "output",
+             spine_file_pattern: str = "**/spine_*.off",
+             load_attachment_centers: bool = False,
+             dataset_format: str = "labid",
+             debug_attachment_points: bool = False,
+             attachment_debug_limit: Optional[int] = None) -> "SpineMeshDataset":
+        dataset_format = dataset_format.lower()
+        if dataset_format == "labid":
+            return self._load_labid(
+                folder_path=folder_path,
+                spine_file_pattern=spine_file_pattern,
+                load_attachment_centers=load_attachment_centers,
+                debug_attachment_points=debug_attachment_points,
+                attachment_debug_limit=attachment_debug_limit,
+            )
+        if dataset_format == "microns":
+            return self._load_microns(
+                folder_path=folder_path,
+                spine_file_pattern=spine_file_pattern,
+                load_attachment_centers=load_attachment_centers,
+                debug_attachment_points=debug_attachment_points,
+                attachment_debug_limit=attachment_debug_limit,
+            )
+        raise ValueError(f"Unknown dataset_format={dataset_format!r}; expected 'labid' or 'microns'")
 
     def _calculate_v_f(self) -> None:
         self.spine_v_f = preprocess_meshes(self.spine_meshes)
