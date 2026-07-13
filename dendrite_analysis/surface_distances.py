@@ -1066,6 +1066,174 @@ def visualize_distance_result_3d(
     return fig
 
 
+def visualize_spine_pair_mesh_graph_distance_3d(
+    dendrite_mesh: Any,
+    spine_meshes: Dict[str, Any],
+    attachment_points: Sequence[Sequence[float]],
+    result: DistanceMatrixResult,
+    pair: Optional[Tuple[int, int]] = None,
+    spine_names: Optional[Sequence[str]] = None,
+    save_path: Optional[str] = None,
+    title: Optional[str] = None,
+) -> Optional[Any]:
+    """Interactive Plotly figure for one mesh_graph distance path between two spines."""
+    if not _PLOTLY_AVAILABLE:
+        return None
+
+    points = _as_points(attachment_points)
+    if len(points) < 2:
+        return None
+
+    if pair is None:
+        pair = _default_pair(result.distance_matrix)
+    i, j = pair
+    if i == j or i >= len(points) or j >= len(points):
+        return None
+
+    path = (result.paths or {}).get(tuple(pair))
+    if path is None or len(path) == 0:
+        path = _recompute_path_for_result(result, pair)
+    if path is not None:
+        path = np.asarray(path, dtype=float)
+
+    dendrite = polyhedron_to_trimesh(dendrite_mesh)
+    projected = result.projected_points if result.projected_points is not None else points
+    distance = result.distance_matrix[i, j] if result.distance_matrix.size else float("nan")
+
+    fig = _go.Figure()
+
+    def _add_mesh(mesh: Any, name: str, color: str, opacity: float) -> np.ndarray:
+        tm = polyhedron_to_trimesh(mesh)
+        vertices = np.asarray(tm.vertices, dtype=float)
+        faces = np.asarray(tm.faces, dtype=int)
+        fig.add_trace(
+            _go.Mesh3d(
+                x=vertices[:, 0],
+                y=vertices[:, 1],
+                z=vertices[:, 2],
+                i=faces[:, 0],
+                j=faces[:, 1],
+                k=faces[:, 2],
+                color=color,
+                opacity=opacity,
+                name=name,
+                showscale=False,
+                hoverinfo="skip",
+            )
+        )
+        return vertices
+
+    all_points = [_add_mesh(dendrite, "dendrite / branch_mesh", "#bdbdbd", 0.22)]
+
+    names = list(spine_names) if spine_names is not None else list(spine_meshes.keys())
+    selected_names = []
+    for index in pair:
+        if index < len(names):
+            selected_names.append(names[index])
+
+    spine_colors = ["#1f77b4", "#ff7f0e"]
+    for color, spine_name in zip(spine_colors, selected_names):
+        spine_mesh = spine_meshes.get(spine_name)
+        if spine_mesh is None:
+            continue
+        all_points.append(_add_mesh(spine_mesh, f"spine: {Path(spine_name).name}", color, 0.72))
+
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[:, 0],
+            y=projected[:, 1],
+            z=projected[:, 2],
+            mode="markers",
+            marker={"size": 3, "color": "#6baed6", "opacity": 0.5},
+            name="all attachment points projected to mesh",
+            hoverinfo="skip",
+        )
+    )
+
+    selected_projected = projected[[i, j]]
+    selected_original = points[[i, j]]
+    point_labels = [
+        f"{i}: {Path(selected_names[0]).name if len(selected_names) > 0 else 'spine'}",
+        f"{j}: {Path(selected_names[1]).name if len(selected_names) > 1 else 'spine'}",
+    ]
+
+    fig.add_trace(
+        _go.Scatter3d(
+            x=selected_projected[:, 0],
+            y=selected_projected[:, 1],
+            z=selected_projected[:, 2],
+            mode="markers+text",
+            marker={"size": 8, "color": "#d62728"},
+            text=point_labels,
+            textposition="top center",
+            name="selected attachment points on dendrite mesh",
+        )
+    )
+
+    if not np.allclose(selected_original, selected_projected, equal_nan=True):
+        fig.add_trace(
+            _go.Scatter3d(
+                x=selected_original[:, 0],
+                y=selected_original[:, 1],
+                z=selected_original[:, 2],
+                mode="markers",
+                marker={"size": 5, "color": "#9467bd"},
+                name="original attachment points",
+            )
+        )
+
+    if path is not None and len(path) > 0:
+        fig.add_trace(
+            _go.Scatter3d(
+                x=path[:, 0],
+                y=path[:, 1],
+                z=path[:, 2],
+                mode="lines",
+                line={"color": "#d62728", "width": 8},
+                name=f"mesh_graph shortest path, d={distance:.3f}",
+            )
+        )
+        all_points.append(path)
+
+    all_points.extend([selected_projected, selected_original])
+    all_points_array = np.vstack([
+        np.asarray(points_array, dtype=float)
+        for points_array in all_points
+        if points_array is not None and len(points_array) > 0
+    ])
+    finite_points = all_points_array[np.isfinite(all_points_array).all(axis=1)]
+    if len(finite_points) == 0:
+        finite_points = np.zeros((1, 3), dtype=float)
+    mins = finite_points.min(axis=0)
+    maxs = finite_points.max(axis=0)
+    center = (mins + maxs) / 2.0
+    radius = float(np.max(maxs - mins) / 2.0)
+    if not np.isfinite(radius) or radius <= 0:
+        radius = 1.0
+
+    if title is None:
+        title = "mesh_graph distance between the farthest spine pair"
+
+    fig.update_layout(
+        title=f"{title}<br>pair=({i}, {j}), distance={distance:.4f}",
+        scene={
+            "xaxis": {"range": [center[0] - radius, center[0] + radius], "title": "X"},
+            "yaxis": {"range": [center[1] - radius, center[1] + radius], "title": "Y"},
+            "zaxis": {"range": [center[2] - radius, center[2] + radius], "title": "Z"},
+            "aspectmode": "cube",
+        },
+        height=720,
+        margin={"l": 0, "r": 0, "b": 0, "t": 90},
+        legend={"itemsizing": "constant"},
+    )
+
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+
+    return fig
+
+
 def summarize_distance_results(results: Dict[str, DistanceMatrixResult]) -> pd.DataFrame:
     rows = []
     for method, result in results.items():
