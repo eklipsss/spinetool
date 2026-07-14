@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 import numpy as np
 import pandas as pd
+import trimesh
 from ipywidgets import widgets
 from sklearn.decomposition import PCA
 
@@ -17,6 +18,10 @@ from spine_analysis.mesh.utils import MeshDataset, LineSet, preprocess_meshes, _
 from spine_analysis.mesh.vizualization import _add_line_set_to_viewer, _add_mesh_to_viewer_as_wireframe
 from spine_analysis.shape_metric import OldChordDistributionSpineMetric, HistogramSpineMetric, FloatSpineMetric, \
     SpineMetric, JunctionCenterSpineMetric
+from spine_analysis.shape_metric.junction_metric import (
+    select_trimesh_junction_boundary_loop,
+    trimesh_boundary_edge_loops,
+)
 from spine_analysis.shape_metric.io_metric import SpineMetricDataset
 from spine_analysis.shape_metric.utils import calculate_metrics, _get_junction_triangles, get_facet_norm, \
     get_rotation_matrix, get_attachment_center, register_attachment_center, register_dendrite_skeleton
@@ -55,6 +60,12 @@ DARK_GRAY = (0.30, 0.30, 0.30)
 BLACK = (0.0, 0.0, 0.0)
 
 V_F = Tuple[np.ndarray, np.ndarray]
+
+
+def _mesh_to_v_f_any(mesh) -> V_F:
+    if isinstance(mesh, trimesh.Trimesh):
+        return np.asarray(mesh.vertices, dtype=float), np.asarray(mesh.faces, dtype=int)
+    return _mesh_to_v_f(mesh)
 
 
 class SpineMeshDataset:
@@ -340,6 +351,62 @@ class SpineMeshDataset:
         return np.asarray([vector.x(), vector.y(), vector.z()], dtype=float)
 
     @staticmethod
+    def _validate_trimesh_before_native_load(mesh_path: Path, require_faces: bool = True) -> Tuple[bool, str]:
+        try:
+            mesh = trimesh.load_mesh(mesh_path, process=False)
+        except Exception as exc:
+            return False, f"trimesh cannot read mesh: {exc}"
+
+        if isinstance(mesh, trimesh.Scene):
+            if not mesh.geometry:
+                return False, "trimesh scene has no geometry"
+            try:
+                mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+            except Exception as exc:
+                return False, f"trimesh cannot concatenate scene geometry: {exc}"
+
+        if not isinstance(mesh, trimesh.Trimesh):
+            return False, f"trimesh returned unsupported object: {type(mesh).__name__}"
+
+        vertices = np.asarray(mesh.vertices, dtype=float)
+        faces = np.asarray(mesh.faces, dtype=int)
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) < 3:
+            return False, f"invalid vertices shape/count: {vertices.shape}"
+        if not np.isfinite(vertices).all():
+            return False, "vertices contain NaN or Inf"
+        if require_faces and (faces.ndim != 2 or faces.shape[1] != 3 or len(faces) == 0):
+            return False, f"invalid triangular faces shape/count: {faces.shape}"
+        if len(faces) > 0:
+            if faces.min() < 0 or faces.max() >= len(vertices):
+                return False, "faces reference missing vertices"
+            triangles = vertices[faces]
+            areas2 = np.linalg.norm(
+                np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+                axis=1,
+            )
+            valid_area_mask = np.isfinite(areas2) & (areas2 > 1e-12)
+            if require_faces and not valid_area_mask.any():
+                return False, "all faces are degenerate"
+        return True, ""
+
+    @staticmethod
+    def _load_trimesh_mesh(mesh_path: Path) -> trimesh.Trimesh:
+        mesh = trimesh.load_mesh(mesh_path, process=False)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise ValueError(f"trimesh returned unsupported object: {type(mesh).__name__}")
+        return mesh
+
+    @staticmethod
+    def _copy_invalid_mesh(mesh_path: Path, incorrect_dir: Path) -> None:
+        incorrect_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(mesh_path, incorrect_dir / mesh_path.name)
+        except Exception as copy_err:
+            print(f"⚠️ Не удалось скопировать {mesh_path} в '{incorrect_dir}': {copy_err}", flush=True)
+
+    @staticmethod
     def _load_attachment_centers(folder_path: Path, load_attachment_centers: bool) -> Dict[str, np.ndarray]:
         if not load_attachment_centers:
             return {}
@@ -363,7 +430,19 @@ class SpineMeshDataset:
             return np.asarray(registered_center, dtype=float), "attachment_centers.pkl"
 
         center_vec = JunctionCenterSpineMetric(spine_mesh)._value
-        return SpineMeshDataset._vector_to_array(center_vec), "JunctionCenterSpineMetric heuristic"
+        source = "JunctionCenterSpineMetric heuristic"
+        if isinstance(spine_mesh, trimesh.Trimesh):
+            loops = trimesh_boundary_edge_loops(spine_mesh)
+            selected_loop = select_trimesh_junction_boundary_loop(spine_mesh)
+            closed_count = sum(1 for loop in loops if loop["is_closed"])
+            if selected_loop is None:
+                source += " (no boundary loops; fallback)"
+            else:
+                source += (
+                    f" ({len(loops)} boundary component(s), {closed_count} closed; "
+                    f"selected n_edges={selected_loop['n_edges']}, closed={selected_loop['is_closed']})"
+                )
+        return SpineMeshDataset._vector_to_array(center_vec), source
 
     @staticmethod
     def _plot_attachment_debug(
@@ -385,7 +464,7 @@ class SpineMeshDataset:
                 pass
 
             def add_mesh(fig, mesh, name: str, color: str, opacity: float) -> np.ndarray:
-                vertices, faces = _mesh_to_v_f(mesh)
+                vertices, faces = _mesh_to_v_f_any(mesh)
                 fig.add_trace(
                     go.Mesh3d(
                         x=vertices[:, 0],
@@ -401,6 +480,59 @@ class SpineMeshDataset:
                     )
                 )
                 return vertices
+
+            def add_boundary_loops(fig, mesh) -> None:
+                if not isinstance(mesh, trimesh.Trimesh):
+                    return
+                vertices = np.asarray(mesh.vertices, dtype=float)
+                loops = trimesh_boundary_edge_loops(mesh)
+                selected_loop = select_trimesh_junction_boundary_loop(mesh)
+                selected_edges = set()
+                if selected_loop is not None:
+                    selected_edges = {
+                        tuple(sorted((int(edge[0]), int(edge[1]))))
+                        for edge in np.asarray(selected_loop["edges"], dtype=int)
+                    }
+                colors = [
+                    "#d62728",
+                    "#2ca02c",
+                    "#9467bd",
+                    "#ff7f0e",
+                    "#17becf",
+                    "#e377c2",
+                    "#bcbd22",
+                    "#8c564b",
+                ]
+                for loop_index, loop in enumerate(loops):
+                    edges = np.asarray(loop["edges"], dtype=int)
+                    current_edges = {
+                        tuple(sorted((int(edge[0]), int(edge[1]))))
+                        for edge in edges
+                    }
+                    is_selected = bool(selected_edges) and current_edges == selected_edges
+                    xs, ys, zs = [], [], []
+                    for start, end in edges:
+                        segment = vertices[[int(start), int(end)]]
+                        xs.extend([segment[0, 0], segment[1, 0], None])
+                        ys.extend([segment[0, 1], segment[1, 1], None])
+                        zs.extend([segment[0, 2], segment[1, 2], None])
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=xs,
+                            y=ys,
+                            z=zs,
+                            mode="lines",
+                            line={
+                                "color": colors[loop_index % len(colors)],
+                                "width": 8 if is_selected else 5,
+                            },
+                            name=(
+                                f"{'selected ' if is_selected else ''}"
+                                f"boundary #{loop_index + 1}: "
+                                f"edges={loop['n_edges']}, closed={loop['is_closed']}"
+                            ),
+                        )
+                    )
 
             def add_attachment_point(fig) -> None:
                 fig.add_trace(
@@ -436,6 +568,7 @@ class SpineMeshDataset:
 
             spine_fig = go.Figure()
             spine_vertices = add_mesh(spine_fig, spine_mesh, "spine", "#8cb6d9", 0.65)
+            add_boundary_loops(spine_fig, spine_mesh)
             add_attachment_point(spine_fig)
             spine_points = np.vstack([spine_vertices, attachment_center.reshape(1, 3)])
             spine_fig.update_layout(
@@ -448,6 +581,7 @@ class SpineMeshDataset:
             combined_fig = go.Figure()
             dendrite_vertices = add_mesh(combined_fig, dendrite_mesh, "dendrite", "#bdbdbd", 0.28)
             spine_vertices = add_mesh(combined_fig, spine_mesh, "spine", "#8cb6d9", 0.72)
+            add_boundary_loops(combined_fig, spine_mesh)
             add_attachment_point(combined_fig)
             combined_points = np.vstack([
                 dendrite_vertices,
@@ -483,6 +617,29 @@ class SpineMeshDataset:
             f"[attachment] {spine_name}: source={source}, point={attachment_center.tolist()}",
             flush=True,
         )
+        if isinstance(spine_mesh, trimesh.Trimesh):
+            loops = trimesh_boundary_edge_loops(spine_mesh)
+            selected_loop = select_trimesh_junction_boundary_loop(spine_mesh)
+            selected_edges = set()
+            if selected_loop is not None:
+                selected_edges = {
+                    tuple(sorted((int(edge[0]), int(edge[1]))))
+                    for edge in np.asarray(selected_loop["edges"], dtype=int)
+                }
+            if not loops:
+                print(f"[boundary] {spine_name}: no boundary edges found", flush=True)
+            for loop_index, loop in enumerate(loops):
+                current_edges = {
+                    tuple(sorted((int(edge[0]), int(edge[1]))))
+                    for edge in np.asarray(loop["edges"], dtype=int)
+                }
+                is_selected = bool(selected_edges) and current_edges == selected_edges
+                print(
+                    f"[boundary] {spine_name}: component={loop_index + 1}, "
+                    f"edges={loop['n_edges']}, vertices={len(loop['vertex_indices'])}, "
+                    f"closed={loop['is_closed']}, selected={is_selected}",
+                    flush=True,
+                )
         SpineMeshDataset._plot_attachment_debug(
             spine_name=spine_name,
             spine_mesh=spine_mesh,
@@ -520,21 +677,32 @@ class SpineMeshDataset:
             spine_path = str(spine_name).replace('\\', '/')
             print("spine_name", spine_name, flush=True)
 
+            is_valid, validation_error = self._validate_trimesh_before_native_load(spine_name)
+            if not is_valid:
+                print(f"\n❌ Mesh validation failed before CGAL for SPINE: {spine_name}\n{validation_error}\n", flush=True)
+                failed_spines.append(spine_path)
+                self._copy_invalid_mesh(spine_name, incorrect_dir)
+                continue
+
             poly, err = self.capture_native_stderr(Polyhedron_3, spine_path)
             if "input error" in err or "cannot open file" in err:
                 print(f"\n❌ CGAL error while reading SPINE: {spine_name}\n{err}\n", flush=True)
                 failed_spines.append(spine_path)
 
-                if not incorrect_dir_created:
-                    incorrect_dir.mkdir(parents=True, exist_ok=True)
-                    incorrect_dir_created = True
-
-                try:
-                    shutil.copy2(spine_name, incorrect_dir / spine_name.name)
-                except Exception as copy_err:
-                    print(f"⚠️ Не удалось скопировать {spine_name} в '{incorrect_dir}': {copy_err}", flush=True)
+                self._copy_invalid_mesh(spine_name, incorrect_dir)
 
                 continue
+
+            dendrite_path = os.path.join(spine_name.parent, "surface_mesh.off").replace('\\', '/')
+            if dendrite_path not in dendrite_meshes:
+                dendrite_path_obj = Path(dendrite_path)
+                is_valid, validation_error = self._validate_trimesh_before_native_load(dendrite_path_obj)
+                if not is_valid:
+                    print(f"\n❌ Mesh validation failed before CGAL for DENDRITE: {dendrite_path_obj}\n{validation_error}\n", flush=True)
+                    failed_spines.append(spine_path)
+                    self._copy_invalid_mesh(spine_name, incorrect_dir)
+                    continue
+                dendrite_meshes[dendrite_path] = Polyhedron_3(dendrite_path)
 
             spine_meshes[spine_path] = poly
             if load_attachment_centers:
@@ -543,10 +711,6 @@ class SpineMeshDataset:
                     attachment_center = np.asarray(attachment_centers[spine_key], dtype=float)
                     spine_attachment_centers[spine_path] = attachment_center
                     register_attachment_center(poly, attachment_center)
-
-            dendrite_path = os.path.join(spine_name.parent, "surface_mesh.off").replace('\\', '/')
-            if dendrite_path not in dendrite_meshes:
-                dendrite_meshes[dendrite_path] = Polyhedron_3(dendrite_path)
             spine_to_dendrite[spine_path] = dendrite_path
 
             self._maybe_show_attachment_debug(
@@ -601,17 +765,23 @@ class SpineMeshDataset:
             return self
 
         dendrite_path = str(dendrite_mesh_path).replace('\\', '/')
-        dendrite_poly, dendrite_err = self.capture_native_stderr(Polyhedron_3, dendrite_path)
-        if "input error" in dendrite_err or "cannot open file" in dendrite_err:
-            print(f"\n❌ CGAL error while reading DENDRITE: {dendrite_mesh_path}\n{dendrite_err}\n", flush=True)
+        is_valid, validation_error = self._validate_trimesh_before_native_load(dendrite_mesh_path)
+        if not is_valid:
+            print(f"\n❌ Mesh validation failed for MICrONS DENDRITE: {dendrite_mesh_path}\n{validation_error}\n", flush=True)
             self.__init__({}, {}, {}, {}, branch_path)
             return self
-        dendrite_meshes[dendrite_path] = dendrite_poly
+        try:
+            dendrite_mesh = self._load_trimesh_mesh(dendrite_mesh_path)
+        except Exception as exc:
+            print(f"\n❌ trimesh error while reading MICrONS DENDRITE: {dendrite_mesh_path}\n{exc}\n", flush=True)
+            self.__init__({}, {}, {}, {}, branch_path)
+            return self
+        dendrite_meshes[dendrite_path] = dendrite_mesh
 
         if skeleton_path.exists():
             try:
                 skeleton = np.load(skeleton_path, allow_pickle=True)
-                register_dendrite_skeleton(dendrite_poly, skeleton)
+                register_dendrite_skeleton(dendrite_mesh, skeleton)
                 print(f"[microns] registered branch_skeleton.npy: {skeleton_path}", flush=True)
             except Exception as exc:
                 print(f"⚠️ Не удалось загрузить branch_skeleton.npy для {branch_path}: {exc}", flush=True)
@@ -628,35 +798,35 @@ class SpineMeshDataset:
             spine_path = str(spine_name).replace('\\', '/')
             print("spine_name", spine_name, flush=True)
 
-            poly, err = self.capture_native_stderr(Polyhedron_3, spine_path)
-            if "input error" in err or "cannot open file" in err:
-                print(f"\n❌ CGAL error while reading SPINE: {spine_name}\n{err}\n", flush=True)
+            is_valid, validation_error = self._validate_trimesh_before_native_load(spine_name)
+            if not is_valid:
+                print(f"\n❌ Mesh validation failed for MICrONS SPINE: {spine_name}\n{validation_error}\n", flush=True)
                 failed_spines.append(spine_path)
-
-                if not incorrect_dir_created:
-                    incorrect_dir.mkdir(parents=True, exist_ok=True)
-                    incorrect_dir_created = True
-
-                try:
-                    shutil.copy2(spine_name, incorrect_dir / spine_name.name)
-                except Exception as copy_err:
-                    print(f"⚠️ Не удалось скопировать {spine_name} в '{incorrect_dir}': {copy_err}", flush=True)
+                self._copy_invalid_mesh(spine_name, incorrect_dir)
                 continue
 
-            spine_meshes[spine_path] = poly
+            try:
+                spine_mesh = self._load_trimesh_mesh(spine_name)
+            except Exception as exc:
+                print(f"\n❌ trimesh error while reading MICrONS SPINE: {spine_name}\n{exc}\n", flush=True)
+                failed_spines.append(spine_path)
+                self._copy_invalid_mesh(spine_name, incorrect_dir)
+                continue
+
+            spine_meshes[spine_path] = spine_mesh
             if load_attachment_centers:
                 spine_key = spine_name.stem
                 if spine_key in attachment_centers:
                     attachment_center = np.asarray(attachment_centers[spine_key], dtype=float)
                     spine_attachment_centers[spine_path] = attachment_center
-                    register_attachment_center(poly, attachment_center)
+                    register_attachment_center(spine_mesh, attachment_center)
             spine_to_dendrite[spine_path] = dendrite_path
 
             self._maybe_show_attachment_debug(
                 spine_name=spine_path,
-                spine_mesh=poly,
+                spine_mesh=spine_mesh,
                 dendrite_name=dendrite_path,
-                dendrite_mesh=dendrite_poly,
+                dendrite_mesh=dendrite_mesh,
                 debug_attachment_points=debug_attachment_points,
                 debug_index=debug_index,
                 attachment_debug_limit=attachment_debug_limit,
@@ -720,7 +890,7 @@ def remove_file(file_path: str) -> None:
 def preprocess_meshes(spine_meshes: MeshDataset) -> Dict[str, V_F]:
     output = {}
     for (spine_name, spine_mesh) in spine_meshes.items():
-        output[spine_name] = _mesh_to_v_f(spine_mesh)
+        output[spine_name] = _mesh_to_v_f_any(spine_mesh)
     return output
 
 

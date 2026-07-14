@@ -1,6 +1,6 @@
 import math
 from abc import ABC, abstractmethod
-from typing import List, Any, Set
+from typing import List, Any, Set, Dict, Optional
 
 import numpy as np
 import trimesh
@@ -21,17 +21,97 @@ def _vector_from_array(point: np.ndarray) -> Vector_3:
     return Vector_3(float(point[0]), float(point[1]), float(point[2]))
 
 
-def _trimesh_junction_vertex_indices(spine_mesh: trimesh.Trimesh) -> np.ndarray:
+def trimesh_boundary_edge_loops(spine_mesh: trimesh.Trimesh) -> List[Dict[str, Any]]:
+    """Return connected boundary-edge components for a trimesh spine mesh.
+
+    Each component is reported as a dict with:
+    - edges: (n_edges, 2) vertex-index array;
+    - vertex_indices: unique vertices participating in the component;
+    - is_closed: True when every component vertex has boundary degree 2.
+    """
     faces = np.asarray(spine_mesh.faces, dtype=int)
     if len(faces) == 0:
-        return np.arange(len(spine_mesh.vertices), dtype=int)
+        return []
 
     edges = np.vstack((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
     edges = np.sort(edges, axis=1)
     unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
     boundary_edges = unique_edges[counts == 1]
-    if len(boundary_edges) > 0:
-        return np.unique(boundary_edges.reshape(-1)).astype(int)
+    if len(boundary_edges) == 0:
+        return []
+
+    vertex_to_edge_ids: Dict[int, List[int]] = {}
+    for edge_id, (start, end) in enumerate(boundary_edges):
+        vertex_to_edge_ids.setdefault(int(start), []).append(edge_id)
+        vertex_to_edge_ids.setdefault(int(end), []).append(edge_id)
+
+    unvisited = set(range(len(boundary_edges)))
+    loops: List[Dict[str, Any]] = []
+    while unvisited:
+        seed = unvisited.pop()
+        component_edge_ids = {seed}
+        stack = [seed]
+        while stack:
+            edge_id = stack.pop()
+            for vertex_id in boundary_edges[edge_id]:
+                for next_edge_id in vertex_to_edge_ids.get(int(vertex_id), []):
+                    if next_edge_id in unvisited:
+                        unvisited.remove(next_edge_id)
+                        component_edge_ids.add(next_edge_id)
+                        stack.append(next_edge_id)
+
+        component_edges = boundary_edges[np.asarray(sorted(component_edge_ids), dtype=int)]
+        component_vertices = np.unique(component_edges.reshape(-1)).astype(int)
+        degrees = {int(vertex_id): 0 for vertex_id in component_vertices}
+        for start, end in component_edges:
+            degrees[int(start)] += 1
+            degrees[int(end)] += 1
+        is_closed = len(component_vertices) >= 3 and all(degree == 2 for degree in degrees.values())
+        loops.append(
+            {
+                "edges": component_edges.astype(int),
+                "vertex_indices": component_vertices,
+                "is_closed": bool(is_closed),
+                "n_edges": int(len(component_edges)),
+            }
+        )
+
+    loops.sort(
+        key=lambda loop: (
+            not bool(loop["is_closed"]),
+            -int(loop["n_edges"]),
+            int(np.min(loop["vertex_indices"])) if len(loop["vertex_indices"]) else 0,
+        )
+    )
+    return loops
+
+
+def select_trimesh_junction_boundary_loop(spine_mesh: trimesh.Trimesh) -> Optional[Dict[str, Any]]:
+    loops = trimesh_boundary_edge_loops(spine_mesh)
+    if not loops:
+        return None
+    closed_loops = [loop for loop in loops if loop["is_closed"]]
+    candidates = closed_loops if closed_loops else loops
+    return max(
+        candidates,
+        key=lambda loop: (
+            int(loop["n_edges"]),
+            len(loop["vertex_indices"]),
+        ),
+    )
+
+
+def _trimesh_junction_vertex_indices(spine_mesh: trimesh.Trimesh) -> np.ndarray:
+    faces = np.asarray(spine_mesh.faces, dtype=int)
+    if len(faces) == 0:
+        return np.arange(len(spine_mesh.vertices), dtype=int)
+
+    selected_loop = select_trimesh_junction_boundary_loop(spine_mesh)
+    if selected_loop is not None:
+        return np.asarray(selected_loop["vertex_indices"], dtype=int)
+
+    edges = np.vstack((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
+    edges = np.sort(edges, axis=1)
 
     degrees = np.bincount(edges.reshape(-1), minlength=len(spine_mesh.vertices))
     if len(degrees) == 0:
