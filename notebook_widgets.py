@@ -351,7 +351,82 @@ class SpineMeshDataset:
         return np.asarray([vector.x(), vector.y(), vector.z()], dtype=float)
 
     @staticmethod
-    def _validate_trimesh_before_native_load(mesh_path: Path, require_faces: bool = True) -> Tuple[bool, str]:
+    @staticmethod
+    def _loop_center_radius(mesh: trimesh.Trimesh, loop: Dict[str, object]) -> Tuple[np.ndarray, float]:
+        vertices = np.asarray(mesh.vertices, dtype=float)
+        loop_vertex_indices = np.asarray(loop["vertex_indices"], dtype=int)
+        loop_vertices = vertices[loop_vertex_indices]
+        center = loop_vertices.mean(axis=0)
+        distances = np.linalg.norm(loop_vertices - center, axis=1)
+        radius = float(np.median(distances)) if len(distances) else 0.0
+        return center, radius
+
+    @staticmethod
+    def _is_probably_dendrite_tube_fragment(mesh: trimesh.Trimesh) -> Tuple[bool, str]:
+        loops = trimesh_boundary_edge_loops(mesh)
+        closed_loops = [loop for loop in loops if loop["is_closed"]]
+        if len(closed_loops) < 2:
+            return False, ""
+
+        ranked_loops = sorted(
+            closed_loops,
+            key=lambda loop: (int(loop["n_edges"]), len(loop["vertex_indices"])),
+            reverse=True,
+        )
+        first, second = ranked_loops[:2]
+        first_edges = int(first["n_edges"])
+        second_edges = int(second["n_edges"])
+        if first_edges < 8 or second_edges < 8:
+            return False, ""
+
+        edge_count_ratio = second_edges / max(first_edges, 1)
+        if edge_count_ratio < 0.6:
+            return False, ""
+
+        first_center, first_radius = SpineMeshDataset._loop_center_radius(mesh, first)
+        second_center, second_radius = SpineMeshDataset._loop_center_radius(mesh, second)
+        max_radius = max(first_radius, second_radius)
+        min_radius = min(first_radius, second_radius)
+        if max_radius <= 1e-12 or min_radius / max_radius < 0.45:
+            return False, ""
+
+        vertices = np.asarray(mesh.vertices, dtype=float)
+        centered = vertices - vertices.mean(axis=0)
+        try:
+            _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        except Exception:
+            return False, ""
+
+        principal_axis = vh[0]
+        axial_positions = centered @ principal_axis
+        axial_extent = float(axial_positions.max() - axial_positions.min()) if len(axial_positions) else 0.0
+        radial_vectors = centered - np.outer(axial_positions, principal_axis)
+        radial_extent = float(np.percentile(np.linalg.norm(radial_vectors, axis=1), 95)) if len(vertices) else 0.0
+        elongation = axial_extent / max(radial_extent, 1e-12)
+        if elongation < 2.0:
+            return False, ""
+
+        loop_center_distance = float(np.linalg.norm(first_center - second_center))
+        if loop_center_distance < 1.5 * max_radius:
+            return False, ""
+
+        reason = (
+            "likely dendrite tube fragment: "
+            f"{len(closed_loops)} closed boundary loops; "
+            f"two largest loops have edges=({first_edges}, {second_edges}), "
+            f"edge_ratio={edge_count_ratio:.2f}, "
+            f"radii=({first_radius:.3g}, {second_radius:.3g}), "
+            f"elongation={elongation:.2f}, "
+            f"loop_center_distance={loop_center_distance:.3g}"
+        )
+        return True, reason
+
+    @staticmethod
+    def _validate_trimesh_before_native_load(
+        mesh_path: Path,
+        require_faces: bool = True,
+        reject_tube_like_spine: bool = False,
+    ) -> Tuple[bool, str]:
         try:
             mesh = trimesh.load_mesh(mesh_path, process=False)
         except Exception as exc:
@@ -387,6 +462,10 @@ class SpineMeshDataset:
             valid_area_mask = np.isfinite(areas2) & (areas2 > 1e-12)
             if require_faces and not valid_area_mask.any():
                 return False, "all faces are degenerate"
+        if reject_tube_like_spine:
+            is_tube_fragment, tube_reason = SpineMeshDataset._is_probably_dendrite_tube_fragment(mesh)
+            if is_tube_fragment:
+                return False, tube_reason
         return True, ""
 
     @staticmethod
@@ -677,7 +756,10 @@ class SpineMeshDataset:
             spine_path = str(spine_name).replace('\\', '/')
             print("spine_name", spine_name, flush=True)
 
-            is_valid, validation_error = self._validate_trimesh_before_native_load(spine_name)
+            is_valid, validation_error = self._validate_trimesh_before_native_load(
+                spine_name,
+                reject_tube_like_spine=True,
+            )
             if not is_valid:
                 print(f"\n❌ Mesh validation failed before CGAL for SPINE: {spine_name}\n{validation_error}\n", flush=True)
                 failed_spines.append(spine_path)
@@ -725,11 +807,11 @@ class SpineMeshDataset:
             debug_index += 1
 
         if failed_spines:
-            print("\n====== Итог: шипы с ошибкой чтения (❌ CGAL error while reading SPINE) ======", flush=True)
+            print("\n====== Итог: пропущенные шипы (ошибка чтения / validation / tube-like fragment) ======", flush=True)
             for p in failed_spines:
                 print(p, flush=True)
             print(f"Всего: {len(failed_spines)}", flush=True)
-            print("============================================================================\n", flush=True)
+            print("======================================================================================\n", flush=True)
         else:
             print("\n✅ Итог: ошибок чтения шипов не было.\n", flush=True)
 
@@ -798,7 +880,10 @@ class SpineMeshDataset:
             spine_path = str(spine_name).replace('\\', '/')
             print("spine_name", spine_name, flush=True)
 
-            is_valid, validation_error = self._validate_trimesh_before_native_load(spine_name)
+            is_valid, validation_error = self._validate_trimesh_before_native_load(
+                spine_name,
+                reject_tube_like_spine=True,
+            )
             if not is_valid:
                 print(f"\n❌ Mesh validation failed for MICrONS SPINE: {spine_name}\n{validation_error}\n", flush=True)
                 failed_spines.append(spine_path)
@@ -834,11 +919,11 @@ class SpineMeshDataset:
             debug_index += 1
 
         if failed_spines:
-            print("\n====== Итог: шипы с ошибкой чтения (❌ CGAL error while reading SPINE) ======", flush=True)
+            print("\n====== Итог: пропущенные шипы (ошибка чтения / validation / tube-like fragment) ======", flush=True)
             for p in failed_spines:
                 print(p, flush=True)
             print(f"Всего: {len(failed_spines)}", flush=True)
-            print("============================================================================\n", flush=True)
+            print("======================================================================================\n", flush=True)
         else:
             print("\n✅ Итог: ошибок чтения шипов не было.\n", flush=True)
 

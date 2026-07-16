@@ -17,7 +17,7 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 import meshplot as mp
 import networkx as nx
-import community as community_louvain
+# import community as community_louvain
 
 from CGAL.CGAL_Polyhedron_3 import Polyhedron_3
 from CGAL.CGAL_Polygon_mesh_processing import volume, does_self_intersect
