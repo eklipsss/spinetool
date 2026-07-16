@@ -249,7 +249,7 @@ class DendrComparisonMixin:
     def compare_grouping_metrics(self) -> None:
         # compare_ab_wt(self.ab.nndist_list, self.wt.nndist_list, 'Метрика NNdist \n(исходные координаты)')      
         # compare_ab_wt(self.ab.nndist_norm_list, self.wt.nndist_norm_list, 'Нормализованная метрика NNdist \n(исходные координаты)')
-        # compare_ab_wt(self.ab.entropy_list, self.wt.entropy_list, 'Энтропия Шеннона для метрики PCF \n(исходные координаты)')
+        # compare_ab_wt(self.ab.entropy_list, self.wt.entropy_list, 'Энтропия Шеннона для pair-distance profile \n(исходные координаты)')
 
         # compare_ab_wt(self.ab.moran_I_list, self.wt.moran_I_list, 'Индекс Морана I \n(исходные координаты)')
         # compare_ab_wt(self.ab.moran_z_list, self.wt.moran_z_list, 'Индекс Морана zI \n(исходные координаты)')
@@ -261,7 +261,7 @@ class DendrComparisonMixin:
 
         compare_ab_wt(self.ab.nndist_c_list, self.wt.nndist_c_list, 'Метрика NNdist \n(цилиндрические координаты)')  
         compare_ab_wt(self.ab.nndist_norm_c_list, self.wt.nndist_norm_c_list, 'Нормализованная метрика NNdist \n(цилиндрические координаты)')
-        compare_ab_wt(self.ab.entropy_c_list, self.wt.entropy_c_list, 'Энтропия Шеннона для метрики PCF \n(цилиндрические координаты)')
+        compare_ab_wt(self.ab.entropy_c_list, self.wt.entropy_c_list, 'Энтропия Шеннона для pair-distance profile \n(цилиндрические координаты)')
 
         ab = filtered_list = [x for x in self.ab.moran_I_c_list if x >= -1]
         wt = filtered_list = [x for x in self.wt.moran_I_c_list if x >= -1]
@@ -547,5 +547,4 @@ class DendrComparisonMixin:
             print(f"График сохранен в файл: {output_filename}")
 
             plt.show()
-
 

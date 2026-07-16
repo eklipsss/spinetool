@@ -63,6 +63,12 @@ save_cluster_dendr_metric_dict = {}
 save_graph_dendr_metric_dict = {}
 save_all_dendr_metric_dict = []
 save_cluster_type_metric_dict = {}
+save_spatial_morphology_summary_records = []
+save_spatial_morphology_spine_records = []
+save_spatial_morphology_cluster_records = []
+save_spatial_morphology_test_records = []
+save_spatial_morphology_permutation_records = []
+save_structural_organization_vector_records = []
 
 
 def reset_saved_data() -> None:
@@ -74,6 +80,12 @@ def reset_saved_data() -> None:
     save_graph_dendr_metric_dict.clear()
     save_all_dendr_metric_dict.clear()
     save_cluster_type_metric_dict.clear()
+    save_spatial_morphology_summary_records.clear()
+    save_spatial_morphology_spine_records.clear()
+    save_spatial_morphology_cluster_records.clear()
+    save_spatial_morphology_test_records.clear()
+    save_spatial_morphology_permutation_records.clear()
+    save_structural_organization_vector_records.clear()
 
 # class_dict = {'Undefined' : [], 'Stubby' : [], 'Mushroom' : [],  'Thin' : [], 'Filopodia' : []}
 # cluster_dict = { 0 : [], 1 : [], 2 : [], 3 : [], 4 : [], 5 : [], 6: [] } 

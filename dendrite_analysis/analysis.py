@@ -47,14 +47,14 @@ class DendrAnalysis(DendrComparisonMixin):
         self.wt.calculate_grouping_metrics()
 
         # plt.figure(figsize=(10, 6))
-        # plt.plot(self.ab.r_values_c[:self.ab.pcf_len_c], self.ab.average_pcf_values_c, label='PCF', color=group_colors['Ab'], linewidth=3)
-        # plt.plot(self.wt.r_values_c[:self.wt.pcf_len_c], self.wt.average_pcf_values_c, label='PCF', color=group_colors['Wt'], linewidth=3)
+        # plt.plot(self.ab.r_values_c[:self.ab.pcf_len_c], self.ab.average_pcf_values_c, label='pair-distance profile', color=group_colors['Ab'], linewidth=3)
+        # plt.plot(self.wt.r_values_c[:self.wt.pcf_len_c], self.wt.average_pcf_values_c, label='pair-distance profile', color=group_colors['Wt'], linewidth=3)
         # plt.xlabel('Попарные расстояния', fontsize = 18)
-        # plt.ylabel('PCF', fontsize = 18)
+        # plt.ylabel('Pair-distance profile', fontsize = 18)
         # plt.legend(fontsize = 16)
         # plt.xticks(fontsize = 16)
         # plt.yticks(fontsize = 16)
-        # title = 'Усредненный график PCF - Ab-Wt (цилиндрические координаты)'
+        # title = 'Усредненный график pair-distance profile - Ab-Wt (цилиндрические координаты)'
         # plt.title(title, fontsize = 18)
 
         # output_filename = "graphics/" + title

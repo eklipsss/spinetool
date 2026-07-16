@@ -266,15 +266,15 @@ class DendrType:
         self.average_pcf_values_c = np.mean(pcf_values_list_c, axis=0)
         
         plt.figure(figsize=(10, 6))
-        plt.plot(r_values[:pcf_len], self.average_pcf_values, label='pcf', color='#8cbd3a')
+        plt.plot(r_values[:pcf_len], self.average_pcf_values, label='pair-distance profile', color='#8cbd3a')
         # plt.plot(self.dendrites[0].r_values[:pcf_len], wt_avg_hist, label='wt', color='#86dd18')
         # plt.plot(bins[:-1], ab_avg_hist, label='ab', color='#ff6889')
         plt.xlabel('Попарные расстояния', fontsize = 18)
-        plt.ylabel('PCF', fontsize = 18)
+        plt.ylabel('Pair-distance profile', fontsize = 18)
         plt.legend(fontsize = 16)
         plt.xticks(fontsize = 16)
         plt.yticks(fontsize = 16)
-        title = 'Усредненный график PCF ' + self.type + ' (исходные координаты)'
+        title = 'Усредненный график pair-distance profile ' + self.type + ' (исходные координаты)'
         plt.title(title, fontsize = 18)
 
         output_filename = "graphics/" + title
@@ -284,13 +284,13 @@ class DendrType:
         plt.show()
 
         plt.figure(figsize=(10, 6))
-        plt.plot(r_values_c[:pcf_len_c], self.average_pcf_values_c, label='pcf', color='#8cbd3a')
+        plt.plot(r_values_c[:pcf_len_c], self.average_pcf_values_c, label='pair-distance profile', color='#8cbd3a')
         plt.xlabel('Попарные расстояния', fontsize = 18)
-        plt.ylabel('PCF', fontsize = 18)
+        plt.ylabel('Pair-distance profile', fontsize = 18)
         plt.legend(fontsize = 16)
         plt.xticks(fontsize = 16)
         plt.yticks(fontsize = 16)
-        title = 'Усредненный график PCF ' + self.type + ' (цилиндрические координаты)'
+        title = 'Усредненный график pair-distance profile ' + self.type + ' (цилиндрические координаты)'
         plt.title(title, fontsize = 18)
 
         output_filename = "graphics/" + title
@@ -592,4 +592,3 @@ class DendrType:
     def save_dendr_metrics_without_class_cluster(self) -> None:
         for d in self.dendrites:
             d.save_dendr_metrics_without_class_cluster()
-

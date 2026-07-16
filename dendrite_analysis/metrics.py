@@ -1,6 +1,7 @@
 from .dependencies import *
 from .config import *
 from spine_analysis.shape_metric.utils import _point_2_vec
+from scipy.sparse import csgraph
 
 def make_viewer(width: int = 600, height: int = 600) -> mp.Viewer:
     return mp.Viewer({"width": width, "height": height})
@@ -216,7 +217,7 @@ def calculate_shell_volume(pv_cylindrical_shell, r_sph, R_sph, r_cylindr, R_cyli
     return intersection_volume
 
 
-def calculate_PCF(points, volume: float, r_dendr: float, dr_dendr: float, height: float, cylind_flag: bool = True, dr: float = 0.5, distance_matrix=None):
+def calculate_pair_distance_profile(points, volume: float, r_dendr: float, dr_dendr: float, height: float, cylind_flag: bool = True, dr: float = 0.5, distance_matrix=None):
     dist_list = calculate_distance_matrix(points, cylind_flag, distance_matrix=distance_matrix)
     if dist_list.size == 0:
         return np.array([]), np.array([])
@@ -227,11 +228,9 @@ def calculate_PCF(points, volume: float, r_dendr: float, dr_dendr: float, height
     r_max = np.amax(finite_distances)
         
     r_values = np.arange(0, r_max, dr)
-    pcf_values = np.zeros_like(r_values)
-    pcf_values_norm = np.zeros_like(r_values)
+    pair_distance_profile_values = np.zeros_like(r_values)
     
     n = len(points)
-    density = n / volume
     
     r_dendr = round(r_dendr, 2)
     dr_dendr = round(dr_dendr, 2)
@@ -251,32 +250,46 @@ def calculate_PCF(points, volume: float, r_dendr: float, dr_dendr: float, height
                 if (i != j) & (r <= dist_list[i][j]) & (dist_list[i][j] < r + dr):
                     count+=1
                     
-        pcf_values[k] = count / n
+        # This is an unnormalised pair-distance profile: mean number of neighbours
+        # per spine in the distance bin [r, r + dr). It is intentionally not called
+        # PCF because there is no null-model/shell-volume normalisation here.
+        pair_distance_profile_values[k] = count / n
         # pcf_values_norm[k] = count / (n * shell_volume * density)
                 
     
-    # plt.plot(r_values, pcf_values, label="PCF")
+    # plt.plot(r_values, pair_distance_profile_values, label="Pair-distance profile")
     # plt.xlabel('Расстояние r')
-    # plt.ylabel('g(r)')
-    # plt.title('Функция парной корреляции без деления на объем оболочки и плотность')
+    # plt.ylabel('Mean neighbours per spine')
+    # plt.title('Pair-distance profile without null-model normalisation')
     # plt.show()
     
-    # plt.plot(r_values, pcf_values_norm, label="PCF")
-    # plt.xlabel('Расстояние r')
-    # plt.ylabel('g(r)')
-    # plt.title('Функция парной корреляции')
-    # plt.show()
-    
-    return r_values, pcf_values     
+    return r_values, pair_distance_profile_values
 
 
-def calculate_Shannon_entropy(pcf_values: List[float]) -> float:
-    S = np.sum(pcf_values)
-    probabilities = pcf_values / S
+def calculate_PCF(points, volume: float, r_dendr: float, dr_dendr: float, height: float, cylind_flag: bool = True, dr: float = 0.5, distance_matrix=None):
+    # Deprecated compatibility wrapper. The current implementation is an
+    # unnormalised pair-distance profile, not a mathematically normalised PCF.
+    return calculate_pair_distance_profile(
+        points,
+        volume,
+        r_dendr,
+        dr_dendr,
+        height,
+        cylind_flag=cylind_flag,
+        dr=dr,
+        distance_matrix=distance_matrix,
+    )
+
+
+def calculate_Shannon_entropy(values: List[float]) -> float:
+    values = np.asarray(values, dtype=float)
+    S = np.sum(values)
+    if not np.isfinite(S) or S <= 0:
+        return 0.0
+    probabilities = values / S
     entropy = -np.sum(probabilities[probabilities > 0] * np.log(probabilities[probabilities > 0]))
-    # print("  Энтропия Шеннона для PCF: ", entropy)
     
-    return entropy
+    return float(entropy)
 
 
 def cylindrical_distance(point1, point2):
@@ -366,10 +379,13 @@ def dbscan(points, spine_metrics_dict, cylindr_coords_flag = 0, save_path = None
         )
 
     if eps is None or min_samples is None:
-        print('   Автоматический подбор параметров DBSCAN с помощью теста Крускала-Уоллиса...')
-        eps, min_samples, statistic, p_value = param_from_dbcv(points, spine_metrics_dict, distance_matrix)
-        # eps, min_samples, statistic, p_value = param_from_kruskal(points, spine_metrics_dict, distance_matrix)
-        print(f'   ---> Выбранные параметры: eps={eps:.1f}, min_samples={min_samples}')
+        print('   Автоматический подбор параметров DBSCAN по k-distance heuristic...')
+        eps, min_samples, statistic, p_value = param_from_k_distance(
+            distance_matrix,
+            target_min_samples=3,
+            percentile=75,
+        )
+        print(f'   ---> Выбранные параметры: eps={eps:.4f}, min_samples={min_samples}')
         if eps == 0:
             return np.array([]),0,0,0,0
 
@@ -389,22 +405,103 @@ def dbscan(points, spine_metrics_dict, cylindr_coords_flag = 0, save_path = None
     return labels, eps, min_samples, statistic, p_value
 
 
+def _finite_upper_distances(distance_matrix):
+    if distance_matrix.size == 0:
+        return np.array([], dtype=float)
+    dists = distance_matrix[np.triu_indices_from(distance_matrix, k=1)]
+    dists = dists[np.isfinite(dists) & (dists > 0)]
+    return dists.astype(float)
+
+
+def param_from_k_distance(distance_matrix, target_min_samples=3, percentile=75):
+    n_samples = distance_matrix.shape[0]
+    if n_samples < 2:
+        return 0, 0, 0, 0
+
+    min_samples = min(target_min_samples, n_samples)
+    neighbor_rank = min_samples
+    if neighbor_rank >= n_samples:
+        neighbor_rank = n_samples - 1
+
+    clean_distances = np.asarray(distance_matrix, dtype=float).copy()
+    clean_distances[~np.isfinite(clean_distances)] = np.inf
+    np.fill_diagonal(clean_distances, 0.0)
+
+    sorted_distances = np.sort(clean_distances, axis=1)
+    kth_neighbor_distances = sorted_distances[:, neighbor_rank]
+    kth_neighbor_distances = kth_neighbor_distances[
+        np.isfinite(kth_neighbor_distances) & (kth_neighbor_distances > 0)
+    ]
+
+    if len(kth_neighbor_distances) == 0:
+        finite_distances = _finite_upper_distances(distance_matrix)
+        eps = float(np.percentile(finite_distances, percentile)) if len(finite_distances) else 0.0
+    else:
+        eps = float(np.percentile(kth_neighbor_distances, percentile))
+
+    if not np.isfinite(eps) or eps <= 0:
+        return 0, 0, 0, 0
+
+    print(
+        f"   k-distance: min_samples={min_samples}, "
+        f"neighbor_rank={neighbor_rank}, percentile={percentile}, eps={eps:.4f}"
+    )
+    return eps, min_samples, 0, 0
+
+
+def _fallback_dbscan_params(distance_matrix, min_samples_range):
+    n_samples = distance_matrix.shape[0]
+    if n_samples < 2:
+        return 0, 0
+
+    min_samples = min(3, max(2, n_samples - 1))
+    if min_samples_range:
+        min_samples = min(
+            max(min_samples, min(min_samples_range)),
+            min(max(min_samples_range), max(1, n_samples - 1)),
+        )
+
+    sorted_distances = np.sort(distance_matrix, axis=1)
+    neighbor_index = min(min_samples, sorted_distances.shape[1] - 1)
+    if neighbor_index <= 0:
+        dists = _finite_upper_distances(distance_matrix)
+        eps = float(np.percentile(dists, 25)) if len(dists) else 0.0
+    else:
+        kth_distances = sorted_distances[:, neighbor_index]
+        kth_distances = kth_distances[np.isfinite(kth_distances) & (kth_distances > 0)]
+        eps = float(np.percentile(kth_distances, 75)) if len(kth_distances) else 0.0
+
+    if eps <= 0 or not np.isfinite(eps):
+        dists = _finite_upper_distances(distance_matrix)
+        eps = float(np.median(dists)) if len(dists) else 0.0
+    return eps, min_samples
+
+
 def param_from_dbcv(points, spine_metrics_dict, distance_matrix):
     n_samples = len(points)
-    # Определение диапазонов параметров
-    # min_samples_range = range(2, 10)
-    min_samples_range = [2,3,4,5]
-    dists = distance_matrix[np.triu_indices_from(distance_matrix, k=1)]
-    # eps_range = np.percentile(dists, np.linspace(5, 30, 6))
-    eps = 1 
+    if n_samples < 2:
+        return 0, 0, -1, 0
+
+    min_samples_range = [value for value in [2, 3, 4, 5] if value < n_samples]
+    if not min_samples_range:
+        min_samples_range = [1]
+
+    dists = _finite_upper_distances(distance_matrix)
+    if len(dists) == 0:
+        return 0, 0, -1, 0
+
+    eps_range = np.unique(np.percentile(dists, np.linspace(5, 95, 19)))
+    eps_range = eps_range[np.isfinite(eps_range) & (eps_range > 0)]
+    if len(eps_range) == 0:
+        fallback_eps, fallback_min_samples = _fallback_dbscan_params(distance_matrix, min_samples_range)
+        return fallback_eps, fallback_min_samples, -1, 0
 
     best_score = -np.inf
     best_eps = None
     best_min_samples = None
 
-    # for eps in eps_range:
-    while eps <= 5:
-        print('eps = ', eps)
+    for eps in eps_range:
+        print('eps = ', round(float(eps), 4))
         for min_samples in min_samples_range:
             db = DBSCAN(eps=eps, min_samples=min_samples, metric="precomputed")
             labels = db.fit_predict(distance_matrix)
@@ -419,12 +516,18 @@ def param_from_dbcv(points, spine_metrics_dict, distance_matrix):
             score = dbcv_score(distance_matrix, labels, min_samples)
             if score > best_score:
                 best_score = score
-                best_eps = eps
+                best_eps = float(eps)
                 best_min_samples = min_samples
-        eps += 0.5
 
     if best_eps is None:
-        return 0, 0, -1, 0
+        fallback_eps, fallback_min_samples = _fallback_dbscan_params(distance_matrix, min_samples_range)
+        print(
+            "   DBCV не нашёл устойчивое разбиение; "
+            f"fallback по k-distance: eps={fallback_eps:.4f}, min_samples={fallback_min_samples}"
+        )
+        if fallback_eps <= 0:
+            return 0, 0, -1, 0
+        return fallback_eps, fallback_min_samples, -1, 0
     return best_eps, best_min_samples, best_score, 0
 
 
