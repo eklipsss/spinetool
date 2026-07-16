@@ -351,7 +351,6 @@ class SpineMeshDataset:
         return np.asarray([vector.x(), vector.y(), vector.z()], dtype=float)
 
     @staticmethod
-    @staticmethod
     def _loop_center_radius(mesh: trimesh.Trimesh, loop: Dict[str, object]) -> Tuple[np.ndarray, float]:
         vertices = np.asarray(mesh.vertices, dtype=float)
         loop_vertex_indices = np.asarray(loop["vertex_indices"], dtype=int)
