@@ -1,5 +1,16 @@
 from .spine import Spine
-from .dendrite import Dendrite
+from .dendrite import Dendrite, DendriteBranch
+from .neuron import (
+    Soma,
+    Branch,
+    Limb,
+    Neuron,
+    NeuronNetworkAnalysisResult,
+    NeuronBranchAnalysisResult,
+    NeuronFullAnalysisResult,
+    load_microns_neurons,
+    run_microns_neuron_analyses,
+)
 from .dendrite_type import DendrType
 from .analysis import DendrAnalysis
 from .config import *

@@ -158,12 +158,14 @@ class Dendrite:
     pair_distance_profile_values_c: List[float] = []
     pair_distance_profile_entropy_c: float
 
-    moran_I: float
-    moran_z: float
-    moran_p: float
-    moran_I_c: float
-    moran_z_c: float
-    moran_p_c: float
+    # Legacy global Volume Moran fields are kept commented out: the current
+    # pipeline writes autocorr_<metric>_* records instead.
+    # moran_I: float
+    # moran_z: float
+    # moran_p: float
+    # moran_I_c: float
+    # moran_z_c: float
+    # moran_p_c: float
 
     moran_dict_c: Dict[str, float] = {}
 
@@ -177,15 +179,17 @@ class Dendrite:
     dbscan_labels: Any = []
     dbscan_eps: float = 0
     dbscan_min_samples: int = 0
-    dbscan_statistic: float = 0
-    dbscan_p_value: float = 0
+    # Legacy statistic/p-value from the old DBSCAN parameter search.
+    # dbscan_statistic: float = 0
+    # dbscan_p_value: float = 0
     dbscan_noise: float = 0
 
     dbscan_labels_c: Any = []
     dbscan_eps_c: float = 0
     dbscan_min_samples_c: int = 0
-    dbscan_statistic_c: float = 0
-    dbscan_p_value_c: float = 0
+    # Legacy cylindrical statistic/p-value from the old DBSCAN parameter search.
+    # dbscan_statistic_c: float = 0
+    # dbscan_p_value_c: float = 0
     dbscan_noise_c: float = 0
 
     db_count_class: Dict[str, List[int]]
@@ -455,9 +459,11 @@ class Dendrite:
         self.pcf_values = self.pair_distance_profile_values
         self.entropy = self.pair_distance_profile_entropy
 
-        self.moran_I = loaded_dict[self.name]['Moran_I']
-        self.moran_z = loaded_dict[self.name]['Moran_zI']
-        self.moran_p = loaded_dict[self.name]['Moran_p']
+        # Legacy global Volume Moran fields are no longer loaded by the current
+        # pipeline. Use spatial_morphology_permutation.csv instead.
+        # self.moran_I = loaded_dict[self.name]['Moran_I']
+        # self.moran_z = loaded_dict[self.name]['Moran_zI']
+        # self.moran_p = loaded_dict[self.name]['Moran_p']
 
         # self.getis_ord_G = loaded_dict[self.name]['Getis_Ord_G']
         # self.getis_ord_z = loaded_dict[self.name]['Getis_Ord_zG']
@@ -487,9 +493,9 @@ class Dendrite:
             self.pcf_values_c = self.pair_distance_profile_values_c
             self.entropy_c = self.pair_distance_profile_entropy_c
 
-            self.moran_I_c = loaded_dict[self.name].get('Moran_I_c', self.moran_I)
-            self.moran_z_c = loaded_dict[self.name].get('Moran_zI_c', self.moran_z)
-            self.moran_p_c = loaded_dict[self.name].get('Moran_p_c', self.moran_p)
+            # self.moran_I_c = loaded_dict[self.name].get('Moran_I_c', self.moran_I)
+            # self.moran_z_c = loaded_dict[self.name].get('Moran_zI_c', self.moran_z)
+            # self.moran_p_c = loaded_dict[self.name].get('Moran_p_c', self.moran_p)
 
             # self.getis_ord_G_c = loaded_dict[self.name]['Getis_Ord_G_c']
             # self.getis_ord_z_c = loaded_dict[self.name]['Getis_Ord_zG_c']
@@ -503,8 +509,10 @@ class Dendrite:
 
         self.dbscan_eps = loaded_dict[self.name]['DBscan_eps']
         self.dbscan_min_samples = loaded_dict[self.name]['DBscan_min_samples']
-        self.dbscan_statistic = loaded_dict[self.name]['DBscan_statistic']
-        self.dbscan_p_value = loaded_dict[self.name]['DBscan_p_value']
+        # Legacy statistic/p-value from the old DBSCAN parameter search are no
+        # longer loaded by the current pipeline.
+        # self.dbscan_statistic = loaded_dict[self.name]['DBscan_statistic']
+        # self.dbscan_p_value = loaded_dict[self.name]['DBscan_p_value']
         self.dbscan_noise = loaded_dict[self.name]['DBscan_noise']
 
         if self.cylindr_flag:
@@ -512,8 +520,8 @@ class Dendrite:
             # В новых файлах они не сохраняются: mesh_graph-метрики лежат в обычных полях.
             self.dbscan_eps_c = loaded_dict[self.name].get('DBscan_eps_c', self.dbscan_eps)
             self.dbscan_min_samples_c = loaded_dict[self.name].get('DBscan_min_samples_c', self.dbscan_min_samples)
-            self.dbscan_statistic_c = loaded_dict[self.name].get('DBscan_statistic_c', self.dbscan_statistic)
-            self.dbscan_p_value_c = loaded_dict[self.name].get('DBscan_p_value_c', self.dbscan_p_value)
+            # self.dbscan_statistic_c = loaded_dict[self.name].get('DBscan_statistic_c', self.dbscan_statistic)
+            # self.dbscan_p_value_c = loaded_dict[self.name].get('DBscan_p_value_c', self.dbscan_p_value)
             self.dbscan_noise_c = loaded_dict[self.name].get('DBscan_noise_c', self.dbscan_noise)
 
     def get_spine_distance_points(self) -> List[Tuple[float, float, float]]:
@@ -570,31 +578,10 @@ class Dendrite:
             self.entropy_c = self.pair_distance_profile_entropy_c
 
     def _calculate_volume_moran_metric(self) -> None:
-        if len(self.spines) == 0:
-            self.moran_I = np.nan
-            self.moran_z = np.nan
-            self.moran_p = np.nan
-            return
-
-        metric_dict_for_autocorr = {
-            "Volume": [spine.metrics['Volume'] for spine in self.spines],
-        }
-        mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
-        distance_points = self.get_spine_distance_points()
-        self.moran_I, self.moran_z, self.moran_p = calculate_Morans_I(
-            distance_points,
-            metric_dict_for_autocorr,
-            False,
-            threshold_distance=5,
-            distance_matrix=mesh_graph_distance_matrix,
-            distance_label="mesh_graph",
-        )['Volume']
-        # self.getis_ord_G, self.getis_ord_z, self.getis_ord_p = calculate_Getis_Ord_G(self.center_coords, metric_dict_for_autocorr, False, threshold_distance = 5)['Volume']
-        
-        if self.cylindr_flag:
-            # Backwards-compatible *_c fields now mirror mesh_graph-based metrics.
-            self.moran_I_c, self.moran_z_c, self.moran_p_c = self.moran_I, self.moran_z, self.moran_p
-            # self.getis_ord_G_c, self.getis_ord_z_c, self.getis_ord_p_c = calculate_Getis_Ord_G(self.center_coords_c, metric_dict_for_autocorr, True, threshold_distance = 5)['Volume']
+        # Legacy no-op. The current pipeline computes Moran's I for every
+        # available morphology metric in calculate_spatial_autocorrelation_analysis()
+        # and stores it as autocorr_<metric>_moran_i.
+        return
 
     def calculate_grouping_metrics(self) -> None:
         self.calculate_density_distribution_analysis()
@@ -607,7 +594,7 @@ class Dendrite:
         points = [[s.center_coord[0], s.center_coord[1], s.center_coord[2]] for s in self.spines]
         mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
 
-        self.dbscan_labels, self.dbscan_eps, self.dbscan_min_samples, self.dbscan_statistic, self.dbscan_p_value = dbscan(
+        dbscan_labels, dbscan_eps, dbscan_min_samples, _legacy_statistic, _legacy_p_value = dbscan(
             points,
             spine_metrics_dict_for_dbscan,
             0,
@@ -615,6 +602,9 @@ class Dendrite:
             distance_matrix=mesh_graph_distance_matrix,
             distance_label="mesh_graph",
         )
+        self.dbscan_labels = dbscan_labels
+        self.dbscan_eps = dbscan_eps
+        self.dbscan_min_samples = dbscan_min_samples
 
         points = np.array([s.center_coord for s in self.spines])
 
@@ -627,8 +617,10 @@ class Dendrite:
             self.dbscan_labels_c = self.dbscan_labels
             self.dbscan_eps_c = self.dbscan_eps
             self.dbscan_min_samples_c = self.dbscan_min_samples
-            self.dbscan_statistic_c = self.dbscan_statistic
-            self.dbscan_p_value_c = self.dbscan_p_value
+            # Legacy statistic/p-value from the old DBSCAN parameter search are
+            # intentionally not updated in the current k-distance pipeline.
+            # self.dbscan_statistic_c = self.dbscan_statistic
+            # self.dbscan_p_value_c = self.dbscan_p_value
             self.dbscan_noise_c = self.dbscan_noise
 
     def cluster_analysis(self) -> None:
@@ -937,6 +929,13 @@ class Dendrite:
         self.spatial_morphology_cluster_records = []
         self.spatial_morphology_test_records = []
         self.spatial_morphology_permutation_records = []
+        self.local_neighborhood_summary = {
+            "dendrite": self.name,
+            "n_spines": 0,
+            "local_radius": np.nan,
+            "close_pair_fraction": np.nan,
+        }
+        self.local_neighborhood_spine_records = []
 
     def _build_spatial_analysis_context(self, local_radius: float = None) -> Dict[str, Any]:
         distances = np.asarray(self.get_mesh_graph_distance_matrix(), dtype=float)
@@ -1067,6 +1066,12 @@ class Dendrite:
                 record[metric] = float(own_value) if np.isfinite(own_value) else np.nan
             spine_records.append(record)
 
+        finite_nn_distance = nn_distance[np.isfinite(nn_distance)]
+        nn_mean = float(np.mean(finite_nn_distance)) if len(finite_nn_distance) else np.nan
+        nn_std = float(np.std(finite_nn_distance, ddof=1)) if len(finite_nn_distance) > 1 else 0.0
+        pair_distance_mean = float(np.mean(pair_distances)) if len(pair_distances) else np.nan
+        pair_distance_std = float(np.std(pair_distances, ddof=1)) if len(pair_distances) > 1 else 0.0
+
         summary = {
             "dendrite": self.name,
             "n_spines": int(n),
@@ -1074,27 +1079,36 @@ class Dendrite:
             "dbscan_eps": float(getattr(self, "dbscan_eps", 0) or 0),
             "dbscan_min_samples": int(getattr(self, "dbscan_min_samples", 0) or 0),
             "dbscan_noise_fraction": float(np.mean(labels == -1)) if len(labels) else np.nan,
-            "nearest_neighbor_mean": float(np.nanmean(nn_distance)) if np.isfinite(nn_distance).any() else np.nan,
-            "nearest_neighbor_median": float(np.nanmedian(nn_distance)) if np.isfinite(nn_distance).any() else np.nan,
-            "nearest_neighbor_std": float(np.nanstd(nn_distance, ddof=1)) if np.count_nonzero(np.isfinite(nn_distance)) > 1 else 0.0,
+            "nearest_neighbor_mean": nn_mean,
+            "nearest_neighbor_median": float(np.median(finite_nn_distance)) if len(finite_nn_distance) else np.nan,
+            "nearest_neighbor_std": nn_std,
             "nearest_neighbor_cv": (
-                float(np.nanstd(nn_distance, ddof=1) / np.nanmean(nn_distance))
-                if np.nanmean(nn_distance) > 0 and np.count_nonzero(np.isfinite(nn_distance)) > 1
+                float(nn_std / nn_mean)
+                if np.isfinite(nn_mean) and nn_mean > 0 and len(finite_nn_distance) > 1
                 else np.nan
             ),
+            "nearest_neighbor_q10": float(np.percentile(finite_nn_distance, 10)) if len(finite_nn_distance) else np.nan,
+            "nearest_neighbor_q25": float(np.percentile(finite_nn_distance, 25)) if len(finite_nn_distance) else np.nan,
+            "nearest_neighbor_q75": float(np.percentile(finite_nn_distance, 75)) if len(finite_nn_distance) else np.nan,
+            "nearest_neighbor_q90": float(np.percentile(finite_nn_distance, 90)) if len(finite_nn_distance) else np.nan,
             "local_neighbor_count_mean": float(np.mean(neighbor_counts)),
             "local_neighbor_count_max": int(np.max(neighbor_counts)) if len(neighbor_counts) else 0,
             "local_isolated_fraction": float(np.mean(neighbor_counts == 0)),
             "threshold_graph_edges": int(graph.number_of_edges()),
             "threshold_graph_components": int(len(component_sizes)),
             "threshold_graph_largest_component": int(max(component_sizes)) if component_sizes else 0,
-            "mean_pair_distance": float(np.mean(pair_distances)) if len(pair_distances) else np.nan,
+            "mean_pair_distance": pair_distance_mean,
             "median_pair_distance": float(np.median(pair_distances)) if len(pair_distances) else np.nan,
+            "pair_distance_std": pair_distance_std,
+            "pair_distance_cv": (
+                float(pair_distance_std / pair_distance_mean)
+                if np.isfinite(pair_distance_mean) and pair_distance_mean > 0 and len(pair_distances) > 1
+                else np.nan
+            ),
             "pair_distance_q10": float(np.percentile(pair_distances, 10)) if len(pair_distances) else np.nan,
             "pair_distance_q25": float(np.percentile(pair_distances, 25)) if len(pair_distances) else np.nan,
             "pair_distance_q75": float(np.percentile(pair_distances, 75)) if len(pair_distances) else np.nan,
             "pair_distance_q90": float(np.percentile(pair_distances, 90)) if len(pair_distances) else np.nan,
-            "close_pair_fraction": float(np.mean(pair_distances <= local_radius)) if len(pair_distances) else np.nan,
         }
 
         self.spatial_morphology_summary = summary
@@ -1103,6 +1117,72 @@ class Dendrite:
         self.spatial_morphology_test_records = []
         self.spatial_morphology_permutation_records = []
         self._spatial_analysis_context = context
+
+    def calculate_local_neighborhood_analysis(self, local_radius: float = None) -> None:
+        if (
+            not hasattr(self, "_spatial_analysis_context")
+            or local_radius is not None
+            or not hasattr(self, "spatial_morphology_spine_records")
+        ):
+            self.calculate_density_distribution_analysis(local_radius=local_radius)
+
+        context = self._spatial_analysis_context
+        n = context["n"]
+        if n == 0:
+            self._set_empty_spatial_analysis_results()
+            return
+
+        adjacency = context["adjacency"]
+        neighbor_counts = context["neighbor_counts"]
+        metric_values = context["metric_values"]
+        local_radius = context["local_radius"]
+        graph = context["graph"]
+        component_sizes = context["component_sizes"]
+        pair_distances = context["pair_distances"]
+
+        local_records = []
+        for i, record in enumerate(self.spatial_morphology_spine_records):
+            neighbors = np.where(adjacency[i])[0]
+            local_record = {
+                "dendrite": self.name,
+                "spine_name": record.get("spine_name", self.spines[i].name),
+                "local_radius": float(local_radius),
+                "local_neighbor_count": int(neighbor_counts[i]),
+                "graph_degree": float(context["degree"][i]),
+                "local_clustering": float(context["local_clustering"][i]),
+            }
+            for metric, values in metric_values.items():
+                own_value = values[i]
+                if len(neighbors):
+                    neighbor_values = values[neighbors]
+                    neighbor_values = neighbor_values[np.isfinite(neighbor_values)]
+                    neighbor_mean = float(np.mean(neighbor_values)) if len(neighbor_values) else np.nan
+                else:
+                    neighbor_mean = np.nan
+                neighbor_abs_diff = (
+                    float(abs(own_value - neighbor_mean))
+                    if np.isfinite(own_value) and np.isfinite(neighbor_mean)
+                    else np.nan
+                )
+                record[f"neighbor_mean_{metric}"] = neighbor_mean
+                record[f"neighbor_abs_diff_{metric}"] = neighbor_abs_diff
+                local_record[f"neighbor_mean_{metric}"] = neighbor_mean
+                local_record[f"neighbor_abs_diff_{metric}"] = neighbor_abs_diff
+            local_records.append(local_record)
+
+        self.local_neighborhood_summary = {
+            "dendrite": self.name,
+            "n_spines": int(n),
+            "local_radius": float(local_radius),
+            "local_neighbor_count_mean": float(np.mean(neighbor_counts)),
+            "local_neighbor_count_max": int(np.max(neighbor_counts)) if len(neighbor_counts) else 0,
+            "local_isolated_fraction": float(np.mean(neighbor_counts == 0)),
+            "threshold_graph_edges": int(graph.number_of_edges()),
+            "threshold_graph_components": int(len(component_sizes)),
+            "threshold_graph_largest_component": int(max(component_sizes)) if component_sizes else 0,
+            "close_pair_fraction": float(np.mean(pair_distances <= local_radius)) if len(pair_distances) else np.nan,
+        }
+        self.local_neighborhood_spine_records = local_records
 
     def calculate_spatial_autocorrelation_analysis(
         self,
@@ -1122,29 +1202,14 @@ class Dendrite:
         if n == 0:
             self._set_empty_spatial_analysis_results()
             return
-        self._calculate_volume_moran_metric()
+
+        self.calculate_local_neighborhood_analysis(local_radius=local_radius)
+        context = self._spatial_analysis_context
 
         adjacency = context["adjacency"]
         neighbor_counts = context["neighbor_counts"]
         metric_values = context["metric_values"]
         local_radius = context["local_radius"]
-
-        for i, record in enumerate(self.spatial_morphology_spine_records):
-            neighbors = np.where(adjacency[i])[0]
-            for metric, values in metric_values.items():
-                own_value = values[i]
-                if len(neighbors):
-                    neighbor_values = values[neighbors]
-                    neighbor_values = neighbor_values[np.isfinite(neighbor_values)]
-                    neighbor_mean = float(np.mean(neighbor_values)) if len(neighbor_values) else np.nan
-                else:
-                    neighbor_mean = np.nan
-                record[f"neighbor_mean_{metric}"] = neighbor_mean
-                record[f"neighbor_abs_diff_{metric}"] = (
-                    float(abs(own_value - neighbor_mean))
-                    if np.isfinite(own_value) and np.isfinite(neighbor_mean)
-                    else np.nan
-                )
 
         weights = adjacency.astype(float)
         permutation_records = []
@@ -1237,16 +1302,36 @@ class Dendrite:
         for metric, values in metric_values.items():
             clustered_values = values[clustered_mask]
             isolated_values = values[isolated_mask]
+            clustered_finite = clustered_values[np.isfinite(clustered_values)]
+            isolated_finite = isolated_values[np.isfinite(isolated_values)]
+            clustered_mean = float(np.mean(clustered_finite)) if len(clustered_finite) else np.nan
+            isolated_mean = float(np.mean(isolated_finite)) if len(isolated_finite) else np.nan
+            clustered_std = float(np.std(clustered_finite, ddof=1)) if len(clustered_finite) > 1 else 0.0
+            isolated_std = float(np.std(isolated_finite, ddof=1)) if len(isolated_finite) > 1 else 0.0
             u_stat, u_p = self._safe_stat_test(mannwhitneyu, clustered_values, isolated_values)
             bm_stat, bm_p = self._safe_stat_test(brunnermunzel, clustered_values, isolated_values)
             test_records.append({
                 "dendrite": self.name,
                 "analysis": "clustered_vs_isolated",
                 "metric": metric,
-                "n_clustered": int(np.count_nonzero(np.isfinite(clustered_values))),
-                "n_isolated": int(np.count_nonzero(np.isfinite(isolated_values))),
-                "clustered_median": float(np.nanmedian(clustered_values)) if np.isfinite(clustered_values).any() else np.nan,
-                "isolated_median": float(np.nanmedian(isolated_values)) if np.isfinite(isolated_values).any() else np.nan,
+                "n_clustered": int(len(clustered_finite)),
+                "n_isolated": int(len(isolated_finite)),
+                "clustered_mean": clustered_mean,
+                "isolated_mean": isolated_mean,
+                "clustered_median": float(np.median(clustered_finite)) if len(clustered_finite) else np.nan,
+                "isolated_median": float(np.median(isolated_finite)) if len(isolated_finite) else np.nan,
+                "clustered_std": clustered_std,
+                "isolated_std": isolated_std,
+                "clustered_cv": (
+                    float(clustered_std / clustered_mean)
+                    if np.isfinite(clustered_mean) and clustered_mean > 0 and len(clustered_finite) > 1
+                    else np.nan
+                ),
+                "isolated_cv": (
+                    float(isolated_std / isolated_mean)
+                    if np.isfinite(isolated_mean) and isolated_mean > 0 and len(isolated_finite) > 1
+                    else np.nan
+                ),
                 "mannwhitney_statistic": u_stat,
                 "mannwhitney_p": u_p,
                 "brunnermunzel_statistic": bm_stat,
@@ -1270,6 +1355,7 @@ class Dendrite:
         random_state: int = 42,
     ) -> None:
         self.calculate_density_distribution_analysis(local_radius=local_radius)
+        self.calculate_local_neighborhood_analysis(local_radius=local_radius)
         self.calculate_spatial_autocorrelation_analysis(
             permutation_count=permutation_count,
             random_state=random_state,
@@ -1378,7 +1464,9 @@ class Dendrite:
     def build_structural_organization_vector(self) -> Dict[str, Any]:
         if not hasattr(self, "nndist") or not hasattr(self, "pair_distance_profile_values"):
             self.calculate_density_distribution_analysis()
-        if not hasattr(self, "moran_I"):
+        if not hasattr(self, "local_neighborhood_summary"):
+            self.calculate_local_neighborhood_analysis()
+        if not getattr(self, "spatial_morphology_permutation_records", None):
             self.calculate_spatial_autocorrelation_analysis(permutation_count=0)
 
         dbscan_labels = np.asarray(getattr(self, "dbscan_labels", []))
@@ -1398,32 +1486,8 @@ class Dendrite:
             "dendrite_Volume": self.volume,
             "dendrite_Length": self.length,
             "dendrite_Radius": self.radius,
-            "dendrite_Dr": self.dr,
-            "dendrite_Volume_around_dendr": self.volume_around_dendr,
-            "density_NNdist": self.nndist,
-            "density_NNdist_norm": self.nndist_norm,
             "density_pair_distance_profile_entropy": self.pair_distance_profile_entropy,
-            "density_pair_distance_profile_values_json": json.dumps(
-                self._to_json_compatible(self.pair_distance_profile_values),
-                ensure_ascii=False,
-            ),
-            "density_pair_distance_profile_r_values_json": json.dumps(
-                self._to_json_compatible(self.pair_distance_profile_r_values),
-                ensure_ascii=False,
-            ),
-            "autocorr_volume_moran_I": self.moran_I,
-            "autocorr_volume_moran_z": self.moran_z,
-            "autocorr_volume_moran_p": self.moran_p,
-            "dbscan_eps": getattr(self, "dbscan_eps", np.nan),
-            "dbscan_min_samples": getattr(self, "dbscan_min_samples", np.nan),
-            "dbscan_statistic": getattr(self, "dbscan_statistic", np.nan),
-            "dbscan_p_value": getattr(self, "dbscan_p_value", np.nan),
-            "dbscan_noise": getattr(self, "dbscan_noise", np.nan),
             "graph_average_clustering": getattr(self, "g_average_clustering", np.nan),
-            "graph_cluster_sizes_json": json.dumps(
-                self._to_json_compatible(getattr(self, "g_cluster_sizes", [])),
-                ensure_ascii=False,
-            ),
             "graph_mean_cluster_size": getattr(self, "g_mean_cluster_size", np.nan),
             "graph_characteristic_extent": getattr(self, "g_characteristic_extent", np.nan),
             "graph_modularity": getattr(self, "g_modularity", np.nan),
@@ -1433,7 +1497,24 @@ class Dendrite:
             record,
             "spatial",
             self.spatial_morphology_summary,
-            skip_keys={"dendrite"},
+            skip_keys={
+                "dendrite",
+                "n_spines",
+                "local_radius",
+                "local_neighbor_count_mean",
+                "local_neighbor_count_max",
+                "local_isolated_fraction",
+                "threshold_graph_edges",
+                "threshold_graph_components",
+                "threshold_graph_largest_component",
+            },
+        )
+
+        self._add_prefixed_metrics(
+            record,
+            "neighborhood",
+            getattr(self, "local_neighborhood_summary", {}),
+            skip_keys={"dendrite", "n_spines"},
         )
 
         for permutation_record in getattr(self, "spatial_morphology_permutation_records", []):
@@ -1455,7 +1536,7 @@ class Dendrite:
             analysis = test_record.get("analysis", "test")
             test_prefix = f"test_{analysis}_{metric}"
             for key, value in test_record.items():
-                if key in {"dendrite", "analysis", "metric"}:
+                if key in {"dendrite", "analysis", "metric", "n_clustered", "n_isolated"}:
                     continue
                 if self._is_scalar_metric_value(value):
                     record[f"{test_prefix}_{key}"] = self._as_metric_scalar(value)
@@ -1464,11 +1545,6 @@ class Dendrite:
                         self._to_json_compatible(value),
                         ensure_ascii=False,
                     )
-
-        record["spatial_cluster_records_json"] = json.dumps(
-            self._to_json_compatible(getattr(self, "spatial_morphology_cluster_records", [])),
-            ensure_ascii=False,
-        )
 
         return record
 
@@ -1559,9 +1635,12 @@ class Dendrite:
         ).tolist()
         save_grouping_dendr_metric_dict[self.name]['PairDistanceProfile_entropy'] = self.pair_distance_profile_entropy
 
-        save_grouping_dendr_metric_dict[self.name]['Moran_I'] = self.moran_I
-        save_grouping_dendr_metric_dict[self.name]['Moran_zI'] = self.moran_z
-        save_grouping_dendr_metric_dict[self.name]['Moran_p'] = self.moran_p
+        # Legacy global Volume Moran fields are no longer written by the
+        # current pipeline. Use spatial_morphology_permutation.csv and
+        # autocorr_<metric>_* columns in dendrite_structural_organization_vectors.csv.
+        # save_grouping_dendr_metric_dict[self.name]['Moran_I'] = self.moran_I
+        # save_grouping_dendr_metric_dict[self.name]['Moran_zI'] = self.moran_z
+        # save_grouping_dendr_metric_dict[self.name]['Moran_p'] = self.moran_p
 
         # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_G'] = self.getis_ord_G
         # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_zG'] = self.getis_ord_z
@@ -1577,8 +1656,10 @@ class Dendrite:
         save_cluster_dendr_metric_dict[self.name] = {}
         save_cluster_dendr_metric_dict[self.name]['DBscan_eps'] = self.dbscan_eps
         save_cluster_dendr_metric_dict[self.name]['DBscan_min_samples'] = self.dbscan_min_samples
-        save_cluster_dendr_metric_dict[self.name]['DBscan_statistic'] = self.dbscan_statistic
-        save_cluster_dendr_metric_dict[self.name]['DBscan_p_value'] = self.dbscan_p_value
+        # Legacy statistic/p-value from the old DBSCAN parameter search are no
+        # longer meaningful after switching to the k-distance eps rule.
+        # save_cluster_dendr_metric_dict[self.name]['DBscan_statistic'] = self.dbscan_statistic
+        # save_cluster_dendr_metric_dict[self.name]['DBscan_p_value'] = self.dbscan_p_value
         save_cluster_dendr_metric_dict[self.name]['DBscan_noise'] = self.dbscan_noise
 
         # with open('metrics/grouping_dendr_metrics.json', 'w') as f:
@@ -1610,10 +1691,12 @@ class Dendrite:
     def save_dendr_metrics(self) -> None:
         if self.cylindr_flag:
             dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist, "PairDistanceProfile_entropy": self.pair_distance_profile_entropy, 
-                        "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
+                        # Legacy global Volume Moran fields are excluded from current aggregate metrics.
+                        # "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
                         # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,
                         "Eps": self.dbscan_eps, "Min_samples": self.dbscan_min_samples,
-                        "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value, "Noise": self.dbscan_noise,
+                        # "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value,
+                        "Noise": self.dbscan_noise,
                         "g_mean_cluster_size": self.g_mean_cluster_size, "g_characteristic_extent": self.g_characteristic_extent, 
                         "g_average_clustering": self.g_average_clustering, "g_modularity": self.g_modularity}
             
@@ -1642,11 +1725,18 @@ class Dendrite:
         if self.cylindr_flag:
                     
             dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist, "PairDistanceProfile_entropy": self.pair_distance_profile_entropy, 
-                        "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
+                        # Legacy global Volume Moran fields are excluded from current aggregate metrics.
+                        # "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
                         # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,
                         "Eps": self.dbscan_eps, "Min_samples": self.dbscan_min_samples,
-                        "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value, "Noise": self.dbscan_noise,
+                        # "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value,
+                        "Noise": self.dbscan_noise,
                         "g_mean_cluster_size": self.g_mean_cluster_size, "g_characteristic_extent": self.g_characteristic_extent, 
                         "g_average_clustering": self.g_average_clustering, "g_modularity": self.g_modularity}
 
             save_all_dendr_metric_dict.append(dendrite)
+
+
+# Backward-compatible semantic alias: historically this class was named
+# `Dendrite`, but it represents one dendritic branch/fragment with its spines.
+DendriteBranch = Dendrite

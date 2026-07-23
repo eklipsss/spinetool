@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
-from scipy.stats import chi2
+from scipy.stats import chi2, ks_2samp
 
 # ---------------------------------------------------------------------------
 # Optional dependencies
@@ -67,6 +67,7 @@ __all__ = [
     # graph
     "DendriticGraph",
     "build_dendritic_graph",
+    "build_dendritic_graph_from_skeleton",
     "build_graph_from_meshes",
 
     # spine attachment
@@ -84,6 +85,7 @@ __all__ = [
     "estimate_binned_intensity",
     "estimate_smooth_intensity",
     "test_intensity_dependence",
+    "test_intensity_dependence_cdf",
 
     # Poisson model
     "fit_inhomogeneous_poisson",
@@ -341,6 +343,117 @@ def _graph_from_skeleton_segments(
             dg.G.nodes[node]["node_type"] = "branch"
         else:
             dg.G.nodes[node]["node_type"] = "intermediate"
+
+    return dg
+
+
+def _polyline_segments(points: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] < 3:
+        return []
+    pts = pts[:, :3]
+    finite_mask = np.isfinite(pts).all(axis=1)
+    pts = pts[finite_mask]
+    if len(pts) < 2:
+        return []
+    return [(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
+
+
+def _segments_from_skeleton_object(skeleton: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
+    if skeleton is None:
+        return []
+
+    if isinstance(skeleton, np.ndarray) and skeleton.dtype == object:
+        if skeleton.shape == ():
+            return _segments_from_skeleton_object(skeleton.item())
+        segments: List[Tuple[np.ndarray, np.ndarray]] = []
+        for item in skeleton.tolist():
+            segments.extend(_segments_from_skeleton_object(item))
+        return segments
+
+    if isinstance(skeleton, dict):
+        for points_key in ("points", "vertices", "nodes"):
+            if points_key in skeleton and "edges" in skeleton:
+                points = np.asarray(skeleton[points_key], dtype=float)
+                edges = np.asarray(skeleton["edges"], dtype=int)
+                if points.ndim == 2 and points.shape[1] >= 3 and edges.ndim == 2 and edges.shape[1] >= 2:
+                    valid_edges = edges[:, :2]
+                    valid_edges = valid_edges[
+                        (valid_edges >= 0).all(axis=1)
+                        & (valid_edges < len(points)).all(axis=1)
+                    ]
+                    return [
+                        (points[int(u), :3], points[int(v), :3])
+                        for u, v in valid_edges
+                    ]
+        segments = []
+        for key in ("segments", "skeleton", "branches", "polylines", "paths", "lines"):
+            if key in skeleton:
+                segments.extend(_segments_from_skeleton_object(skeleton[key]))
+        if segments:
+            return segments
+        for value in skeleton.values():
+            segments.extend(_segments_from_skeleton_object(value))
+        return segments
+
+    if isinstance(skeleton, (list, tuple)):
+        try:
+            numeric = np.asarray(skeleton, dtype=float)
+            if numeric.ndim >= 2:
+                return _segments_from_skeleton_object(numeric)
+        except Exception:
+            pass
+        segments = []
+        for item in skeleton:
+            segments.extend(_segments_from_skeleton_object(item))
+        return segments
+
+    try:
+        array = np.asarray(skeleton, dtype=float)
+    except Exception:
+        return []
+
+    if array.ndim == 2 and array.shape[1] >= 3:
+        return _polyline_segments(array)
+
+    if array.ndim == 3 and array.shape[-1] >= 3:
+        if array.shape[1] == 2:
+            return [(array[i, 0, :3], array[i, 1, :3]) for i in range(array.shape[0])]
+        segments = []
+        for polyline in array:
+            segments.extend(_polyline_segments(polyline))
+        return segments
+
+    return []
+
+
+def build_dendritic_graph_from_skeleton(
+    skeleton: Any,
+    soma_point: Optional[np.ndarray] = None,
+    dendrite_id: str = "d0",
+    dendrite_type: str = "unknown",
+    snap_threshold: float = 2.0,
+) -> DendriticGraph:
+    segments = _segments_from_skeleton_object(skeleton)
+    if not segments:
+        raise ValueError("Skeleton does not contain any valid 3-D segments.")
+
+    dg = _graph_from_skeleton_segments(
+        segments,
+        dendrite_id=dendrite_id,
+        dendrite_type=dendrite_type,
+    )
+
+    if soma_point is not None and dg.G.number_of_nodes() > 0:
+        soma_pt = np.asarray(soma_point, dtype=float)
+        positions = np.array([dg.G.nodes[n]["pos"] for n in dg.G.nodes()])
+        node_ids = list(dg.G.nodes())
+        dists = np.linalg.norm(positions - soma_pt, axis=1)
+        nearest_idx = int(np.argmin(dists))
+        if dists[nearest_idx] <= snap_threshold:
+            soma_id = node_ids[nearest_idx]
+            dg.soma_node = soma_id
+            dg.G.nodes[soma_id]["node_type"] = "soma"
 
     return dg
 
@@ -886,6 +999,64 @@ def test_intensity_dependence(
     }
 
 
+def test_intensity_dependence_cdf(
+    graph: DendriticGraph,
+    spines: List[ProjectedSpine],
+    sample_step: float = 1.0,
+) -> Dict[str, Any]:
+    """Reference-style CDF test for dependence on soma distance.
+
+    The paper compares the covariate distribution at network events with the
+    covariate distribution along the whole network.  Here this is implemented
+    as a two-sample Kolmogorov--Smirnov test between spine soma distances and
+    distances of approximately uniform sample points on the network.
+    """
+    if not spines:
+        return {
+            "statistic": np.nan,
+            "p_value": np.nan,
+            "n_spines": 0,
+            "n_network_samples": 0,
+            "interpretation": "Insufficient data.",
+        }
+
+    _, sample_sd = graph.sample_points_on_graph(step=sample_step)
+    spine_sd = np.array([s.distance_to_soma for s in spines], dtype=float)
+    spine_sd = spine_sd[np.isfinite(spine_sd)]
+    sample_sd = sample_sd[np.isfinite(sample_sd)]
+
+    if len(spine_sd) < 2 or len(sample_sd) < 2:
+        return {
+            "statistic": np.nan,
+            "p_value": np.nan,
+            "n_spines": int(len(spine_sd)),
+            "n_network_samples": int(len(sample_sd)),
+            "interpretation": "Insufficient data for CDF test.",
+        }
+
+    result = ks_2samp(spine_sd, sample_sd, alternative="two-sided", mode="auto")
+    p_value = float(result.pvalue)
+    statistic = float(result.statistic)
+    if p_value < 0.05:
+        interp = (
+            f"Significant dependence of spine intensity on soma distance "
+            f"(KS statistic={statistic:.4f}, p={p_value:.4g})."
+        )
+    else:
+        interp = (
+            f"No significant dependence on soma distance detected by CDF/KS test "
+            f"(KS statistic={statistic:.4f}, p={p_value:.4g})."
+        )
+
+    return {
+        "statistic": statistic,
+        "p_value": p_value,
+        "n_spines": int(len(spine_sd)),
+        "n_network_samples": int(len(sample_sd)),
+        "interpretation": interp,
+    }
+
+
 # ===========================================================================
 # Inhomogeneous Poisson model
 # ===========================================================================
@@ -1043,25 +1214,133 @@ def fit_inhomogeneous_poisson(
 # Ripley K function
 # ===========================================================================
 
+def _source_node_distances(graph: DendriticGraph, spine: ProjectedSpine) -> Dict[int, float]:
+    u0, v0 = spine.edge_source, spine.edge_target
+    if graph.G.has_edge(u0, v0):
+        edge_len = float(graph.G[u0][v0].get("length", 0.0))
+    else:
+        edge_len = float(np.linalg.norm(graph.node_position(v0) - graph.node_position(u0)))
+    edge_len = max(edge_len, 0.0)
+    t = float(spine.edge_position)
+
+    dist_from_u = nx.single_source_dijkstra_path_length(graph.G, u0, weight="length")
+    dist_from_v = nx.single_source_dijkstra_path_length(graph.G, v0, weight="length")
+
+    node_distances: Dict[int, float] = {}
+    for node in graph.G.nodes():
+        du = dist_from_u.get(node, np.inf)
+        dv = dist_from_v.get(node, np.inf)
+        node_distances[node] = float(min(t * edge_len + du, (1.0 - t) * edge_len + dv))
+    return node_distances
+
+
+def _network_sphere_multiplicity(
+    graph: DendriticGraph,
+    source_node_distances: Dict[int, float],
+    distance: float,
+    tol: float = 1e-8,
+) -> int:
+    """Number of locations on the metric graph exactly `distance` away.
+
+    For each graph edge, the shortest-path distance from the source to a point
+    on that edge is the lower envelope of the two linear functions obtained via
+    the edge endpoints.  Intersections of this envelope with the horizontal
+    level `distance` are counted as network sphere points.
+    """
+    if not np.isfinite(distance) or distance <= tol:
+        return 0
+
+    count = 0
+    for u, v, edata in graph.G.edges(data=True):
+        length = float(edata.get("length", 0.0))
+        if length <= tol:
+            continue
+
+        du = source_node_distances.get(u, np.inf)
+        dv = source_node_distances.get(v, np.inf)
+        if not np.isfinite(du) and not np.isfinite(dv):
+            continue
+
+        candidates: List[float] = []
+
+        if np.isfinite(du):
+            s = (distance - du) / length
+            if -tol <= s <= 1.0 + tol:
+                s_clipped = min(1.0, max(0.0, float(s)))
+                via_u = du + s_clipped * length
+                via_v = dv + (1.0 - s_clipped) * length if np.isfinite(dv) else np.inf
+                if abs(via_u - distance) <= max(tol, tol * distance) and via_u <= via_v + tol:
+                    candidates.append(s_clipped)
+
+        if np.isfinite(dv):
+            s = (dv + length - distance) / length
+            if -tol <= s <= 1.0 + tol:
+                s_clipped = min(1.0, max(0.0, float(s)))
+                via_u = du + s_clipped * length if np.isfinite(du) else np.inf
+                via_v = dv + (1.0 - s_clipped) * length
+                if abs(via_v - distance) <= max(tol, tol * distance) and via_v <= via_u + tol:
+                    candidates.append(s_clipped)
+
+        unique_candidates = []
+        for s in candidates:
+            if not any(abs(s - seen) <= 1e-7 for seen in unique_candidates):
+                unique_candidates.append(s)
+        count += len(unique_candidates)
+
+    return int(count)
+
+
+def _geometric_multiplicity_matrix(
+    graph: DendriticGraph,
+    spines: List[ProjectedSpine],
+    dist_matrix: np.ndarray,
+) -> np.ndarray:
+    n = len(spines)
+    multiplicity = np.ones((n, n), dtype=float)
+    np.fill_diagonal(multiplicity, np.inf)
+
+    for i, spine in enumerate(spines):
+        source_distances = _source_node_distances(graph, spine)
+        finite_distances = sorted(
+            {
+                float(d)
+                for d in dist_matrix[i]
+                if np.isfinite(d) and d > 1e-8
+            }
+        )
+        cache = {
+            d: max(1, _network_sphere_multiplicity(graph, source_distances, d))
+            for d in finite_distances
+        }
+        for j in range(n):
+            d = float(dist_matrix[i, j])
+            if np.isfinite(d) and d > 1e-8:
+                multiplicity[i, j] = float(cache.get(d, 1))
+
+    return multiplicity
+
+
 def ripley_k_network(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
     r_values: np.ndarray,
     intensity: Optional[np.ndarray] = None,
     dist_matrix: Optional[np.ndarray] = None,
-    correction: str = "none",
+    correction: str = "geometric",
 ) -> KFunctionResult:
     n = len(spines)
     r_values = np.asarray(r_values, dtype=float)
+    correction = correction.lower()
+    use_geometric = correction in {"geometric", "reference", "kl", "k_l"}
+    k_expected = r_values.copy() if use_geometric else 2.0 * r_values
 
     if n < 2:
         k_obs = np.zeros_like(r_values)
-        k_exp = 2.0 * r_values
         interp = "Too few spines for K function estimation."
         return KFunctionResult(
             r_values=r_values,
             k_observed=k_obs,
-            k_expected=k_exp,
+            k_expected=k_expected,
             method="homogeneous" if intensity is None else "inhomogeneous",
             interpretation=interp,
         )
@@ -1073,38 +1352,41 @@ def ripley_k_network(
     method = "homogeneous" if intensity is None else "inhomogeneous"
 
     k_obs = np.zeros(len(r_values))
+    multiplicity: Optional[np.ndarray] = None
+    if use_geometric:
+        multiplicity = _geometric_multiplicity_matrix(graph, spines, dist_matrix)
 
     if intensity is None:
+        pair_weights = np.ones_like(dist_matrix, dtype=float)
+        np.fill_diagonal(pair_weights, 0.0)
+        if multiplicity is not None:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                pair_weights = np.where(multiplicity > 0, pair_weights / multiplicity, 0.0)
+            np.fill_diagonal(pair_weights, 0.0)
         for ri, r in enumerate(r_values):
-            count = float(np.sum(dist_matrix <= r) - n)  # subtract diagonal
-            if correction == "geometric" and r > 1e-12:
-                # Simple boundary correction: inflate by ratio expected/attainable
-                corr_factor = 2.0 * r / max(min(2.0 * r, L), 1e-12)
-            else:
-                corr_factor = 1.0
-            k_obs[ri] = (L / (n * n)) * count * corr_factor
+            mask = (dist_matrix <= r).astype(float)
+            np.fill_diagonal(mask, 0.0)
+            k_obs[ri] = (L / (n * n)) * float(np.sum(mask * pair_weights))
     else:
         lam = np.asarray(intensity, dtype=float)
         lam_outer = np.outer(lam, lam)    
         with np.errstate(divide="ignore", invalid="ignore"):
             weights = np.where(lam_outer > 1e-300, 1.0 / lam_outer, 0.0)
         np.fill_diagonal(weights, 0.0) 
+        if multiplicity is not None:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                weights = np.where(multiplicity > 0, weights / multiplicity, 0.0)
+            np.fill_diagonal(weights, 0.0)
 
         for ri, r in enumerate(r_values):
             mask = (dist_matrix <= r).astype(float)
             np.fill_diagonal(mask, 0.0)
-            if correction == "geometric" and r > 1e-12:
-                corr_factor = 2.0 * r / max(min(2.0 * r, L), 1e-12)
-            else:
-                corr_factor = 1.0
-            k_obs[ri] = (1.0 / L) * float(np.sum(mask * weights)) * corr_factor
+            k_obs[ri] = (1.0 / L) * float(np.sum(mask * weights))
 
-    k_exp = 2.0 * r_values
-
-    dev = k_obs - k_exp
+    dev = k_obs - k_expected
     max_pos_r = float(r_values[np.argmax(dev)]) if len(dev) else 0.0
     max_neg_r = float(r_values[np.argmin(dev)]) if len(dev) else 0.0
-    if np.max(np.abs(dev)) < 0.1 * float(np.max(k_exp)) if np.max(k_exp) > 0 else True:
+    if np.max(np.abs(dev)) < 0.1 * float(np.max(k_expected)) if np.max(k_expected) > 0 else True:
         interp = "Spine distribution is consistent with CSR on the network."
     elif np.max(dev) > 0 and np.max(dev) >= np.abs(np.min(dev)):
         interp = (
@@ -1120,8 +1402,8 @@ def ripley_k_network(
     return KFunctionResult(
         r_values=r_values,
         k_observed=k_obs,
-        k_expected=k_exp,
-        method=method,
+        k_expected=k_expected,
+        method=f"{'geometrically_corrected_' if use_geometric else ''}{method}",
         interpretation=interp,
     )
 
@@ -1231,12 +1513,15 @@ def compute_simulation_envelopes(
     n_simulations: int = 99,
     alpha: float = 0.05,
     intensity_model: Optional[PoissonModelResult] = None,
+    correction: str = "geometric",
+    fit_intensity_if_missing: bool = True,
 ) -> KFunctionResult:
     n = len(spines)
     r_values = np.asarray(r_values, dtype=float)
+    use_geometric = correction.lower() in {"geometric", "reference", "kl", "k_l"}
 
     if n < 2:
-        k_exp = 2.0 * r_values
+        k_exp = r_values.copy() if use_geometric else 2.0 * r_values
         return KFunctionResult(
             r_values=r_values,
             k_observed=np.zeros_like(r_values),
@@ -1248,7 +1533,7 @@ def compute_simulation_envelopes(
             interpretation="Too few spines for simulation envelopes.",
         )
 
-    if intensity_model is None:
+    if intensity_model is None and fit_intensity_if_missing:
         try:
             intensity_model = fit_inhomogeneous_poisson(graph, spines)
         except Exception as exc:
@@ -1262,7 +1547,12 @@ def compute_simulation_envelopes(
 
     obs_dist = compute_spine_pairwise_distances(graph, spines)
     k_obs_result = ripley_k_network(
-        graph, spines, r_values, intensity=obs_intensity, dist_matrix=obs_dist
+        graph,
+        spines,
+        r_values,
+        intensity=obs_intensity,
+        dist_matrix=obs_dist,
+        correction=correction,
     )
     k_observed = k_obs_result.k_observed
     k_expected = k_obs_result.k_expected
@@ -1294,7 +1584,12 @@ def compute_simulation_envelopes(
             sim_intensity = np.exp(np.clip(X_sim @ intensity_model.coefficients, -500, 500))
         sim_dist_mat = compute_spine_pairwise_distances(graph, sim_spines)
         sim_k = ripley_k_network(
-            graph, sim_spines, r_values, intensity=sim_intensity, dist_matrix=sim_dist_mat
+            graph,
+            sim_spines,
+            r_values,
+            intensity=sim_intensity,
+            dist_matrix=sim_dist_mat,
+            correction=correction,
         )
         k_sim_all[sim] = sim_k.k_observed
 
@@ -1942,6 +2237,16 @@ def run_analysis(
 
     bin_size = float(config.get("bin_size", 25.0))
     binned_intensity = estimate_binned_intensity(graph, projected_spines, bin_size=bin_size)
+    intensity_cdf_test = test_intensity_dependence_cdf(
+        graph,
+        projected_spines,
+        sample_step=float(config.get("cdf_sample_step", 1.0)),
+    )
+    intensity_lr_test = test_intensity_dependence(
+        graph,
+        projected_spines,
+        n_bins=int(config.get("intensity_test_bins", 10)),
+    )
 
     bandwidth = config.get("bandwidth", None)
     smooth_d, smooth_lambda = estimate_smooth_intensity(
@@ -1963,6 +2268,7 @@ def run_analysis(
     r_values = np.linspace(0.0, r_max, n_r + 1)[1:]
 
     n_sim = int(config.get("n_simulations", 99))
+    k_correction = str(config.get("k_correction", "geometric"))
     k_result: Optional[KFunctionResult] = None
     if len(projected_spines) >= 2:
         try:
@@ -1972,11 +2278,12 @@ def run_analysis(
                 r_values,
                 n_simulations=n_sim,
                 intensity_model=poisson_result,
+                correction=k_correction,
             )
         except Exception as exc:
             warnings.warn(f"K function computation failed: {exc}", stacklevel=2)
             try:
-                k_result = ripley_k_network(graph, projected_spines, r_values)
+                k_result = ripley_k_network(graph, projected_spines, r_values, correction=k_correction)
             except Exception:
                 pass
 
@@ -2002,6 +2309,8 @@ def run_analysis(
         "binned_intensity": binned_intensity,
         "smooth_d": smooth_d,
         "smooth_lambda": smooth_lambda,
+        "intensity_cdf_test": intensity_cdf_test,
+        "intensity_lr_test": intensity_lr_test,
         "poisson_result": poisson_result,
         "k_result": k_result,
         "report_path": report_path,
