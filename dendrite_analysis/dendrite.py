@@ -441,8 +441,11 @@ class Dendrite:
         with open('input/grouping_dendr_metrics.json', 'r') as f:
             loaded_dict = json.load(f)
 
-        self.nndist = loaded_dict[self.name]['NNdist']
-        self.nndist_norm = loaded_dict[self.name]['NNdist_norm']
+        self.nndist = loaded_dict[self.name].get(
+            'spatial_nearest_neighbor_mean',
+            loaded_dict[self.name].get('NNdist', np.nan),
+        )
+        self.nndist_norm = loaded_dict[self.name].get('NNdist_norm', np.nan)
         self.pair_distance_profile_r_values = loaded_dict[self.name].get(
             'PairDistanceProfile_r_values',
             loaded_dict[self.name].get('r_values', []),
@@ -1624,8 +1627,10 @@ class Dendrite:
 
     def save_grouping_metrics(self):
         save_grouping_dendr_metric_dict[self.name] = {}
-        save_grouping_dendr_metric_dict[self.name]['NNdist'] = self.nndist
-        save_grouping_dendr_metric_dict[self.name]['NNdist_norm'] = self.nndist_norm
+        save_grouping_dendr_metric_dict[self.name]['spatial_nearest_neighbor_mean'] = self.nndist
+        # Legacy fields are no longer written by the current pipeline.
+        # save_grouping_dendr_metric_dict[self.name]['NNdist'] = self.nndist
+        # save_grouping_dendr_metric_dict[self.name]['NNdist_norm'] = self.nndist_norm
 
         save_grouping_dendr_metric_dict[self.name]['PairDistanceProfile_values'] = np.asarray(
             self.pair_distance_profile_values
@@ -1690,7 +1695,7 @@ class Dendrite:
 
     def save_dendr_metrics(self) -> None:
         if self.cylindr_flag:
-            dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist, "PairDistanceProfile_entropy": self.pair_distance_profile_entropy, 
+            dendrite = {"Name": self.name, "Type": self.name[:2], "spatial_nearest_neighbor_mean": self.nndist, "density_pair_distance_profile_entropy": self.pair_distance_profile_entropy, 
                         # Legacy global Volume Moran fields are excluded from current aggregate metrics.
                         # "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
                         # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,
@@ -1724,7 +1729,7 @@ class Dendrite:
     def save_dendr_metrics_without_class_cluster(self) -> None:
         if self.cylindr_flag:
                     
-            dendrite = {"Name": self.name, "Type": self.name[:2], "NNdist": self.nndist, "PairDistanceProfile_entropy": self.pair_distance_profile_entropy, 
+            dendrite = {"Name": self.name, "Type": self.name[:2], "spatial_nearest_neighbor_mean": self.nndist, "density_pair_distance_profile_entropy": self.pair_distance_profile_entropy, 
                         # Legacy global Volume Moran fields are excluded from current aggregate metrics.
                         # "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
                         # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,

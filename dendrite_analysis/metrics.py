@@ -2,6 +2,7 @@ from .dependencies import *
 from .config import *
 from spine_analysis.shape_metric.utils import _point_2_vec
 from scipy.sparse import csgraph
+from pathlib import Path
 
 def make_viewer(width: int = 600, height: int = 600) -> mp.Viewer:
     return mp.Viewer({"width": width, "height": height})
@@ -633,12 +634,13 @@ def visualization_dbscan_clusters(points, labels, cylindr_coords_flag, save_path
     ax.set_zlabel('Z', fontsize=14)
     plt.legend(fontsize=12)
 
-    save_path = save_path.replace('.off', '')
-    save_path = save_path.replace('Ab_output\\', '')
-    save_path = save_path.replace('Wt_output\\', '')
-    save_path = save_path.replace('\\pure_surface_mesh', '')
-
     if save_path is not None:
+        save_path = save_path.replace('.off', '')
+        save_path = save_path.replace('Ab_output\\', '')
+        save_path = save_path.replace('Wt_output\\', '')
+        save_path = save_path.replace('\\pure_surface_mesh', '')
+        save_path_obj = Path(save_path)
+        save_path_obj.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=300)
         print(f"График сохранен в {save_path}")
 
