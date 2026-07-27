@@ -7,7 +7,6 @@ class Spine:
 
     junction_center_coord: Tuple[float] # координаты центра области крепления шипика к дендриту - вспомогательная переменная, в вычислении метрик не участвует
     center_coord: Tuple[float] # координаты центра шипика к дендриту 
-    center_coord_c: Tuple[float] # координаты центра области крепления шипика к дендриту в цилиндрических координатах (junction_center_coord в цк)
 
     metrics: Dict[str, float] = {}
 
@@ -15,54 +14,27 @@ class Spine:
     cluster_type: int
 
     def __init__(self, name: str,  
-                #  junction_center_coord: Tuple[float],
-                #  center_coord: Tuple[float],
                  junction_center_coord: Any,
                  center_coord: Any,
-                 center_coord_cylindr: Any, 
-                 spine_mesh: Polyhedron_3 = None) -> None:
+                 spine_mesh: Polyhedron_3) -> None:
+        """Создаёт объект шипика и рассчитывает его морфологические метрики.
+
+        Входные данные: имя шипика, точка крепления, геометрический центр и
+        mesh шипика.
+        Выходные данные: объект `Spine` с заполненным словарём `metrics`.
+        """
         print('Spine init')
 
         self.metrics = {}
 
         self.name = name
-        if spine_mesh is not None:
-            self.mesh = spine_mesh
+        if spine_mesh is None:
+            raise ValueError("Spine requires spine_mesh; loading old precomputed spine metrics is disabled.")
+        self.mesh = spine_mesh
 
         self.junction_center_coord = junction_center_coord
         self.center_coord = center_coord
-        if center_coord_cylindr != False:
-            self.center_coord_c = center_coord_cylindr
-
-        # junction_center_klass = globals()['JunctionCenterSpineMetric'] 
-        # center_klass = globals()['CenterSpineMetric'] 
-
-        # # середина области крепления шипика
-        # junction_center_vec = junction_center_klass(spine_mesh)._value
-        # self.junction_center_coord = (junction_center_vec.x(), junction_center_vec.y(), junction_center_vec.z())  # tuple, тк неизменяемый
-        
-        # # середина шипика
-        # center_vec = center_klass(spine_mesh)._value
-        # self.center_coord = (center_vec.x(), center_vec.y(), center_vec.z())  # tuple, тк неизменяемый
-
-        # two_dim_points = get_2dim_coordinates([self.junction_center_coord])
-        # center_coord_cylindr = get_cylindr_coord_from_2dim(two_dim_points, dendr_radius)[0]
-
-        if spine_mesh is not None:
-            self.calculate_metrics() # вычисление метрик
-        else:
-            self.load_metrics() # загрузка из файла
-
-        # self.add_spine_class()
-        # self.add_spine_cluster()
-
-    def load_metrics(self) -> None:
-        # with open('metrics/spine_metrics.json', 'r') as f:
-        # with open('metrics/9009/spine_metrics.json', 'r') as f:
-        # with open('metrics/wt_old_st/spine_metrics.json', 'r') as f:
-        with open('input/spine_metrics.json', 'r') as f:
-            loaded_dict = json.load(f)
-        self.metrics = loaded_dict[self.name]
+        self.calculate_metrics()
 
     def calculate_metrics(self) -> None:
         for metric_name in spine_metrics_name:

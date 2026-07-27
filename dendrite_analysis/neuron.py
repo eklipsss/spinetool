@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import networkx as nx
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 try:
     import trimesh
@@ -34,9 +35,7 @@ from .network import (
 
 from .dendrite import Dendrite
 from .config import (
-    output_path,
     reset_saved_data,
-    save_all_dendr_metric_dict,
     set_output_dir,
 )
 
@@ -48,6 +47,12 @@ except Exception:
 
 
 def _load_trimesh(path: Path) -> Optional[Any]:
+    """Загружает mesh-файл через `trimesh`.
+
+    Входные данные: путь к mesh-файлу.
+    Выходные данные: объект `trimesh.Trimesh` или `None`, если файл недоступен
+    или формат не поддержан.
+    """
     if not _TRIMESH or not path.exists():
         return None
     mesh = trimesh.load_mesh(path, process=False)
@@ -61,12 +66,23 @@ def _load_trimesh(path: Path) -> Optional[Any]:
 
 
 def _load_npy_object(path: Path) -> Optional[Any]:
+    """Загружает объект skeleton из `.npy`-файла.
+
+    Входные данные: путь к `.npy`-файлу.
+    Выходные данные: загруженный объект или `None`, если файл отсутствует.
+    """
     if not path.exists():
         return None
     return np.load(path, allow_pickle=True)
 
 
 def _safe_register_attachment_center(spine_mesh: Any, attachment_center: np.ndarray) -> None:
+    """Регистрирует точку крепления шипика.
+
+    Входные данные: меш шипика и координата точки крепления.
+    Выходные данные: функция не возвращает значение; ошибки регистрации не
+    прерывают основной анализ.
+    """
     if register_attachment_center is None:
         return
     try:
@@ -76,6 +92,12 @@ def _safe_register_attachment_center(spine_mesh: Any, attachment_center: np.ndar
 
 
 def _safe_register_dendrite_skeleton(dendrite_mesh: Any, skeleton: Any) -> None:
+    """Регистрирует skeleton дендрита.
+
+    Входные данные: меш дендрита и объект skeleton.
+    Выходные данные: функция не возвращает значение; ошибки регистрации не
+    прерывают основной анализ.
+    """
     if register_dendrite_skeleton is None or dendrite_mesh is None or skeleton is None:
         return
     try:
@@ -85,6 +107,13 @@ def _safe_register_dendrite_skeleton(dendrite_mesh: Any, skeleton: Any) -> None:
 
 
 def _safe_mesh_metrics(mesh: Optional[Any]) -> Dict[str, float]:
+    """Вычисляет базовые геометрические метрики mesh-объекта.
+
+    Входные данные: mesh или `None`.
+    Действие: оценивает объём, площадь поверхности, размеры bounding box и
+    эквивалентный радиус; при нулевом объёме пробует convex hull.
+    Выходные данные: словарь числовых mesh-метрик.
+    """
     if mesh is None:
         return {
             "volume": np.nan,
@@ -122,6 +151,11 @@ def _safe_mesh_metrics(mesh: Optional[Any]) -> Dict[str, float]:
 
 
 def _polyline_length(points: Any) -> float:
+    """Вычисляет длину ломаной линии.
+
+    Входные данные: массив точек формы `(n, >=3)`.
+    Выходные данные: длина линии; `0.0` при недостатке валидных точек.
+    """
     points = np.asarray(points, dtype=float)
     if points.ndim != 2 or points.shape[0] < 2 or points.shape[1] < 3:
         return 0.0
@@ -133,6 +167,12 @@ def _polyline_length(points: Any) -> float:
 
 
 def _skeleton_length(skeleton: Any) -> float:
+    """Вычисляет суммарную длину skeleton-структуры.
+
+    Входные данные: skeleton в формате массива, словаря, списка сегментов или
+    вложенной объектной структуры.
+    Выходные данные: суммарная длина skeleton; `0.0`, если сегменты не найдены.
+    """
     if skeleton is None:
         return 0.0
     if isinstance(skeleton, np.ndarray) and skeleton.dtype == object:
@@ -177,6 +217,13 @@ def _skeleton_length(skeleton: Any) -> float:
 
 
 def _attachment_point_from_spine_mesh(mesh: Any) -> np.ndarray:
+    """Определяет точку крепления шипика по его mesh.
+
+    Входные данные: mesh шипика в глобальных координатах.
+    Действие: пытается найти дырку у основания шипика и возвращает
+    среднюю координату вершин выбранного кольца; при ошибке возвращает centroid.
+    Выходные данные: трёхмерная координата точки крепления.
+    """
     vertices = np.asarray(mesh.vertices, dtype=float)
     if len(vertices) == 0:
         return np.zeros(3, dtype=float)
@@ -194,6 +241,13 @@ def _attachment_point_from_spine_mesh(mesh: Any) -> np.ndarray:
 
 
 def _compose_graphs(graphs: Sequence[DendriticGraph], snap_threshold: float = 2.0) -> DendriticGraph:
+    """Объединяет несколько дендритных графов в один граф нейрона.
+    Переиндексирует узлы, объединяет графы и добавляет короткие
+    рёбра между узлами, расстояние между которыми не превышает `snap_threshold`.
+
+    Входные данные: последовательность графов и радиус сшивания близких узлов.
+    Выходные данные: единый объект `DendriticGraph`.
+    """
     merged = DendriticGraph()
     node_offset = 0
     for graph in graphs:
@@ -230,6 +284,116 @@ def _compose_graphs(graphs: Sequence[DendriticGraph], snap_threshold: float = 2.
     return merged
 
 
+def _projection_distance_summary(graph: DendriticGraph, spine_points: Dict[str, np.ndarray]) -> Dict[str, Any]:
+    """Оценивает расстояния от точек шипиков до ближайших рёбер графа.
+    Для каждого шипика приближённо ищет ближайшее ребро графа и
+    считает расстояние до проекции на это ребро.
+
+    Входные данные: дендритный граф и словарь точек крепления шипиков.
+    Выходные данные: словарь диагностических статистик расстояний и bounding
+    box координат графа/шипиков.
+    """
+    edges = list(graph.G.edges(data=True))
+    graph_positions = (
+        np.asarray([graph.G.nodes[node]["pos"] for node in graph.G.nodes()], dtype=float)
+        if graph.G.number_of_nodes() > 0
+        else np.empty((0, 3), dtype=float)
+    )
+    spine_positions = (
+        np.asarray(list(spine_points.values()), dtype=float)
+        if spine_points
+        else np.empty((0, 3), dtype=float)
+    )
+    graph_bbox_min = graph_positions.min(axis=0).tolist() if len(graph_positions) else [np.nan, np.nan, np.nan]
+    graph_bbox_max = graph_positions.max(axis=0).tolist() if len(graph_positions) else [np.nan, np.nan, np.nan]
+    spine_bbox_min = spine_positions.min(axis=0).tolist() if len(spine_positions) else [np.nan, np.nan, np.nan]
+    spine_bbox_max = spine_positions.max(axis=0).tolist() if len(spine_positions) else [np.nan, np.nan, np.nan]
+    if not edges or not spine_points:
+        return {
+            "n_spines": len(spine_points),
+            "n_edges": len(edges),
+            "min": np.nan,
+            "q10": np.nan,
+            "median": np.nan,
+            "q90": np.nan,
+            "max": np.nan,
+            "worst_spine_id": None,
+            "graph_bbox_min": graph_bbox_min,
+            "graph_bbox_max": graph_bbox_max,
+            "spine_bbox_min": spine_bbox_min,
+            "spine_bbox_max": spine_bbox_max,
+        }
+
+    midpoints = []
+    edge_list: List[Tuple[int, int]] = []
+    for u, v, _edata in edges:
+        pu = graph.node_position(u)
+        pv = graph.node_position(v)
+        midpoints.append(0.5 * (pu + pv))
+        edge_list.append((u, v))
+
+    kd = cKDTree(np.asarray(midpoints, dtype=float))
+    k = min(10, len(edge_list))
+    nearest_distances = []
+    worst_spine_id = None
+    worst_distance = -np.inf
+
+    for spine_id, point in spine_points.items():
+        point = np.asarray(point, dtype=float)
+        _dist_to_midpoint, idxs = kd.query(point, k=k)
+        idxs = [int(idxs)] if np.isscalar(idxs) else [int(idx) for idx in idxs]
+        best_distance = np.inf
+        for idx in idxs:
+            u, v = edge_list[idx]
+            pu = graph.node_position(u)
+            pv = graph.node_position(v)
+            direction = pv - pu
+            segment_length_sq = float(np.dot(direction, direction))
+            if segment_length_sq < 1e-20:
+                projection = pu
+            else:
+                t = float(np.dot(point - pu, direction) / segment_length_sq)
+                t = max(0.0, min(1.0, t))
+                projection = pu + t * direction
+            best_distance = min(best_distance, float(np.linalg.norm(point - projection)))
+        nearest_distances.append(best_distance)
+        if best_distance > worst_distance:
+            worst_distance = best_distance
+            worst_spine_id = spine_id
+
+    distances = np.asarray(nearest_distances, dtype=float)
+    distances = distances[np.isfinite(distances)]
+    if len(distances) == 0:
+        return {
+            "n_spines": len(spine_points),
+            "n_edges": len(edges),
+            "min": np.nan,
+            "q10": np.nan,
+            "median": np.nan,
+            "q90": np.nan,
+            "max": np.nan,
+            "worst_spine_id": worst_spine_id,
+            "graph_bbox_min": graph_bbox_min,
+            "graph_bbox_max": graph_bbox_max,
+            "spine_bbox_min": spine_bbox_min,
+            "spine_bbox_max": spine_bbox_max,
+        }
+    return {
+        "n_spines": len(spine_points),
+        "n_edges": len(edges),
+        "min": float(np.min(distances)),
+        "q10": float(np.quantile(distances, 0.10)),
+        "median": float(np.median(distances)),
+        "q90": float(np.quantile(distances, 0.90)),
+        "max": float(np.max(distances)),
+        "worst_spine_id": worst_spine_id,
+        "graph_bbox_min": graph_bbox_min,
+        "graph_bbox_max": graph_bbox_max,
+        "spine_bbox_min": spine_bbox_min,
+        "spine_bbox_max": spine_bbox_max,
+    }
+
+
 @dataclass
 class Soma:
     name: str
@@ -240,6 +404,13 @@ class Soma:
 
     @classmethod
     def from_microns_folder(cls, neuron_path: Path) -> "Soma":
+        """Создаёт объект сомы из папки нейрона MICrONS.
+
+        Входные данные: путь к папке нейрона.
+        Действие: ищет `soma/soma_mesh.off`, загружает mesh и считает базовые
+        mesh-метрики.
+        Выходные данные: объект `Soma`.
+        """
         soma_path = neuron_path / "soma"
         mesh_path = soma_path / "soma_mesh.off"
         mesh = _load_trimesh(mesh_path)
@@ -253,6 +424,12 @@ class Soma:
 
     @property
     def centroid(self) -> Optional[np.ndarray]:
+        """Возвращает центр mesh сомы.
+
+        Входные данные: поле `self.mesh`.
+        Действие: извлекает centroid mesh-объекта.
+        Выходные данные: трёхмерная координата centroid или `None`.
+        """
         if self.mesh is None:
             return None
         return np.asarray(self.mesh.centroid, dtype=float)
@@ -282,6 +459,14 @@ class Branch:
         spine_file_pattern: str = "*.off",
         load_spine_points: bool = True,
     ) -> "Branch":
+        """Создаёт объект ветви из папки `branch_*` датасета MICrONS.
+
+        Входные данные: путь к папке ветви, имя limb, тип дендрита, паттерн
+        файлов шипиков и флаг загрузки точек шипиков.
+        Действие: загружает `branch_mesh.off`, `branch_skeleton.npy`, при
+        необходимости загружает mesh-и шипиков из папки `spines`.
+        Выходные данные: объект `Branch`.
+        """
         branch = cls(
             name=branch_path.name,
             path=branch_path,
@@ -300,6 +485,13 @@ class Branch:
 
     @property
     def length(self) -> float:
+        """Возвращает длину ветви.
+
+        Входные данные: skeleton ветви или mesh ветви.
+        Действие: считает длину по skeleton; если skeleton недоступен,
+        использует максимальный размер oriented bounding box как fallback.
+        Выходные данные: длина ветви или `0.0`.
+        """
         length = _skeleton_length(self.skeleton)
         if length > 0:
             return length
@@ -311,6 +503,13 @@ class Branch:
         return 0.0
 
     def load_spine_points(self, spine_file_pattern: str = "*.off") -> Dict[str, np.ndarray]:
+        """Загружает шипики ветви и определяет их точки крепления.
+        Читает mesh каждого шипика, вычисляет точку крепления и
+        регистрирует её для downstream-метрик.
+
+        Входные данные: паттерн файлов шипиков в папке `spines`.
+        Выходные данные: словарь `{spine_id: attachment_point}`.
+        """
         self.spine_points = {}
         self.spine_mesh_paths = []
         self.spine_meshes = {}
@@ -350,6 +549,14 @@ class Limb:
         spine_file_pattern: str = "*.off",
         load_spine_points: bool = True,
     ) -> "Limb":
+        """Создаёт объект limb из папки `limb_*` датасета MICrONS.
+
+        Входные данные: путь к limb, тип дендрита, карта типов branch,
+        паттерн файлов шипиков и флаг загрузки точек шипиков.
+        Действие: загружает `limb_mesh.off`, `limb_skeleton.npy` и все
+        дочерние `branch_*`, содержащие папку `spines`.
+        Выходные данные: объект `Limb` со списком ветвей.
+        """
         branch_type_map = branch_type_map or {}
         limb = cls(
             name=limb_path.name,
@@ -379,6 +586,11 @@ class Limb:
 
     @property
     def length(self) -> float:
+        """Возвращает длину limb.
+
+        Входные данные: skeleton limb и длины дочерних ветвей.
+        Выходные данные: длина limb или `0.0`.
+        """
         length = _skeleton_length(self.skeleton)
         if length > 0:
             return length
@@ -431,7 +643,18 @@ class Neuron:
         spine_file_pattern: str = "*.off",
         load_spine_points: bool = True,
     ) -> "Neuron":
+        """Создаёт объект нейрона из папки датасета MICrONS.
+        Загружает сому и все папки `limb_*` с дочерними ветвями.
+
+        Входные данные: путь к папке нейрона, карта типов дендритов, паттерн
+        файлов шипиков и флаг загрузки точек шипиков.
+        Выходные данные: объект `Neuron`.
+        """
         neuron_path = Path(neuron_path)
+        if not neuron_path.exists():
+            raise FileNotFoundError(f"Neuron folder not found: {neuron_path}")
+        if not neuron_path.is_dir():
+            raise NotADirectoryError(f"Neuron path is not a directory: {neuron_path}")
         dendrite_type_map = dendrite_type_map or {}
         soma = Soma.from_microns_folder(neuron_path)
         limbs = []
@@ -452,16 +675,56 @@ class Neuron:
 
     @property
     def branches(self) -> List[Branch]:
+        """Возвращает все branch-объекты нейрона.
+
+        Входные данные: список limb-объектов `self.limbs`.
+        Выходные данные: плоский список `Branch`.
+        """
         return [branch for limb in self.limbs for branch in limb.branches]
 
     @property
-    def spine_points(self) -> Dict[str, np.ndarray]:
+    def all_spine_points(self) -> Dict[str, np.ndarray]:
+        """Возвращает точки всех загруженных шипиков без фильтрации ветвей.
+
+        Входные данные: `spine_points` всех branch-объектов.
+        Действие: объединяет словари точек шипиков.
+        Выходные данные: словарь `{spine_id: attachment_point}`.
+        """
         points: Dict[str, np.ndarray] = {}
         for branch in self.branches:
             points.update(branch.spine_points)
         return points
 
+    def get_spine_points(self, min_valid_branch_spines: int = 3) -> Dict[str, np.ndarray]:
+        """Возвращает точки шипиков только с валидных ветвей.
+        Исключает ветви, где число шипиков меньше порога.
+
+        Входные данные: минимальное число шипиков на ветви.
+        Выходные данные: словарь `{spine_id: attachment_point}` для анализа.
+        """
+        points: Dict[str, np.ndarray] = {}
+        for branch in self.branches:
+            if len(branch.spine_points) < min_valid_branch_spines:
+                continue
+            points.update(branch.spine_points)
+        return points
+
+    @property
+    def spine_points(self) -> Dict[str, np.ndarray]:
+        """Возвращает точки шипиков для стандартного сетевого анализа.
+
+        Входные данные: загруженные ветви нейрона.
+        Выходные данные: словарь валидных точек шипиков.
+        """
+        return self.get_spine_points(min_valid_branch_spines=3)
+
     def build_network_graph(self, snap_threshold: float = 2.0) -> DendriticGraph:
+        """Строит дендритный граф всего нейрона.
+
+        Входные данные: skeleton limb/branch, centroid сомы и радиус сшивания
+        близких узлов.
+        Выходные данные: объект `DendriticGraph`.
+        """
         soma_point = self.soma.centroid
         graphs: List[DendriticGraph] = []
         for limb in self.limbs:
@@ -506,7 +769,14 @@ class Neuron:
         return graph
 
     def infer_apical_limb_candidate(self) -> Optional[str]:
-        """Heuristic suggestion only; use metadata/manual override for final labels."""
+        """Предлагает кандидат на апикальный limb по грубой геометрической эвристике.
+        Выбирает limb с максимальным произведением длины на удаление
+        centroid limb от сомы
+
+        Входные данные: centroid сомы, skeleton или mesh каждого limb.
+        Выходные данные: имя limb-кандидата или `None`; результат не заменяет
+        ручную или metadata-разметку apical/basal.
+        """
         if len(self.limbs) < 2 or self.soma.centroid is None:
             return self.limbs[0].name if self.limbs else None
         soma = self.soma.centroid
@@ -542,15 +812,25 @@ class Neuron:
         self,
         output_dir: str | Path = "output_dendrite_metrics",
         reset_output: bool = False,
-        calculate_grouping_metrics: bool = True,
+        min_valid_spines: int = 3,
+        print_structural_vectors: bool = True,
         calculate_cluster_metrics: bool = True,
         calculate_comprehensive_spatial_analysis: bool = True,
         spatial_morphology_permutation_count: int = 199,
         spatial_morphology_random_state: int = 42,
         calculate_graph_metrics: bool = True,
         save_structural_organization_vector: bool = True,
-        save_summary_csv: bool = True,
     ) -> NeuronBranchAnalysisResult:
+        """Запускает анализ всех валидных дендритных ветвей нейрона.
+        Для каждой branch с достаточным числом шипиков создаёт
+        объект `Dendrite`, считает branch-level метрики и сохраняет выбранные
+        таблицы.
+
+        Входные данные: директория вывода, параметры фильтрации ветвей,
+        параметры пространственного анализа и флаги сохранения результатов.
+        Выходные данные: `NeuronBranchAnalysisResult` со списком рассчитанных
+        дендритов и списком пропущенных ветвей.
+        """
         set_output_dir(str(output_dir))
         if reset_output:
             reset_saved_data()
@@ -562,9 +842,22 @@ class Neuron:
             branch_key = self._safe_branch_key(branch)
             dendrite_name = f"{self.name}/{branch_key}"
             if branch.mesh is None or not branch.spine_meshes:
-                skipped.append(dendrite_name)
+                skipped.append(f"{dendrite_name}: missing mesh or spines")
+                continue
+            if len(branch.spine_meshes) < min_valid_spines:
+                skipped.append(f"{dendrite_name}: too few spines ({len(branch.spine_meshes)} < {min_valid_spines})")
+                print(
+                    f"[branches] skipped {dendrite_name}: too few spines "
+                    f"({len(branch.spine_meshes)} < {min_valid_spines})",
+                    flush=True,
+                )
                 continue
 
+            print(
+                f"[branches] analyzing {dendrite_name}: "
+                f"n_spines={len(branch.spine_meshes)}",
+                flush=True,
+            )
             dendrite = Dendrite(
                 dendrite_name,
                 dendrite_meshes={dendrite_name: branch.mesh},
@@ -572,13 +865,8 @@ class Neuron:
             )
             dendrite.save_init_metrics()
 
-            if calculate_grouping_metrics:
-                dendrite.calculate_grouping_metrics()
-                dendrite.save_grouping_metrics()
-
             if calculate_cluster_metrics:
                 dendrite.calculate_cluster_metrics()
-                dendrite.save_cluster_metrics()
 
             if calculate_comprehensive_spatial_analysis:
                 dendrite.calculate_comprehensive_spatial_analysis(
@@ -589,18 +877,14 @@ class Neuron:
 
             if calculate_graph_metrics:
                 dendrite.graph_analysis()
-                dendrite.save_graph_metrics()
 
             if save_structural_organization_vector:
-                dendrite.save_structural_organization_vector()
-
-            if save_summary_csv:
-                dendrite.save_dendr_metrics_without_class_cluster()
+                structural_record = dendrite.save_structural_organization_vector()
+                if print_structural_vectors:
+                    print(f"[branches] structural vector {dendrite_name}", flush=True)
+                    print(pd.Series(structural_record).to_string(), flush=True)
 
             dendrites.append(dendrite)
-
-        if save_summary_csv:
-            pd.DataFrame(save_all_dendr_metric_dict).to_csv(output_path("all_dendr_metrics.csv"), index=False)
 
         return NeuronBranchAnalysisResult(dendrites=dendrites, skipped_branches=skipped)
 
@@ -612,6 +896,13 @@ class Neuron:
         reset_branch_output: bool = False,
         **kwargs: Any,
     ) -> NeuronFullAnalysisResult:
+        """Запускает сетевой и/или branch-level анализ нейрона.
+
+        Входные данные: режим `network`, `branches` или `both`, директории
+        вывода и словари параметров для соответствующих подпроцедур.
+        Выходные данные: `NeuronFullAnalysisResult` с результатами выбранных
+        этапов.
+        """
         mode = mode.lower()
         if mode not in {"network", "branches", "both"}:
             raise ValueError("mode must be one of: 'network', 'branches', 'both'")
@@ -641,22 +932,65 @@ class Neuron:
         output_dir: str | Path = "output_neuron_network_analysis",
         snap_threshold: float = 2.0,
         max_distance_to_edge: float = 5.0,
+        min_valid_branch_spines: int = 3,
         bin_size: float = 25.0,
         covariates: Sequence[str] = ("intercept", "distance_to_soma", "distance_to_soma_squared"),
         n_r_values: int = 20,
         r_max: Optional[float] = None,
         n_simulations: int = 99,
         k_correction: str = "geometric",
+        random_state: Optional[int] = 42,
         save_outputs: bool = True,
+        log_projection_diagnostics: bool = True,
     ) -> NeuronNetworkAnalysisResult:
+        """Запускает полный анализ пространственной организации шипиков на сети нейрона.
+        Строит дендритный граф, проецирует шипики на сеть, считает
+        интенсивность вдоль расстояния от сомы, статистические тесты,
+        неоднородную пуассоновскую модель и сетевую функцию Рипли.
+
+        Входные данные: параметры построения графа, проекции шипиков,
+        интенсивности, пуассоновской модели, K-функции и сохранения.
+        Выходные данные: объект `NeuronNetworkAnalysisResult` с графом,
+        projected spines, таблицами анализа, ML-вектором и metadata-вектором.
+        """
         output_dir = Path(output_dir)
         graph = self.build_network_graph(snap_threshold=snap_threshold)
-        spine_points = self.spine_points
+        spine_points = self.get_spine_points(min_valid_branch_spines=min_valid_branch_spines)
+        projection_distance_summary = _projection_distance_summary(graph, spine_points)
         projected_spines, unassigned_ids = project_spines_to_graph(
             graph,
             spine_points,
             max_distance_to_edge=max_distance_to_edge,
         )
+        if log_projection_diagnostics:
+            print(
+                "[network projection] "
+                f"{self.name}: threshold={max_distance_to_edge}, "
+                f"projected={len(projected_spines)}/{len(spine_points)}, "
+                f"nearest_edge_distance min={projection_distance_summary['min']:.4f}, "
+                f"q10={projection_distance_summary['q10']:.4f}, "
+                f"median={projection_distance_summary['median']:.4f}, "
+                f"q90={projection_distance_summary['q90']:.4f}, "
+                f"max={projection_distance_summary['max']:.4f}",
+                flush=True,
+            )
+            if len(projected_spines) == 0 and len(spine_points) > 0:
+                print(
+                    "[network projection] "
+                    f"{self.name}: no spines passed the threshold. "
+                    "Most likely max_distance_to_edge is smaller than the "
+                    "distance from surface attachment points to the dendrite skeleton, "
+                    "or skeleton/spine coordinates are in different coordinate systems.",
+                    flush=True,
+                )
+                print(
+                    "[network projection] "
+                    f"{self.name}: graph_bbox={projection_distance_summary['graph_bbox_min']}.."
+                    f"{projection_distance_summary['graph_bbox_max']}, "
+                    f"spine_bbox={projection_distance_summary['spine_bbox_min']}.."
+                    f"{projection_distance_summary['spine_bbox_max']}",
+                    flush=True,
+                )
 
         binned_intensity = estimate_binned_intensity(graph, projected_spines, bin_size=bin_size)
         smooth_d, smooth_lambda = estimate_smooth_intensity(graph, projected_spines)
@@ -684,6 +1018,7 @@ class Neuron:
                     n_simulations=n_simulations,
                     intensity_model=poisson_result,
                     correction=k_correction,
+                    random_state=random_state,
                 )
             except Exception as exc:
                 warnings.warn(f"K analysis failed for neuron {self.name}: {exc}", stacklevel=2)
@@ -695,6 +1030,7 @@ class Neuron:
             n_simulations=n_simulations,
             k_correction=k_correction,
             covariates=covariates,
+            random_state=random_state,
         )
 
         metrics_vector = self.build_structural_network_vector(
@@ -714,6 +1050,17 @@ class Neuron:
             unassigned_count=len(unassigned_ids),
             poisson_result=poisson_result,
             k_result=k_result,
+        )
+        metadata_vector.update(
+            {
+                "projection_nearest_edge_distance_min": projection_distance_summary["min"],
+                "projection_nearest_edge_distance_q10": projection_distance_summary["q10"],
+                "projection_nearest_edge_distance_median": projection_distance_summary["median"],
+                "projection_nearest_edge_distance_q90": projection_distance_summary["q90"],
+                "projection_nearest_edge_distance_max": projection_distance_summary["max"],
+                "projection_worst_spine_id": projection_distance_summary["worst_spine_id"],
+                "projection_max_distance_to_edge": max_distance_to_edge,
+            }
         )
 
         result = NeuronNetworkAnalysisResult(
@@ -749,9 +1096,15 @@ class Neuron:
         k_result: Optional[KFunctionResult],
         compartment_k_results: Optional[Dict[str, KFunctionResult]] = None,
     ) -> Dict[str, Any]:
+        """Формирует ML-вектор признаков пространственной организации нейрона.
+
+        Входные данные: дендритный граф, спроецированные шипики, результаты
+        тестов интенсивности, пуассоновской модели и K-анализа.
+        Выходные данные: словарь признаков одного нейрона для последующего
+        анализа или обучения модели.
+        """
         branch_nodes = sum(1 for _, data in graph.G.nodes(data=True) if data.get("node_type") == "branch")
         terminal_nodes = sum(1 for node in graph.G.nodes() if graph.G.degree(node) == 1)
-        total_spines = len(self.spine_points)
         total_length = graph.total_length
         has_length = total_length > 1e-12
         type_metrics = self._calculate_dendrite_type_network_metrics(graph, projected_spines)
@@ -799,6 +1152,11 @@ class Neuron:
 
     @staticmethod
     def _add_k_summary_to_row(row: Dict[str, Any], prefix: str, k_result: KFunctionResult) -> None:
+        """Добавляет scalar summaries K-кривой в строку признаков.
+
+        Входные данные: словарь признаков, префикс полей и результат K-анализа.
+        Выходные данные: обновлённый словарь `row`.
+        """
         deviation = k_result.k_observed - k_result.k_expected
         max_pos_idx = int(np.argmax(deviation)) if len(deviation) else 0
         max_neg_idx = int(np.argmin(deviation)) if len(deviation) else 0
@@ -824,11 +1182,23 @@ class Neuron:
 
     @staticmethod
     def _normalized_dendrite_type(value: Any) -> str:
+        """Нормализует значение типа дендрита.
+
+        Входные данные: произвольное значение типа.
+        Выходные данные: нормализованная строка типа дендрита.
+        """
         value = str(value or "unknown").lower()
         return value if value in {"apical", "basal"} else "unknown"
 
     @classmethod
     def _edge_dendrite_type(cls, graph: DendriticGraph, u: int, v: int) -> str:
+        """Определяет тип дендрита для ребра графа.
+        Сравнивает типы концов ребра и разрешает `unknown`, если
+        один из концов не размечен.
+
+        Входные данные: граф и два узла ребра.
+        Выходные данные: `apical`, `basal` или `unknown`.
+        """
         u_type = cls._normalized_dendrite_type(graph.G.nodes[u].get("dendrite_type", "unknown"))
         v_type = cls._normalized_dendrite_type(graph.G.nodes[v].get("dendrite_type", "unknown"))
         if u_type == v_type:
@@ -845,6 +1215,15 @@ class Neuron:
         graph: DendriticGraph,
         projected_spines: Sequence[Any],
     ) -> Dict[str, float]:
+        """Вычисляет density-метрики отдельно для apical и basal частей.
+        Суммирует длины рёбер, считает узлы ветвления, терминальные
+        узлы и шипики по типам дендритов, затем нормирует счётчики на длину
+        соответствующей части сети.
+
+        Входные данные: дендритный граф и список спроецированных шипиков.
+        Выходные данные: словарь compartment-specific длин и линейных
+        плотностей.
+        """
         lengths = {"apical": 0.0, "basal": 0.0, "unknown": 0.0}
         branch_nodes = {"apical": 0, "basal": 0, "unknown": 0}
         terminal_nodes = {"apical": 0, "basal": 0, "unknown": 0}
@@ -882,6 +1261,13 @@ class Neuron:
 
     @classmethod
     def _subgraph_for_dendrite_type(cls, graph: DendriticGraph, dendrite_type: str) -> DendriticGraph:
+        """Выделяет подграф заданного типа дендритов.
+        Оставляет только рёбра выбранного типа и переносит доступные
+        расстояния от сомы.
+
+        Входные данные: полный дендритный граф и тип `apical` или `basal`.
+        Выходные данные: объект `DendriticGraph` для выбранного compartment.
+        """
         selected_edges = [
             (u, v)
             for u, v in graph.G.edges()
@@ -906,6 +1292,13 @@ class Neuron:
         projected_spines: Sequence[Any],
         dendrite_type: str,
     ) -> List[Any]:
+        """Фильтрует спроецированные шипики по типу дендрита.
+        Оставляет шипики, лежащие на рёбрах заданного типа.
+
+        Входные данные: полный граф, список спроецированных шипиков и тип
+        дендрита.
+        Выходные данные: список `ProjectedSpine` для выбранного compartment.
+        """
         return [
             spine
             for spine in projected_spines
@@ -920,8 +1313,18 @@ class Neuron:
         n_simulations: int,
         k_correction: str,
         covariates: Sequence[str],
+        random_state: Optional[int],
     ) -> Dict[str, KFunctionResult]:
+        """Выполняет K-анализ отдельно для апикальной и базальной частей.
+        Выделяет подграфы `apical` и `basal`, фильтрует шипики по
+        типу рёбер и считает compartment-specific K-кривые.
+
+        Входные данные: полный граф нейрона, спроецированные шипики, параметры
+        K-функции, ковариаты пуассоновской модели и seed.
+        Выходные данные: словарь `{тип дендрита: KFunctionResult}`.
+        """
         results: Dict[str, KFunctionResult] = {}
+        rng = np.random.default_rng(random_state)
         for dendrite_type in ("apical", "basal"):
             compartment_graph = self._subgraph_for_dendrite_type(graph, dendrite_type)
             compartment_spines = self._projected_spines_for_dendrite_type(
@@ -955,6 +1358,7 @@ class Neuron:
                     intensity_model=compartment_poisson,
                     correction=k_correction,
                     fit_intensity_if_missing=False,
+                    random_state=int(rng.integers(0, np.iinfo(np.int32).max)),
                 )
             except Exception as exc:
                 warnings.warn(
@@ -971,6 +1375,15 @@ class Neuron:
         poisson_result: Optional[PoissonModelResult],
         k_result: Optional[KFunctionResult],
     ) -> Dict[str, Any]:
+        """Формирует metadata-вектор технических и абсолютных характеристик нейрона.
+        Собирает счётчики, абсолютные длины, характеристики
+        проекции, размеры выборки и диагностические поля, не входящие в
+        ML-вектор.
+
+        Входные данные: граф, число спроецированных и неспроецированных
+        шипиков, результат пуассоновской модели и K-анализа.
+        Выходные данные: словарь metadata одной записи нейрона.
+        """
         limb_lengths = np.array([limb.length for limb in self.limbs if limb.length > 0], dtype=float)
         branch_lengths = np.array([branch.length for branch in self.branches if branch.length > 0], dtype=float)
         branch_spine_counts = np.array([len(branch.spine_points) for branch in self.branches], dtype=float)
@@ -979,7 +1392,8 @@ class Neuron:
 
         branch_nodes = sum(1 for _, data in graph.G.nodes(data=True) if data.get("node_type") == "branch")
         terminal_nodes = sum(1 for node in graph.G.nodes() if graph.G.degree(node) == 1)
-        total_spines = len(self.spine_points)
+        total_spines = len(self.all_spine_points)
+        valid_spines = len(self.spine_points)
         type_metrics = self._calculate_dendrite_type_network_metrics(graph, [])
 
         row: Dict[str, Any] = {
@@ -987,9 +1401,10 @@ class Neuron:
             "n_limbs": len(self.limbs),
             "n_branches": len(self.branches),
             "n_spines_total": total_spines,
+            "n_spines_valid_for_analysis": valid_spines,
             "n_spines_projected": projected_count,
             "n_spines_unassigned": unassigned_count,
-            "projection_success_rate": projected_count / total_spines if total_spines else np.nan,
+            "projection_success_rate": projected_count / valid_spines if valid_spines else np.nan,
             "network_total_length": graph.total_length,
             "network_n_nodes": graph.n_nodes,
             "network_n_edges": graph.n_edges,
@@ -1027,6 +1442,15 @@ class Neuron:
         summary_filename: str = "neuron_structural_network_vectors.csv",
         metadata_filename: str = "neuron_metadata.csv",
     ) -> None:
+        """Сохраняет результаты сетевого анализа нейрона.
+        Сохраняет per-neuron таблицы, K-кривые, общий ML-вектор и
+        metadata-вектор; при повторном запуске заменяет строку текущего
+        нейрона.
+
+        Входные данные: объект `NeuronNetworkAnalysisResult`, директория вывода
+        и имена summary-файлов.
+        Выходные данные: набор CSV-файлов в директории анализа.
+        """
         output_dir = Path(output_dir)
         neuron_dir = output_dir / self.name
         neuron_dir.mkdir(parents=True, exist_ok=True)
@@ -1071,7 +1495,17 @@ def load_microns_neurons(
     spine_file_pattern: str = "*.off",
     load_spine_points: bool = True,
 ) -> List[Neuron]:
+    """Загружает все нейроны из корневой папки MICrONS-датасета.
+
+    Входные данные: корневая папка, карта типов дендритов, паттерн файлов
+    шипиков и флаг загрузки точек шипиков.
+    Выходные данные: список загруженных объектов `Neuron`.
+    """
     root = Path(root_path)
+    if not root.exists():
+        raise FileNotFoundError(f"MICrONS root folder not found: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"MICrONS root path is not a directory: {root}")
     neurons: List[Neuron] = []
     dendrite_type_map = dendrite_type_map or {}
     for neuron_path in sorted(path for path in root.iterdir() if path.is_dir()):
@@ -1104,6 +1538,13 @@ def run_microns_neuron_analyses(
     network_kwargs: Optional[Dict[str, Any]] = None,
     branch_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Neuron], Dict[str, NeuronFullAnalysisResult]]:
+    """Запускает batch-анализ нейронов MICrONS.
+
+    Входные данные: корневая папка датасета, режим анализа, карта типов
+    дендритов, директории вывода и параметры network/branch подпроцедур.
+    Выходные данные: список объектов `Neuron` и словарь результатов по имени
+    нейрона.
+    """
     mode = mode.lower()
     if mode not in {"network", "branches", "both"}:
         raise ValueError("mode must be one of: 'network', 'branches', 'both'")

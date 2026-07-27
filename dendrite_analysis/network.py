@@ -155,6 +155,11 @@ class KFunctionResult:
     interpretation: str = ""
 
     def to_dataframe(self) -> pd.DataFrame:
+        """Преобразует результат K-анализа в таблицу.
+
+        Входные данные: поля `KFunctionResult`.
+        Выходные данные: `pandas.DataFrame`.
+        """
         data: Dict[str, Any] = {
             "r": self.r_values,
             "k_observed": self.k_observed,
@@ -172,8 +177,23 @@ class KFunctionResult:
 # ===========================================================================
 
 class DendriticGraph:
+    """Графовое представление дендритной сети.
+    Хранит `networkx.Graph`, координаты узлов, длины рёбер и индекс
+    узла сомы.
+
+    Входные данные: объект создаётся пустым и заполняется функциями построения
+    графа из skeleton или mesh.
+    Выходные данные: объект для расчёта расстояний, интенсивности и K-функции
+    на дендритной сети.
+    """
 
     def __init__(self) -> None:
+        """Инициализирует пустой дендритный граф.
+        Создаёт пустой `networkx.Graph`, сбрасывает soma node и кэш
+        расстояний от сомы.
+
+        Выходные данные: пустой объект `DendriticGraph`.
+        """
         self.G: nx.Graph = nx.Graph()
         self.soma_node: Optional[int] = None
         self._soma_distances: Optional[Dict[int, float]] = None
@@ -184,18 +204,40 @@ class DendriticGraph:
 
     @property
     def total_length(self) -> float:
+        """Возвращает суммарную длину всех рёбер графа.
+
+        Входные данные: текущий граф с атрибутом ребра `length`.
+        Выходные данные: общая длина дендритной сети.
+        """
         return float(sum(d["length"] for _, _, d in self.G.edges(data=True)))
 
     @property
     def n_nodes(self) -> int:
+        """Возвращает число узлов графа.
+
+        Входные данные: текущий `networkx.Graph`.
+        Выходные данные: количество узлов.
+        """
         return self.G.number_of_nodes()
 
     @property
     def n_edges(self) -> int:
+        """Возвращает число рёбер графа.
+
+        Входные данные: текущий `networkx.Graph`.
+        Выходные данные: количество рёбер.
+        """
         return self.G.number_of_edges()
 
     @property
     def nodes_df(self) -> pd.DataFrame:
+        """Экспортирует узлы графа в таблицу.
+        Формирует строки с id, координатами, типом узла,
+        dendrite_id и dendrite_type.
+
+        Входные данные: текущий граф с координатами и атрибутами узлов.
+        Выходные данные: `pandas.DataFrame` узлов.
+        """
         rows = []
         for node, data in self.G.nodes(data=True):
             pos = data.get("pos", np.zeros(3))
@@ -214,6 +256,12 @@ class DendriticGraph:
 
     @property
     def edges_df(self) -> pd.DataFrame:
+        """Экспортирует рёбра графа в таблицу.
+        Формирует строки source, target и length.
+
+        Входные данные: текущий граф с длинами рёбер.
+        Выходные данные: `pandas.DataFrame` рёбер.
+        """
         rows = []
         for u, v, data in self.G.edges(data=True):
             rows.append({"source": u, "target": v, "length": data.get("length", 0.0)})
@@ -224,10 +272,20 @@ class DendriticGraph:
     # ------------------------------------------------------------------
 
     def node_position(self, node: int) -> np.ndarray:
+        """Возвращает координаты узла графа.
+
+        Входные данные: id узла.
+        Выходные данные: трёхмерная координата узла.
+        """
         pos = self.G.nodes[node].get("pos", np.zeros(3))
         return np.asarray(pos, dtype=float)
 
     def all_node_positions(self) -> np.ndarray:
+        """Возвращает координаты всех узлов графа.
+
+        Входные данные: текущий граф.
+        Выходные данные: массив формы `(n_nodes, 3)`.
+        """
         nodes = list(self.G.nodes())
         if not nodes:
             return np.empty((0, 3))
@@ -238,6 +296,13 @@ class DendriticGraph:
     # ------------------------------------------------------------------
 
     def soma_distances(self, recompute: bool = False) -> Dict[int, float]:
+        """Вычисляет расстояния от сомы до всех узлов графа.
+        Запускает Dijkstra от `soma_node`, 
+        если soma node не задан, использует первый узел и выдаёт предупреждение.
+
+        Входные данные: флаг принудительного пересчёта.
+        Выходные данные: словарь `{node_id: distance_to_soma}`.
+        """
         if self._soma_distances is not None and not recompute:
             return self._soma_distances
 
@@ -257,11 +322,23 @@ class DendriticGraph:
         return self._soma_distances
 
     def all_pairs_distances(self) -> Dict[Any, Dict[Any, float]]:
+        """Вычисляет кратчайшие расстояния между всеми узлами графа.
+
+        Входные данные: текущий граф с длинами рёбер.
+        Выходные данные: вложенный словарь расстояний между узлами.
+        """
         return dict(nx.all_pairs_dijkstra_path_length(self.G, weight="length"))
 
     def sample_points_on_graph(
         self, step: float = 1.0
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Сэмплирует точки вдоль рёбер дендритного графа.
+        Размещает точки в серединах равномерных сегментов каждого
+        ребра и вычисляет расстояние каждой точки от сомы.
+
+        Входные данные: шаг сэмплирования вдоль рёбер.
+        Выходные данные: массив координат точек и массив расстояний от сомы.
+        """
         if self.G.number_of_edges() == 0:
             return np.empty((0, 3)), np.empty((0,))
 
@@ -283,7 +360,7 @@ class DendriticGraph:
 
             for t in ts:
                 pt = p_u + t * (p_v - p_u)
-                # soma distance: best approach along the edge from either end
+                
                 dist = min(d_u + t * length, d_v + (1.0 - t) * length)
                 all_pts.append(pt)
                 all_sd.append(dist)
@@ -303,6 +380,14 @@ def _graph_from_skeleton_segments(
     dendrite_id: str = "d0",
     dendrite_type: str = "unknown",
 ) -> DendriticGraph:
+    """Строит дендритный граф из списка skeleton-сегментов.
+
+    Входные данные: список пар трёхмерных точек, идентификатор дендрита и тип
+    дендрита.
+    Действие: создаёт узлы по координатам концов сегментов, добавляет рёбра с
+    длинами и классифицирует узлы как terminal, branch или intermediate.
+    Выходные данные: объект `DendriticGraph`.
+    """
     dg = DendriticGraph()
 
     pos_to_id: Dict[Tuple[float, ...], int] = {}
@@ -348,6 +433,11 @@ def _graph_from_skeleton_segments(
 
 
 def _polyline_segments(points: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Преобразует полилинию в список соседних сегментов.
+
+    Входные данные: массив точек формы `(n, >=3)`.
+    Выходные данные: список сегментов `(start, end)`.
+    """
     pts = np.asarray(points, dtype=float)
     if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] < 3:
         return []
@@ -360,6 +450,14 @@ def _polyline_segments(points: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
 
 
 def _segments_from_skeleton_object(skeleton: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Извлекает сегменты из skeleton-объекта произвольного поддерживаемого формата.
+    Ищет пары точек, полилинии или структуру `points`/`edges` и
+    рекурсивно преобразует их в сегменты.
+
+    Входные данные: skeleton как массив, словарь, список или вложенная
+    объектная структура.
+    Выходные данные: список трёхмерных сегментов.
+    """
     if skeleton is None:
         return []
 
@@ -434,6 +532,14 @@ def build_dendritic_graph_from_skeleton(
     dendrite_type: str = "unknown",
     snap_threshold: float = 2.0,
 ) -> DendriticGraph:
+    """Строит дендритный граф напрямую из skeleton.
+    Извлекает сегменты skeleton, строит граф и назначает soma node,
+    если ближайший узел находится в пределах `snap_threshold`.
+
+    Входные данные: skeleton, опциональная точка сомы, идентификатор и тип
+    дендрита, радиус привязки сомы.
+    Выходные данные: объект `DendriticGraph`.
+    """
     segments = _segments_from_skeleton_object(skeleton)
     if not segments:
         raise ValueError("Skeleton does not contain any valid 3-D segments.")
@@ -465,6 +571,12 @@ def build_dendritic_graph(
     dendrite_type: str = "unknown",
     snap_threshold: float = 2.0,
 ) -> DendriticGraph:
+    """Строит дендритный граф из mesh через CGAL-skeletonization.
+
+    Входные данные: mesh дендрита, опциональная точка сомы, идентификатор и тип
+    дендрита, радиус привязки сомы.
+    Выходные данные: объект `DendriticGraph`.
+    """
     if not _CGAL:
         raise ImportError("CGAL bindings are required for build_dendritic_graph.")
 
@@ -493,6 +605,14 @@ def build_graph_from_meshes(
     dendrite_types: Optional[Dict[str, str]] = None,
     snap_threshold: float = 2.0,
 ) -> DendriticGraph:
+    """Строит общий дендритный граф из набора mesh-объектов.
+    Строит подграф для каждого mesh, объединяет их и добавляет рёбра
+    между близкими узлами разных дендритов.
+
+    Входные данные: словарь mesh-объектов дендритов, опциональный mesh сомы,
+    карта типов дендритов и радиус сшивания.
+    Выходные данные: единый объект `DendriticGraph`.
+    """
     if dendrite_types is None:
         dendrite_types = {}
 
@@ -556,6 +676,13 @@ def _project_point_to_segment(
     seg_start: np.ndarray,
     seg_end: np.ndarray,
 ) -> Tuple[np.ndarray, float, float]:
+    """Проецирует точку на отрезок.
+    Вычисляет ближайшую точку на сегменте, параметр положения `t` и
+    евклидово расстояние до сегмента.
+
+    Входные данные: трёхмерная точка и два конца сегмента.
+    Выходные данные: `(projected_point, t, distance)`.
+    """
     d = seg_end - seg_start
     seg_len_sq = float(np.dot(d, d))
     if seg_len_sq < 1e-20:
@@ -575,6 +702,16 @@ def project_spines_to_graph(
     use_k_nearest_edges: int = 10,
     allow_unassigned: bool = True,
 ) -> Tuple[List[ProjectedSpine], List[str]]:
+    """Проецирует точки крепления шипиков на дендритный граф.
+    Для каждого шипика ищет ближайшее ребро графа, вычисляет
+    проекцию на него и расстояние от сомы вдоль сети.
+
+    Входные данные: граф, словарь точек шипиков, максимальное расстояние до
+    ребра, число ближайших рёбер-кандидатов и режим обработки неподходящих
+    точек.
+    Выходные данные: список `ProjectedSpine` и список id неспроецированных
+    шипиков.
+    """
     edges = list(graph.G.edges(data=True))
     if not edges:
         if not allow_unassigned and spine_points:
@@ -646,6 +783,13 @@ def project_spines_to_graph(
 
 
 def projected_spines_dataframe(spines: List[ProjectedSpine]) -> pd.DataFrame:
+    """Преобразует список спроецированных шипиков в таблицу.
+    Извлекает исходные координаты, координаты проекции, id ребра,
+    положение на ребре, расстояние до ребра и расстояние от сомы.
+
+    Входные данные: список объектов `ProjectedSpine`.
+    Выходные данные: `pandas.DataFrame` с одной строкой на шипик.
+    """
     rows = []
     for s in spines:
         rows.append(
@@ -673,6 +817,11 @@ def projected_spines_dataframe(spines: List[ProjectedSpine]) -> pd.DataFrame:
 # ===========================================================================
 
 def compute_soma_distances(graph: DendriticGraph) -> Dict[int, float]:
+    """Возвращает расстояния от сомы до узлов графа.
+
+    Входные данные: объект `DendriticGraph`.
+    Выходные данные: словарь `{node_id: distance_to_soma}`.
+    """
     return graph.soma_distances()
 
 
@@ -680,6 +829,11 @@ def compute_spine_pairwise_distances(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
 ) -> np.ndarray:
+    """Вычисляет попарные расстояния между шипиками по дендритной сети.
+
+    Входные данные: дендритный граф и список спроецированных шипиков.
+    Выходные данные: квадратная матрица сетевых расстояний между шипиками.
+    """
     n = len(spines)
     dist_matrix = np.zeros((n, n), dtype=float)
     if n == 0:
@@ -730,6 +884,11 @@ def compute_spine_pairwise_distances_mesh(
     dendrite_mesh: Any,
     spines: List[ProjectedSpine],
 ) -> np.ndarray:
+    """Вычисляет попарные расстояния между шипиками по mesh дендрита.
+
+    Входные данные: mesh дендрита и список спроецированных шипиков.
+    Выходные данные: квадратная матрица расстояний.
+    """
     from dendrite_analysis.surface_distances import (  # type: ignore
         calculate_mesh_graph_distance_matrix,
     )
@@ -743,6 +902,11 @@ def compute_distance_to_branching(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
 ) -> np.ndarray:
+    """Вычисляет расстояния от шипиков до ближайшего узла ветвления.
+
+    Входные данные: дендритный граф и список спроецированных шипиков.
+    Выходные данные: массив расстояний до ближайшего ветвления.
+    """
     branch_nodes = [
         n for n, d in graph.G.nodes(data=True)
         if d.get("node_type") in ("branch", "soma") or graph.G.degree(n) >= 3
@@ -779,6 +943,11 @@ def compute_distance_to_terminals(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
 ) -> np.ndarray:
+    """Вычисляет расстояния от шипиков до ближайшего терминального узла.
+
+    Входные данные: дендритный граф и список спроецированных шипиков.
+    Выходные данные: массив расстояний до ближайшей терминали.
+    """
     terminal_nodes = [n for n in graph.G.nodes() if graph.G.degree(n) == 1]
 
     if not terminal_nodes:
@@ -817,6 +986,15 @@ def estimate_binned_intensity(
     spines: List[ProjectedSpine],
     bin_size: float = 25.0,
 ) -> pd.DataFrame:
+    """Оценивает биннированную линейную интенсивность шипиков.
+    Делит ось расстояния от сомы на интервалы, считает число шипиков
+    и длину сети в каждом интервале.
+
+    Входные данные: граф, спроецированные шипики и размер бина по расстоянию
+    от сомы.
+    Выходные данные: таблица с количеством шипиков, длиной сети и интенсивностью
+    в каждом бине.
+    """
     if not spines:
         return pd.DataFrame(
             columns=[
@@ -873,6 +1051,13 @@ def estimate_smooth_intensity(
     bandwidth: Optional[float] = None,
     eval_step: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Оценивает сглаженную интенсивность шипиков вдоль расстояния от сомы.
+    Строит KDE по расстояниям шипиков от сомы и нормирует её на
+    оценку длины сети в окрестности каждого расстояния.
+
+    Входные данные: граф, спроецированные шипики, bandwidth и шаг сетки.
+    Выходные данные: массив расстояний и массив сглаженной интенсивности.
+    """
     if not spines:
         return np.array([]), np.array([])
 
@@ -918,6 +1103,14 @@ def test_intensity_dependence(
     spines: List[ProjectedSpine],
     n_bins: int = 10,
 ) -> Dict[str, Any]:
+    """Проверяет зависимость интенсивности шипиков от расстояния до сомы.
+    Сравнивает постоянную пуассоновскую модель и модель с линейной
+    зависимостью от расстояния до сомы через тест отношения правдоподобия.
+
+    Входные данные: граф, спроецированные шипики и число бинов.
+    Выходные данные: словарь статистики LR-теста, p-значения, AIC и
+    интерпретации.
+    """
     total_len = graph.total_length
     if total_len <= 0 or not spines:
         return {
@@ -1004,12 +1197,15 @@ def test_intensity_dependence_cdf(
     spines: List[ProjectedSpine],
     sample_step: float = 1.0,
 ) -> Dict[str, Any]:
-    """Reference-style CDF test for dependence on soma distance.
+    """Проверка зависимости от расстояния до сомы 
+    с использованием сравнения функций распределения.
+    Сравнивает распределение расстояний шипиков от сомы с
+    распределением расстояний равномерно сэмплированных точек сети.
 
-    The paper compares the covariate distribution at network events with the
-    covariate distribution along the whole network.  Here this is implemented
-    as a two-sample Kolmogorov--Smirnov test between spine soma distances and
-    distances of approximately uniform sample points on the network.
+
+    Входные данные: граф, спроецированные шипики и шаг сэмплирования сети.
+    Выходные данные: словарь KS-статистики, p-значения, размеров выборок и
+    интерпретации.
     """
     if not spines:
         return {
@@ -1062,6 +1258,11 @@ def test_intensity_dependence_cdf(
 # ===========================================================================
 
 def _build_covariates(soma_distances: np.ndarray, covariate_names: List[str]) -> np.ndarray:
+    """Строит матрицу ковариат для пуассоновской модели.
+
+    Входные данные: массив расстояний от сомы и список имён ковариат.
+    Выходные данные: матрица дизайна формы `(n_points, n_covariates)`.
+    """
     n = len(soma_distances)
     cols = []
     for name in covariate_names:
@@ -1086,6 +1287,14 @@ def _network_integral(
     graph: DendriticGraph,
     n_samples_per_unit: float = 2.0,
 ) -> Tuple[float, np.ndarray]:
+    """Аппроксимирует интеграл интенсивности по дендритной сети.
+    Сэмплирует точки на графе, вычисляет интенсивность и градиент
+    интеграла по коэффициентам.
+
+    Входные данные: коэффициенты модели, имена ковариат, граф и плотность
+    сэмплирования.
+    Выходные данные: значение интеграла и его градиент.
+    """
     step = max(1.0 / n_samples_per_unit, 1e-6)
     sample_pts, sample_sd = graph.sample_points_on_graph(step=step)
 
@@ -1112,6 +1321,13 @@ def fit_inhomogeneous_poisson(
     spines: List[ProjectedSpine],
     covariates: Sequence[str] = ("intercept", "distance_to_soma", "distance_to_soma_squared"),
 ) -> PoissonModelResult:
+    """Подгоняет неоднородную пуассоновскую модель интенсивности шипиков.
+
+    Входные данные: дендритный граф, спроецированные шипики и список ковариат.
+    Действие: максимизирует логарифм функции правдоподобия точечного процесса на сети,
+    вычисляет коэффициенты, стандартные ошибки, AIC, BIC и residuals.
+    Выходные данные: объект `PoissonModelResult`.
+    """
     covariate_names = list(covariates)
     if not spines:
         raise ValueError("Cannot fit model: no spines provided.")
@@ -1215,6 +1431,11 @@ def fit_inhomogeneous_poisson(
 # ===========================================================================
 
 def _source_node_distances(graph: DendriticGraph, spine: ProjectedSpine) -> Dict[int, float]:
+    """Вычисляет расстояния от спроецированного шипика до всех узлов графа.
+
+    Входные данные: дендритный граф и один объект `ProjectedSpine`.
+    Выходные данные: словарь `{node_id: distance_from_spine}`.
+    """
     u0, v0 = spine.edge_source, spine.edge_target
     if graph.G.has_edge(u0, v0):
         edge_len = float(graph.G[u0][v0].get("length", 0.0))
@@ -1240,12 +1461,10 @@ def _network_sphere_multiplicity(
     distance: float,
     tol: float = 1e-8,
 ) -> int:
-    """Number of locations on the metric graph exactly `distance` away.
+    """Считает количество точек на метрическом графе, находящихся точно на расстоянии `distance`.
 
-    For each graph edge, the shortest-path distance from the source to a point
-    on that edge is the lower envelope of the two linear functions obtained via
-    the edge endpoints.  Intersections of this envelope with the horizontal
-    level `distance` are counted as network sphere points.
+    Входные данные: граф, расстояния от источника до узлов и радиус.
+    Выходные данные: целое число точек сетевой сферы.
     """
     if not np.isfinite(distance) or distance <= tol:
         return 0
@@ -1295,6 +1514,14 @@ def _geometric_multiplicity_matrix(
     spines: List[ProjectedSpine],
     dist_matrix: np.ndarray,
 ) -> np.ndarray:
+    """Строит матрицу геометрических множителей для K-функции на сети.
+    Для каждой пары шипиков оценивает число направлений/точек
+    сетевой сферы на соответствующем расстоянии.
+
+    Входные данные: граф, список шипиков и матрица сетевых расстояний.
+    Выходные данные: матрица multiplicity той же формы, что и матрица
+    расстояний.
+    """
     n = len(spines)
     multiplicity = np.ones((n, n), dtype=float)
     np.fill_diagonal(multiplicity, np.inf)
@@ -1328,6 +1555,15 @@ def ripley_k_network(
     dist_matrix: Optional[np.ndarray] = None,
     correction: str = "geometric",
 ) -> KFunctionResult:
+    """Вычисляет сетевую K-функцию Рипли для шипиков на дендритном графе.
+    Считает число пар шипиков в пределах каждого радиуса с
+    homogeneous или inhomogeneous нормировкой и геометрической поправкой сети.
+
+    Входные данные: граф, спроецированные шипики, радиусы `r_values`,
+    опциональная интенсивность, матрица расстояний и тип поправки.
+    Выходные данные: объект `KFunctionResult` с наблюдаемой и ожидаемой
+    K-кривой.
+    """
     n = len(spines)
     r_values = np.asarray(r_values, dtype=float)
     correction = correction.lower()
@@ -1412,7 +1648,20 @@ def simulate_poisson_on_graph(
     graph: DendriticGraph,
     n_points: int,
     intensity_fn: Optional[Callable[[float], float]] = None,
+    rng: Optional[np.random.Generator] = None,
 ) -> List[ProjectedSpine]:
+    """Симулирует точки пуассоновского процесса на дендритном графе.
+    Выбирает рёбра пропорционально их длине и размещает точки
+    равномерно либо по неоднородной интенсивности методом thinning.
+
+    Входные данные: граф дендритной сети, число точек, опциональная функция
+    интенсивности и генератор случайных чисел.
+    Выходные данные: список объектов `ProjectedSpine`, представляющих
+    симулированные точки на графе.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
     edges = list(graph.G.edges(data=True))
     if not edges:
         return []
@@ -1427,11 +1676,11 @@ def simulate_poisson_on_graph(
 
     if intensity_fn is None:
         probs = lengths / total_len
-        chosen_edges = np.random.choice(len(edge_list), size=n_points, p=probs)
+        chosen_edges = rng.choice(len(edge_list), size=n_points, p=probs)
         results = []
         for k, eidx in enumerate(chosen_edges):
             u, v, L = edge_list[eidx]
-            t = float(np.random.uniform(0.0, 1.0))
+            t = float(rng.uniform(0.0, 1.0))
             pu = graph.node_position(u)
             pv = graph.node_position(v)
             pt = pu + t * (pv - pu)
@@ -1471,9 +1720,9 @@ def simulate_poisson_on_graph(
         probs = lengths / total_len
 
         while len(results) < n_points:
-            chosen_edges = np.random.choice(len(edge_list), size=batch_size, p=probs)
-            ts = np.random.uniform(0.0, 1.0, size=batch_size)
-            uniforms = np.random.uniform(0.0, 1.0, size=batch_size)
+            chosen_edges = rng.choice(len(edge_list), size=batch_size, p=probs)
+            ts = rng.uniform(0.0, 1.0, size=batch_size)
+            uniforms = rng.uniform(0.0, 1.0, size=batch_size)
 
             for eidx, t, u_rand in zip(chosen_edges, ts, uniforms):
                 u, v, L = edge_list[eidx]
@@ -1515,10 +1764,22 @@ def compute_simulation_envelopes(
     intensity_model: Optional[PoissonModelResult] = None,
     correction: str = "geometric",
     fit_intensity_if_missing: bool = True,
+    random_state: Optional[int] = None,
 ) -> KFunctionResult:
+    """Строит Monte Carlo envelope для сетевой функции Рипли.
+    Вычисляет наблюдаемую K-кривую, симулирует пуассоновские точки
+    на том же графе, строит нижнюю/верхнюю envelope и Monte Carlo p-значение.
+
+    Входные данные: дендритный граф, наблюдаемые шипики, значения радиуса,
+    число симуляций, модель интенсивности, способ поправки и seed.
+    Выходные данные: объект `KFunctionResult` с наблюдаемой, ожидаемой и
+    симулированными границами K-кривой.
+    """
+    rng = np.random.default_rng(random_state)
     n = len(spines)
     r_values = np.asarray(r_values, dtype=float)
     use_geometric = correction.lower() in {"geometric", "reference", "kl", "k_l"}
+    n_simulations = int(max(0, n_simulations))
 
     if n < 2:
         k_exp = r_values.copy() if use_geometric else 2.0 * r_values
@@ -1567,13 +1828,25 @@ def compute_simulation_envelopes(
     else:
         intensity_fn = None
 
+    if n_simulations <= 0:
+        return KFunctionResult(
+            r_values=r_values,
+            k_observed=k_observed,
+            k_expected=k_expected,
+            k_lower=None,
+            k_upper=None,
+            p_value=np.nan,
+            method=k_obs_result.method,
+            interpretation="K function computed without Monte Carlo simulations.",
+        )
+
     k_sim_all = np.zeros((n_simulations, len(r_values)))
     iter_range: Any = range(n_simulations)
     if _TQDM:
         iter_range = _tqdm(iter_range, desc="K envelopes", leave=False)
 
     for sim in iter_range:
-        sim_spines = simulate_poisson_on_graph(graph, n_points=n, intensity_fn=intensity_fn)
+        sim_spines = simulate_poisson_on_graph(graph, n_points=n, intensity_fn=intensity_fn, rng=rng)
         if len(sim_spines) < 2:
             k_sim_all[sim] = k_expected
             continue
@@ -1604,7 +1877,7 @@ def compute_simulation_envelopes(
 
     obs_dev = float(np.max(np.abs(k_observed - k_expected)))
     sim_devs = np.max(np.abs(k_sim_all - k_expected[None, :]), axis=1)
-    p_value = float(np.mean(sim_devs >= obs_dev))
+    p_value = float((1 + np.sum(sim_devs >= obs_dev)) / (1 + n_simulations))
 
     if p_value < alpha:
         if np.mean(k_observed - k_expected) > 0:
@@ -1644,6 +1917,12 @@ def group_k_analysis(
     r_values: np.ndarray,
     group_by: str = "group",
 ) -> Dict[str, KFunctionResult]:
+    """Вычисляет K-функции для нескольких групп графов и шипиков.
+
+    Входные данные: словарь `{group_name: (graph, spines)}`, радиусы и имя
+    группирующего признака.
+    Выходные данные: словарь `{group_name: KFunctionResult}`.
+    """
     results: Dict[str, KFunctionResult] = {}
     for group_name, (graph, spines) in graphs_and_spines.items():
         try:
@@ -1653,25 +1932,22 @@ def group_k_analysis(
     return results
 
 
-def permutation_test(
-    group_a_results: List[KFunctionResult],
-    group_b_results: List[ProjectedSpine],
-    n_permutations: int = 999,
-) -> Dict[str, Any]:
-    warnings.warn(
-        "permutation_test() has a non-standard signature; use permutation_test_groups() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return {"p_value": np.nan, "message": "Use permutation_test_groups."}
-
-
 def permutation_test_groups(
     group_a: List[Tuple[DendriticGraph, List[ProjectedSpine]]],
     group_b: List[Tuple[DendriticGraph, List[ProjectedSpine]]],
     r_values: np.ndarray,
     n_permutations: int = 999,
+    random_state: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """Выполняет перестановочное сравнение средних K-кривых двух групп.
+    Считает интегральное абсолютное различие средних K-кривых и
+    сравнивает его с перестановочным распределением.
+
+    Входные данные: две группы пар `(graph, spines)`, радиусы, число
+    перестановок и seed генератора случайных чисел.
+    Выходные данные: словарь p-value, наблюдаемого различия, распределения
+    перестановок и радиусов.
+    """
     r_values = np.asarray(r_values, dtype=float)
     dr = float(r_values[1] - r_values[0]) if len(r_values) > 1 else 1.0
 
@@ -1700,7 +1976,7 @@ def permutation_test_groups(
     if _TQDM:
         iter_range = _tqdm(iter_range, desc="Permutation test", leave=False)
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(random_state)
     for _ in iter_range:
         perm = rng.permutation(len(all_data))
         perm_a = [all_data[i] for i in perm[:na]]
@@ -1710,7 +1986,7 @@ def permutation_test_groups(
         perm_diffs.append(float(np.sum(np.abs(k_pa - k_pb)) * dr))
 
     perm_diffs_arr = np.array(perm_diffs)
-    p_value = float(np.mean(perm_diffs_arr >= observed_diff))
+    p_value = float((1 + np.sum(perm_diffs_arr >= observed_diff)) / (1 + n_permutations))
 
     return {
         "p_value": p_value,
@@ -1733,13 +2009,18 @@ def plot_3d_network(
     save_path: Optional[str] = None,
     title: str = "Dendritic Network",
 ) -> Optional[Any]:
+    """Строит интерактивную 3D-визуализацию дендритной сети.
+
+    Входные данные: граф, опциональный список шипиков, способ окраски,
+    интенсивность, путь сохранения и заголовок.
+    Выходные данные: объект Plotly figure или `None`, если Plotly недоступен.
+    """
     if not _PLOTLY:
         warnings.warn("plotly is required for plot_3d_network.", stacklevel=2)
         return None
 
     fig = _go.Figure()
 
-    # Draw skeleton edges
     for u, v, edata in graph.G.edges(data=True):
         pu = graph.node_position(u)
         pv = graph.node_position(v)
@@ -1755,7 +2036,6 @@ def plot_3d_network(
             )
         )
 
-    # Draw nodes, coloured by node_type
     node_type_colors = {
         "terminal": "green",
         "branch": "orange",
@@ -1779,7 +2059,6 @@ def plot_3d_network(
             )
         )
 
-    # Draw spines
     if spines:
         spine_pts = np.array([s.projected_point for s in spines])
         if color_by == "distance_to_soma":
@@ -1791,7 +2070,6 @@ def plot_3d_network(
             colorscale = "Hot"
             colorbar = dict(title="λ(x)")
         elif color_by == "dendrite_type":
-            # Map type strings to integer codes
             types = [graph.G.nodes.get(s.edge_source, {}).get("dendrite_type", "") for s in spines]
             unique_types = list(set(types))
             type_to_int = {t: i for i, t in enumerate(unique_types)}
@@ -1839,6 +2117,13 @@ def plot_intensity_vs_distance(
     smooth_lambda: Optional[np.ndarray] = None,
     save_path: Optional[str] = None,
 ) -> Optional[Any]:
+    """Строит график интенсивности шипиков от расстояния до сомы.
+
+    Входные данные: биннированная интенсивность, опциональная сглаженная
+    интенсивность и путь сохранения.
+    Выходные данные: объект Matplotlib figure или `None`, если Matplotlib
+    недоступен.
+    """
     if not _MPL:
         warnings.warn("matplotlib is required for plot_intensity_vs_distance.", stacklevel=2)
         return None
@@ -1878,6 +2163,11 @@ def plot_ripley_k(
     title: str = "Ripley K (network)",
     save_path: Optional[str] = None,
 ) -> Optional[Any]:
+    """Строит график сетевой K-функции Рипли.
+
+    Входные данные: `KFunctionResult`, заголовок и путь сохранения.
+    Выходные данные: объект Matplotlib figure или `None`.
+    """
     if not _MPL:
         warnings.warn("matplotlib is required for plot_ripley_k.", stacklevel=2)
         return None
@@ -1915,6 +2205,11 @@ def plot_k_deviation(
     result: KFunctionResult,
     save_path: Optional[str] = None,
 ) -> Optional[Any]:
+    """Строит график отклонения K-кривой от ожидаемой.
+
+    Входные данные: `KFunctionResult` и путь сохранения.
+    Выходные данные: объект Matplotlib figure или `None`.
+    """
     if not _MPL:
         warnings.warn("matplotlib is required for plot_k_deviation.", stacklevel=2)
         return None
@@ -1949,6 +2244,11 @@ def plot_group_comparison(
     results: Dict[str, KFunctionResult],
     save_path: Optional[str] = None,
 ) -> Optional[Any]:
+    """Строит график сравнения K-кривых нескольких групп.
+
+    Входные данные: словарь результатов K-функции по группам и путь сохранения.
+    Выходные данные: объект Matplotlib figure или `None`.
+    """
     if not _MPL:
         warnings.warn("matplotlib is required for plot_group_comparison.", stacklevel=2)
         return None
@@ -1992,6 +2292,12 @@ def generate_report(
     format: str = "html",
     title: str = "Dendritic Spine Spatial Analysis",
 ) -> str:
+    """Создаёт HTML или Markdown отчёт по сетевому анализу.
+
+    Входные данные: граф, шипики, таблица интенсивности, результаты
+    пуассоновской модели и K-функции, директория вывода, формат и заголовок.
+    Выходные данные: путь к созданному файлу отчёта.
+    """
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -2154,6 +2460,11 @@ def generate_report(
 # ===========================================================================
 
 def load_config(yaml_path: str) -> Dict[str, Any]:
+    """Загружает YAML-конфигурацию сетевого анализа.
+
+    Входные данные: путь к YAML-файлу.
+    Выходные данные: словарь конфигурации.
+    """
     if not _YAML:
         raise ImportError(
             "PyYAML is required for load_config.  "
@@ -2176,6 +2487,15 @@ def run_analysis(
     output_dir: str = "output_network_analysis",
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Запускает автономный анализ шипиков на одном дендритном mesh.
+    Строит граф дендрита, проецирует шипики, считает интенсивность,
+    тесты зависимости от сомы, пуассоновскую модель, K-функцию и отчёт.
+
+    Входные данные: путь к mesh или готовый mesh, словарь точек шипиков,
+    опциональная точка сомы, директория вывода и параметры анализа.
+    Выходные данные: словарь с графом, результатами проекции, таблицами,
+    моделями, K-результатом и путём отчёта.
+    """
     config: Dict[str, Any] = {}
     if config_path is not None:
         try:
@@ -2269,6 +2589,8 @@ def run_analysis(
 
     n_sim = int(config.get("n_simulations", 99))
     k_correction = str(config.get("k_correction", "geometric"))
+    random_state_value = config.get("random_state", 42)
+    random_state = None if random_state_value is None else int(random_state_value)
     k_result: Optional[KFunctionResult] = None
     if len(projected_spines) >= 2:
         try:
@@ -2279,6 +2601,7 @@ def run_analysis(
                 n_simulations=n_sim,
                 intensity_model=poisson_result,
                 correction=k_correction,
+                random_state=random_state,
             )
         except Exception as exc:
             warnings.warn(f"K function computation failed: {exc}", stacklevel=2)

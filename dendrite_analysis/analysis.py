@@ -1,128 +1,87 @@
 from .dependencies import *
-from .config import *
 from .comparison import DendrComparisonMixin
 from .dendrite_type import DendrType
 
+
 class DendrAnalysis(DendrComparisonMixin):
-    ab: DendrType
-    wt: DendrType
-    ab9009: DendrType
+    """Контейнер для парного анализа групп дендритных ветвей.
+
+    Входные данные: опционально две группы уже загруженных дендритных ветвей
+    `all_types_dataset=(ab_dataset, wt_dataset)`.
+    Выходные данные: объект с группами `ab` и `wt`.
+    """
 
     def __init__(self, all_types_dataset: Any = None, flag_9009: Any = None) -> None:
-        print('DendrType init')
-        if all_types_dataset is not None:
-            self.ab = DendrType('Ab', all_types_dataset[0])
-            self.wt = DendrType('Wt', all_types_dataset[1])
-        else:
-            self.ab = DendrType('Ab')
-            self.wt = DendrType('Wt')
-            if flag_9009 is not None:
-                self.ab9009 = DendrType('Ab+9009')
+        if all_types_dataset is None:
+            raise ValueError(
+                "DendrAnalysis no longer loads old precomputed JSON metrics. "
+                "Pass already loaded dendrite datasets as all_types_dataset=(ab, wt)."
+            )
 
-        # with open('spine_metrics.json', 'w') as f:
-        #     json.dump(save_spine_metric_dict, f)
-        # with open('dendr_metrics.json', 'w') as f:
-        #     json.dump(save_dendr_metric_dict, f)
-        # with open('grouping_dendr_metrics.json', 'w') as f:
-        #     json.dump(save_grouping_dendr_metric_dict, f) 
+        self.ab = DendrType("Ab", all_types_dataset[0])
+        self.wt = DendrType("Wt", all_types_dataset[1])
+        if flag_9009 is not None and len(all_types_dataset) > 2:
+            self.ab9009 = DendrType("Ab+9009", all_types_dataset[2])
 
     def add_spine_class(self) -> None:
-        for type in [self.ab, self.wt]:
-            type.add_spine_class()
+        """Загружает классы шипиков для обеих групп.
+
+        Входные данные: группы `ab` и `wt`.
+        Выходные данные: отсутствуют; обновляются объекты шипиков.
+        """
+        for dendrite_type in [self.ab, self.wt]:
+            dendrite_type.add_spine_class()
 
     def add_spine_cluster(self) -> None:
-        for type in [self.ab, self.wt]:
-            type.add_spine_cluster()
+        """Загружает внешние cluster labels шипиков для обеих групп.
 
-    def load_grouping_metrics(self) -> None:
-        self.ab.load_grouping_metrics()
-        self.wt.load_grouping_metrics()
+        Входные данные: группы `ab` и `wt`.
+        Выходные данные: отсутствуют; обновляются объекты шипиков.
+        """
+        for dendrite_type in [self.ab, self.wt]:
+            dendrite_type.add_spine_cluster()
 
-    def load_cluster_metrics(self) -> None:
-        self.ab.load_cluster_metrics()
-        self.wt.load_cluster_metrics()
-
-    def calculate_grouping_metrics(self) -> None:
-        self.ab.calculate_grouping_metrics()
-        self.wt.calculate_grouping_metrics()
-
-        # plt.figure(figsize=(10, 6))
-        # plt.plot(self.ab.r_values_c[:self.ab.pcf_len_c], self.ab.average_pcf_values_c, label='pair-distance profile', color=group_colors['Ab'], linewidth=3)
-        # plt.plot(self.wt.r_values_c[:self.wt.pcf_len_c], self.wt.average_pcf_values_c, label='pair-distance profile', color=group_colors['Wt'], linewidth=3)
-        # plt.xlabel('Попарные расстояния', fontsize = 18)
-        # plt.ylabel('Pair-distance profile', fontsize = 18)
-        # plt.legend(fontsize = 16)
-        # plt.xticks(fontsize = 16)
-        # plt.yticks(fontsize = 16)
-        # title = 'Усредненный график pair-distance profile - Ab-Wt (цилиндрические координаты)'
-        # plt.title(title, fontsize = 18)
-
-        # output_filename = "graphics/" + title
-        # plt.savefig(output_filename, dpi=300) 
-        # print(f"График сохранен в файл: {output_filename}")
-        
-        plt.show()
-    
     def calculate_cluster_metrics(self) -> None:
+        """Выполняет DBSCAN-кластеризацию для обеих групп.
+
+        Входные данные: загруженные ветви в группах `ab` и `wt`.
+        Выходные данные: отсутствуют; результаты сохраняются в объектах ветвей.
+        """
         self.ab.calculate_cluster_metrics()
         self.wt.calculate_cluster_metrics()
 
+    def calculate_comprehensive_spatial_analysis(self, **kwargs) -> None:
+        """Выполняет полный актуальный анализ ветвей для обеих групп.
+
+        Входные данные: параметры `DendrType.calculate_comprehensive_spatial_analysis`.
+        Выходные данные: отсутствуют; результаты сохраняются в объектах ветвей.
+        """
+        self.ab.calculate_comprehensive_spatial_analysis(**kwargs)
+        self.wt.calculate_comprehensive_spatial_analysis(**kwargs)
+
     def graph_analysis(self) -> None:
-        for i, dendr_type in enumerate([self.ab, self.wt]):
-            dendr_type.graph_analysis()
+        """Выполняет графовый анализ DBSCAN-кластеров для обеих групп.
 
-    def save_grouping_metrics(self) -> None:
-        self.wt.save_grouping_metrics()
-        self.ab.save_grouping_metrics()
+        Входные данные: группы с рассчитанными DBSCAN-метками.
+        Выходные данные: отсутствуют; результаты сохраняются в объектах ветвей.
+        """
+        self.ab.graph_analysis()
+        self.wt.graph_analysis()
 
-    def save_cluster_metrics(self):
-        self.wt.save_cluster_metrics()
-        self.ab.save_cluster_metrics()
+    def save_spatial_morphology_analysis(self) -> None:
+        """Сохраняет подробные результаты анализа ветвей для обеих групп.
 
-        # save_cluster_type_metric_dict['Ab'] = {}
-        # save_cluster_type_metric_dict['Wt'] = {}
+        Входные данные: рассчитанные результаты анализа.
+        Выходные данные: JSON-файлы подробных результатов.
+        """
+        self.ab.save_spatial_morphology_analysis()
+        self.wt.save_spatial_morphology_analysis()
 
-        # save_cluster_type_metric_dict['Ab']['dbscan_eps'] = np.mean(self.ab.dbscan_eps_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_eps'] = np.mean(self.wt.dbscan_eps_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_min_samples'] = np.mean(self.ab.dbscan_min_samples_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_min_samples'] = np.mean(self.wt.dbscan_min_samples_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_statistic'] = np.mean(self.ab.dbscan_statistic_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_statistic'] = np.mean(self.wt.dbscan_statistic_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_p_value'] = np.mean(self.ab.dbscan_p_value_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_p_value'] = np.mean(self.wt.dbscan_p_value_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_noise'] = np.mean(self.ab.dbscan_noise_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_noise'] = np.mean(self.wt.dbscan_noise_list)
+    def save_structural_organization_vector(self) -> None:
+        """Сохраняет итоговые ML-векторы ветвей для обеих групп.
 
-        # save_cluster_type_metric_dict['Ab']['dbscan_eps_c'] = np.mean(self.ab.dbscan_eps_c_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_eps_c'] = np.mean(self.wt.dbscan_eps_c_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_min_samples_c'] = np.mean(self.ab.dbscan_min_samples_c_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_min_samples_c'] = np.mean(self.wt.dbscan_min_samples_c_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_statistic_c'] = np.mean(self.ab.dbscan_statistic_c_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_statistic_c'] = np.mean(self.wt.dbscan_statistic_c_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_p_value_c'] = np.mean(self.ab.dbscan_p_value_c_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_p_value_c'] = np.mean(self.wt.dbscan_p_value_c_list)
-        # save_cluster_type_metric_dict['Ab']['dbscan_noise_c'] = np.mean(self.ab.dbscan_noise_c_list)
-        # save_cluster_type_metric_dict['Wt']['dbscan_noise_c'] = np.mean(self.wt.dbscan_noise_c_list)
-
-        # with open('output/cluster_type_metrics.json', 'w') as f:
-        #     json.dump(save_cluster_type_metric_dict, f)
-
-    def save_graph_metrics(self):
-        self.wt.save_graph_metrics()
-        self.ab.save_graph_metrics()
-
-    def save_dendr_metrics(self) -> None:
-        self.wt.save_dendr_metrics()
-        self.ab.save_dendr_metrics()
-
-        df = pd.DataFrame(save_all_dendr_metric_dict)
-        df.to_csv(output_path('all_dendr_metrics.csv'), index=False)
-
-    def save_dendr_metrics_without_class_cluster(self) -> None:
-        self.wt.save_dendr_metrics_without_class_cluster()
-        self.ab.save_dendr_metrics_without_class_cluster()
-
-        df = pd.DataFrame(save_all_dendr_metric_dict)
-        # df.to_csv('all_dendr_metrics.csv', index=False)
-        # df.to_csv('metrics/9009/all_dendr_metrics.csv', index=False)
-        df.to_csv(output_path('all_dendr_metrics.csv'), index=False)
+        Входные данные: рассчитанные признаки ветвей.
+        Выходные данные: общий CSV с актуальными признаками дендритных ветвей.
+        """
+        self.ab.save_structural_organization_vector()
+        self.wt.save_structural_organization_vector()

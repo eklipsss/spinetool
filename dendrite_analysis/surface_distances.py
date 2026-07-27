@@ -12,7 +12,6 @@ from scipy.sparse import coo_matrix, csr_matrix, diags, lil_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.sparse.linalg import spsolve
 from scipy.spatial import cKDTree
-from scipy.spatial.distance import pdist, squareform
 
 from CGAL.CGAL_Polygon_mesh_processing import Polylines, does_self_intersect
 from CGAL.CGAL_Surface_mesh_skeletonization import surface_mesh_skeletonization
@@ -47,6 +46,11 @@ class DistanceMatrixResult:
 
 
 def _as_points(points: Sequence[Sequence[float]]) -> np.ndarray:
+    """Проверяет и преобразует список точек в числовой массив.
+
+    Входные данные: последовательность трёхмерных координат.
+    Выходные данные: массив точек формы `(n, 3)`.
+    """
     points_array = np.asarray(points, dtype=float)
     if points_array.ndim != 2 or points_array.shape[1] != 3:
         raise ValueError("points must be an array with shape (n, 3)")
@@ -54,6 +58,11 @@ def _as_points(points: Sequence[Sequence[float]]) -> np.ndarray:
 
 
 def polyhedron_to_trimesh(mesh: Any) -> trimesh.Trimesh:
+    """Преобразует mesh в формат `trimesh.Trimesh`.
+
+    Входные данные: объект `trimesh.Trimesh` или CGAL `Polyhedron_3`.
+    Выходные данные: объект `trimesh.Trimesh`.
+    """
     if isinstance(mesh, trimesh.Trimesh):
         return mesh.copy()
     vertices, faces = _mesh_to_v_f(mesh)
@@ -61,12 +70,26 @@ def polyhedron_to_trimesh(mesh: Any) -> trimesh.Trimesh:
 
 
 def _nearest_vertex_indices(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
+    """Находит ближайшие вершины mesh для набора точек.
+    Строит KD-tree по вершинам mesh и выполняет nearest-neighbor
+    query для каждой точки.
+
+    Входные данные: mesh и массив точек формы `(n, 3)`.
+    Выходные данные: массив индексов ближайших вершин.
+    """
     tree = cKDTree(mesh.vertices)
     _, indices = tree.query(points)
     return indices.astype(int)
 
 
 def _mesh_edge_graph(mesh: trimesh.Trimesh) -> csr_matrix:
+    """Строит взвешенный граф рёбер mesh.
+    Извлекает уникальные рёбра треугольников и назначает каждому
+    ребру вес, равный евклидовой длине между вершинами.
+
+    Входные данные: треугольный mesh.
+    Выходные данные: sparse adjacency matrix графа рёбер mesh.
+    """
     faces = np.asarray(mesh.faces, dtype=int)
     if len(faces) == 0:
         raise ValueError("mesh has no faces")
@@ -84,6 +107,12 @@ def _mesh_edge_graph(mesh: trimesh.Trimesh) -> csr_matrix:
 
 
 def _reconstruct_path(predecessors: np.ndarray, source: int, target: int) -> np.ndarray:
+    """Восстанавливает путь между двумя вершинами после Dijkstra.
+
+    Входные данные: массив, индекс источника и индекс цели.
+    Выходные данные: массив индексов вершин пути; пустой массив, если путь не
+    найден.
+    """
     if source == target:
         return np.array([source], dtype=int)
 
@@ -109,7 +138,6 @@ def _default_pair(distance_matrix: np.ndarray) -> Tuple[int, int]:
 
 
 def _min_pair(distance_matrix: np.ndarray) -> Tuple[int, int]:
-    """Return (i, j) with the smallest non-zero finite distance."""
     if distance_matrix.shape[0] < 2:
         return 0, 0
     m = np.where(np.isfinite(distance_matrix) & (distance_matrix > 0), distance_matrix, np.inf)
@@ -126,6 +154,15 @@ def _shortest_paths_on_mesh(
     method: str,
     pair_for_path: Optional[Tuple[int, int]] = None,
 ) -> DistanceMatrixResult:
+    """Вычисляет кратчайшие пути между точками по рёбрам mesh.
+    Проецирует точки на ближайшие вершины mesh, запускает Dijkstra
+    по графу рёбер и извлекает матрицу расстояний между выбранными вершинами.
+
+    Входные данные: mesh, точки анализа, имя метода и опциональная пара точек
+    для восстановления пути.
+    Выходные данные: `DistanceMatrixResult` с матрицей расстояний,
+    проекциями точек и диагностическим путём.
+    """
     start = perf_counter()
     projected_vertex_indices = _nearest_vertex_indices(mesh, points)
     graph = _mesh_edge_graph(mesh)
@@ -168,7 +205,14 @@ def calculate_mesh_graph_distance_matrix(
     attachment_points: Sequence[Sequence[float]],
     pair_for_path: Optional[Tuple[int, int]] = None,
 ) -> DistanceMatrixResult:
-    """Geodesic approximation as the shortest weighted path over original mesh edges."""
+    """Вычисляет `mesh_graph`-расстояния между точками на mesh.
+    Аппроксимирует геодезическое расстояние кратчайшим путём по
+    исходным рёбрам mesh.
+
+    Входные данные: mesh дендрита, точки крепления шипиков и опциональная пара
+    точек для визуализации пути.
+    Выходные данные: `DistanceMatrixResult` с квадратной матрицей расстояний.
+    """
     mesh = polyhedron_to_trimesh(dendrite_mesh)
     points = _as_points(attachment_points)
     return _shortest_paths_on_mesh(mesh, points, "mesh_graph", pair_for_path)
@@ -179,11 +223,6 @@ def _point_to_array(point: Any) -> np.ndarray:
 
 
 def _skeleton_segments(dendrite_mesh: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
-    # CGAL's mean-curvature-flow skeletonization requires a closed, manifold,
-    # non-self-intersecting triangle mesh. Feeding it anything else can hard-crash
-    # the interpreter (a native abort/segfault, not a catchable exception), so we
-    # check the documented preconditions ourselves and fail in plain Python instead
-    # — the caller already falls back to `_fallback_centerline` on any exception here.
     if not bool(dendrite_mesh.is_closed()):
         raise RuntimeError(
             "surface_mesh_skeletonization requires a closed (watertight) mesh; "
@@ -262,6 +301,11 @@ def _fallback_centerline(mesh: trimesh.Trimesh, samples: int = 32) -> np.ndarray
 
 
 def centerline_length_from_mesh(mesh: Any) -> float:
+    """Оценивает длину центральной линии mesh.
+
+    Входные данные: mesh дендрита.
+    Выходные данные: численная оценка длины центральной линии.
+    """
     tm = polyhedron_to_trimesh(mesh)
     centerline = _fallback_centerline(tm)
     if len(centerline) < 2:
@@ -345,6 +389,14 @@ def build_stem_surface_mesh(
     radius: float,
     sections: int = 32,
 ) -> trimesh.Trimesh:
+    """Строит трубчатый mesh ствола по центральной линии.
+    Сглаживает центральную линию и создаёт последовательные кольца
+    вершин, соединённые треугольниками.
+
+    Входные данные: массив точек центральной линии, радиус трубки и число
+    секций окружности.
+    Выходные данные: объект `trimesh.Trimesh`.
+    """
     centerline = _smooth_centerline(centerline)
     if len(centerline) < 2:
         raise ValueError("centerline must contain at least two points")
@@ -400,7 +452,6 @@ def calculate_stem_graph_distance_matrix(
     sections: int = 32,
     pair_for_path: Optional[Tuple[int, int]] = None,
 ) -> DistanceMatrixResult:
-    """Build a smooth stem-like tube around the skeleton and run graph geodesics on it."""
     start = perf_counter()
     original_mesh = polyhedron_to_trimesh(dendrite_mesh)
     points = _as_points(attachment_points)
@@ -641,24 +692,12 @@ def _recompute_path_for_result(
                 )
                 if len(path) > 0:
                     return path
-    elif result.method == "cylinder":
-        raw = (result.metadata or {}).get("cylindrical_points")
-        if raw is not None:
-            raw = np.asarray(raw)
-            n = len(raw)
-            if i < n and j < n:
-                local_path = _cylindrical_path(raw[i], raw[j])
-                pca_basis = (result.metadata or {}).get("pca_basis")
-                if pca_basis is not None:
-                    w, u_ax, v_ax, mean_3d = pca_basis
-                    return _cylinder_local_to_3d(local_path, w, u_ax, v_ax, mean_3d)
-                return local_path
     return None
 
 
 def select_shared_pair(
     results: Dict[str, DistanceMatrixResult],
-    preferred_methods: Sequence[str] = ("mesh_graph", "stem_graph", "cylinder"),
+    preferred_methods: Sequence[str] = ("mesh_graph", "stem_graph", "heat"),
 ) -> Tuple[int, int]:
     """Pick a single representative point pair from the best available method."""
     for method in preferred_methods:
@@ -669,159 +708,20 @@ def select_shared_pair(
     return (0, 1)
 
 
-def _cylindrical_distance(point1: np.ndarray, point2: np.ndarray) -> float:
-    # Input format: (r, h, theta) — radius, height along dendrite axis, angle
-    r1, h1, theta1 = point1
-    r2, h2, theta2 = point2
-    r_avg = (r1 + r2) / 2.0
-    delta_theta = abs(theta1 - theta2)
-    delta_theta = min(delta_theta, 2 * np.pi - delta_theta)
-    arc = r_avg * delta_theta
-    return float(np.sqrt(arc ** 2 + (h1 - h2) ** 2))
-
-
-def _cylinder_mesh_from_points(points: np.ndarray, sections: int = 64) -> trimesh.Trimesh:
-    # Input format: (r, h, theta) — radius col 0, height col 1, angle col 2
-    radius = float(np.mean(points[:, 0])) if len(points) else 1.0
-    h_min = float(np.min(points[:, 1]))
-    h_max = float(np.max(points[:, 1]))
-    height = max(h_max - h_min, radius)
-    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
-    mesh.apply_translation((0, 0, (h_min + h_max) / 2.0))
-    return mesh
-
-
-def _cylindrical_path(point1: np.ndarray, point2: np.ndarray, steps: int = 80) -> np.ndarray:
-    # Input format: (r, h, theta) — radius, height along dendrite axis, angle
-    r1, h1, theta1 = point1
-    r2, h2, theta2 = point2
-    delta = (theta2 - theta1 + np.pi) % (2 * np.pi) - np.pi
-    radii = np.linspace(r1, r2, steps)
-    thetas = theta1 + np.linspace(0, delta, steps)
-    heights = np.linspace(h1, h2, steps)
-    # Local Cartesian: x=r·cosθ (along u), y=r·sinθ (along v), z=h (along w)
-    return np.column_stack((radii * np.cos(thetas), radii * np.sin(thetas), heights))
-
-
-def _cylinder_local_to_3d(
-    path_local: np.ndarray,
-    w: np.ndarray,
-    u: np.ndarray,
-    v: np.ndarray,
-    mean: np.ndarray,
-) -> np.ndarray:
-    """Map local cylinder Cartesian (r·cosθ, r·sinθ, h) to 3D world space."""
-    return (
-        mean[np.newaxis, :]
-        + np.outer(path_local[:, 0], u)
-        + np.outer(path_local[:, 1], v)
-        + np.outer(path_local[:, 2], w)
-    )
-
-
-def _make_oriented_cylinder(
-    raw_points: np.ndarray,
-    w: np.ndarray,
-    u: np.ndarray,
-    v: np.ndarray,
-    mean: np.ndarray,
-    sections: int = 64,
-) -> trimesh.Trimesh:
-    """Create a cylinder aligned with dendrite axis *w*, centred at *mean*."""
-    radius = float(np.mean(raw_points[:, 0])) if len(raw_points) else 1.0
-    h_min = float(np.min(raw_points[:, 1]))
-    h_max = float(np.max(raw_points[:, 1]))
-    height = max(h_max - h_min, radius)
-    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
-    # trimesh creates a Z-aligned cylinder; rotate so Z maps to w (dendrite axis)
-    rot = np.column_stack([u, v, w])
-    transform = np.eye(4)
-    transform[:3, :3] = rot
-    mesh.apply_transform(transform)
-    mesh.apply_translation(mean + (h_min + h_max) / 2.0 * w)
-    return mesh
-
-
-def calculate_cylindrical_distance_matrix(
-    cylindrical_points: Sequence[Sequence[float]],
-    pair_for_path: Optional[Tuple[int, int]] = None,
-    original_points: Optional[Sequence[Sequence[float]]] = None,
-) -> DistanceMatrixResult:
-    start = perf_counter()
-    raw_points = _as_points(cylindrical_points)  # (r, h, θ)
-    distance_matrix = squareform(pdist(raw_points, lambda u, v: _cylindrical_distance(u, v)))
-    if pair_for_path is None:
-        pair_for_path = _default_pair(distance_matrix)
-
-    # Optionally recompute PCA basis from original 3D points for correct orientation
-    pca_basis: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None
-    if original_points is not None:
-        orig = np.asarray(original_points, dtype=float)
-        if orig.ndim == 2 and orig.shape[1] == 3 and len(orig) >= 3:
-            try:
-                from sklearn.decomposition import PCA as _PCA
-                _pca = _PCA(n_components=3, random_state=42)
-                _pca.fit(orig)
-                w = _pca.components_[0]
-                u_ax = _pca.components_[1]
-                v_ax = _pca.components_[2]
-                mean_3d = _pca.mean_
-                pca_basis = (w, u_ax, v_ax, mean_3d)
-            except Exception:
-                pca_basis = None
-
-    # Local Cartesian: x = r·cosθ, y = r·sinθ, z = h
-    cart_local = np.column_stack((
-        raw_points[:, 0] * np.cos(raw_points[:, 2]),
-        raw_points[:, 0] * np.sin(raw_points[:, 2]),
-        raw_points[:, 1],
-    ))
-
-    if pca_basis is not None:
-        w, u_ax, v_ax, mean_3d = pca_basis
-        cart_points = _cylinder_local_to_3d(cart_local, w, u_ax, v_ax, mean_3d)
-        cyl_mesh = _make_oriented_cylinder(raw_points, w, u_ax, v_ax, mean_3d)
-    else:
-        cart_points = cart_local
-        cyl_mesh = _cylinder_mesh_from_points(raw_points)
-
-    paths: Dict[Tuple[int, int], np.ndarray] = {}
-    if len(raw_points) >= 2:
-        i, j = pair_for_path
-        local_path = _cylindrical_path(raw_points[i], raw_points[j])
-        if pca_basis is not None:
-            w, u_ax, v_ax, mean_3d = pca_basis
-            paths[(i, j)] = _cylinder_local_to_3d(local_path, w, u_ax, v_ax, mean_3d)
-        else:
-            paths[(i, j)] = local_path
-
-    meta: Dict[str, Any] = {
-        "pair_for_path": pair_for_path,
-        "cylindrical_points": raw_points,
-    }
-    if pca_basis is not None:
-        meta["pca_basis"] = pca_basis
-
-    return DistanceMatrixResult(
-        method="cylinder",
-        distance_matrix=distance_matrix,
-        elapsed_seconds=perf_counter() - start,
-        mesh=cyl_mesh,
-        projected_points=cart_points,
-        paths=paths,
-        metadata=meta,
-    )
-
-
 def calculate_spine_distance_matrices(
     dendrite_mesh: Any,
     attachment_points: Sequence[Sequence[float]],
-    cylindrical_points: Optional[Sequence[Sequence[float]]] = None,
     methods: Iterable[str] = ("mesh_graph",),
     radius: Optional[float] = None,
     centerline: Optional[np.ndarray] = None,
     pair_for_path: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, DistanceMatrixResult]:
+    """Вычисляет матрицы расстояний между шипиками выбранными методами.
+
+    Входные данные: mesh дендрита, точки крепления шипиков, список методов,
+    радиус, centerline и пара для пути.
+    Выходные данные: словарь `{method_name: DistanceMatrixResult}`.
+    """
     results: Dict[str, DistanceMatrixResult] = {}
     points = _as_points(attachment_points)
 
@@ -832,13 +732,7 @@ def calculate_spine_distance_matrices(
         methods_iter = methods_list
 
     for method in methods_iter:
-        if method == "cylinder":
-            if cylindrical_points is None:
-                continue
-            results[method] = calculate_cylindrical_distance_matrix(
-                cylindrical_points, pair_for_path, original_points=points
-            )
-        elif method == "stem_graph":
+        if method == "stem_graph":
             results[method] = calculate_stem_graph_distance_matrix(
                 dendrite_mesh, points, radius=radius, centerline=centerline, pair_for_path=pair_for_path
             )
@@ -880,7 +774,12 @@ def visualize_distance_result(
     max_pair: Optional[Tuple[int, int]] = None,
     save_path: Optional[str] = None,
 ) -> plt.Figure:
-    """Three-panel matplotlib figure: plain mesh | min-distance path (green) | max-distance path (red)."""
+    """Строит статичную 3D-визуализацию результата расчёта расстояний.
+
+    Входные данные: исходный mesh, точки крепления, результат расстояний,
+    опциональные пары min/max и путь сохранения.
+    Выходные данные: объект Matplotlib figure.
+    """
     original = polyhedron_to_trimesh(original_mesh)
     points = _as_points(attachment_points)
 
@@ -951,7 +850,12 @@ def visualize_distance_result_3d(
     max_pair: Optional[Tuple[int, int]] = None,
     save_path: Optional[str] = None,
 ) -> Optional[Any]:
-    """Interactive Plotly 3-D figure: plain mesh | min-distance path (green) | max-distance path (red)."""
+    """Строит интерактивную 3D-визуализацию результата расстояний.
+
+    Входные данные: исходный mesh, точки крепления, результат расстояний,
+    опциональные пары min/max и путь сохранения HTML.
+    Выходные данные: объект Plotly figure или `None`.
+    """
     if not _PLOTLY_AVAILABLE:
         return None
 
@@ -1076,7 +980,12 @@ def visualize_spine_pair_mesh_graph_distance_3d(
     save_path: Optional[str] = None,
     title: Optional[str] = None,
 ) -> Optional[Any]:
-    """Interactive Plotly figure for one mesh_graph distance path between two spines."""
+    """Визуализирует mesh_graph-путь между парой шипиков.
+
+    Входные данные: mesh дендрита, mesh-и шипиков, точки крепления, результат
+    расстояний, пара индексов, имена шипиков, путь сохранения и заголовок.
+    Выходные данные: объект Plotly figure или `None`.
+    """
     if not _PLOTLY_AVAILABLE:
         return None
 
@@ -1235,6 +1144,11 @@ def visualize_spine_pair_mesh_graph_distance_3d(
 
 
 def summarize_distance_results(results: Dict[str, DistanceMatrixResult]) -> pd.DataFrame:
+    """Формирует summary-таблицу для методов расстояний.
+
+    Входные данные: словарь результатов расстояний.
+    Выходные данные: `pandas.DataFrame`, отсортированный по времени расчёта.
+    """
     rows = []
     for method, result in results.items():
         matrix = result.distance_matrix
@@ -1255,20 +1169,24 @@ def summarize_distance_results(results: Dict[str, DistanceMatrixResult]) -> pd.D
 def save_distance_method_comparison(
     dendrite_mesh: Any,
     attachment_points: Sequence[Sequence[float]],
-    cylindrical_points: Optional[Sequence[Sequence[float]]] = None,
     output_dir: str = "output_dendrite_distance_comparison",
     methods: Iterable[str] = ("mesh_graph",),
     radius: Optional[float] = None,
     centerline: Optional[np.ndarray] = None,
     pair_for_path: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, DistanceMatrixResult]:
+    """Считает и сохраняет сравнение методов расстояний.
+
+    Входные данные: mesh дендрита, точки крепления, директория вывода, методы,
+    радиус, centerline и пара для пути.
+    Выходные данные: словарь результатов расстояний.
+    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     results = calculate_spine_distance_matrices(
         dendrite_mesh=dendrite_mesh,
         attachment_points=attachment_points,
-        cylindrical_points=cylindrical_points,
         methods=methods,
         radius=radius,
         centerline=centerline,

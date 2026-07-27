@@ -13,12 +13,23 @@ from spine_analysis.shape_metric.utils import get_dendrite_skeleton
 
 
 def _fallback_dendrite_length_any_mesh(dendr_mesh: Any) -> float:
+    """Оценивает длину дендрита fallback-методом для произвольного mesh.
+
+    Входные данные: mesh дендрита.
+    Выходные данные: численная оценка длины дендрита.
+    """
     length = centerline_length_from_mesh(dendr_mesh)
     print(f"  length (mesh-graph centerline fallback) = {length:.2f}")
     return length
 
 
 def _polyline_length(points: Any) -> float:
+    """Вычисляет длину полилинии по последовательности точек. 
+    Фильтрует невалидные точки и суммирует длины соседних сегментов.
+
+    Входные данные: массив координат.
+    Выходные данные: длина полилинии или `0.0`.
+    """
     points = np.asarray(points, dtype=float)
     if points.ndim != 2 or points.shape[0] < 2 or points.shape[1] < 3:
         return 0.0
@@ -31,6 +42,12 @@ def _polyline_length(points: Any) -> float:
 
 
 def _skeleton_length_from_object(skeleton: Any) -> float:
+    """Извлекает и суммирует длину skeleton-объекта.
+
+    Входные данные: skeleton в формате массива, словаря, списка или вложенной
+    объектной структуры.
+    Выходные данные: суммарная длина skeleton или `0.0`.
+    """
     if skeleton is None:
         return 0.0
 
@@ -87,6 +104,11 @@ def _skeleton_length_from_object(skeleton: Any) -> float:
 
 
 def _registered_skeleton_length(dendr_mesh: Any) -> float:
+    """Возвращает длину зарегистрированного skeleton для mesh дендрита.
+
+    Входные данные: mesh дендрита.
+    Выходные данные: длина skeleton или `0.0`, если skeleton не зарегистрирован.
+    """
     skeleton = get_dendrite_skeleton(dendr_mesh)
     length = _skeleton_length_from_object(skeleton)
     if np.isfinite(length) and length > 0:
@@ -96,6 +118,13 @@ def _registered_skeleton_length(dendr_mesh: Any) -> float:
 
 
 def _fallback_dendrite_volume_any_mesh(dendr_mesh: Any) -> float:
+    """Оценивает объём дендрита fallback-методом для произвольного mesh.
+    Для закрытого trimesh использует mesh volume, иначе оценивает
+    объём через цилиндрическую аппроксимацию по PCA-оси.
+
+    Входные данные: mesh дендрита.
+    Выходные данные: численная оценка объёма.
+    """
     tm = polyhedron_to_trimesh(dendr_mesh)
     raw_volume = getattr(tm, "volume", None)
     if raw_volume is not None and np.isfinite(raw_volume) and abs(float(raw_volume)) > 0:
@@ -128,89 +157,36 @@ def _fallback_dendrite_volume_any_mesh(dendr_mesh: Any) -> float:
     return float(math.pi * radius * radius * length)
 
 class Dendrite:
+    """Модель одной дендритной ветви с набором шипиков.
+    Хранит геометрию ветви, объекты шипиков, матрицу расстояний по
+    сетке дендрита и результаты пространственного анализа.
+
+    Входные данные: имя ветви, mesh дендрита и словарь mesh-объектов шипиков.
+    Выходные данные: объект состояния; расчётные таблицы и итоговый вектор
+    признаков формируются отдельными методами расчёта и сохранения.
+    """
+
     name: str
     mesh: Any
-    spines: List[Spine] = []
+    spines: List[Spine]
     spine_meshes: MeshDataset
 
     volume: float
     length: float
     radius: float
-    dr: float
-    volume_around_dendr: float
 
-    center_coords: List[float] = []
-    center_coords_c: List[float] = []
-    dists: List[float] = []  
-    dists_c: List[float] = []  
+    center_coords: List[float]
+    dists: List[float]
     distance_matrix: Any
-    distance_matrix_c: Any
 
-    nndist: float
-    nndist_norm: float
-    nndist_c: float
-    nndist_norm_c: float
-
-    pair_distance_profile_r_values: List[float] = []
-    pair_distance_profile_values: List[float] = []
+    pair_distance_profile_r_values: List[float]
+    pair_distance_profile_values: List[float]
     pair_distance_profile_entropy: float
-    pair_distance_profile_r_values_c: List[float] = []
-    pair_distance_profile_values_c: List[float] = []
-    pair_distance_profile_entropy_c: float
 
-    # Legacy global Volume Moran fields are kept commented out: the current
-    # pipeline writes autocorr_<metric>_* records instead.
-    # moran_I: float
-    # moran_z: float
-    # moran_p: float
-    # moran_I_c: float
-    # moran_z_c: float
-    # moran_p_c: float
-
-    moran_dict_c: Dict[str, float] = {}
-
-    getis_ord_G: float
-    getis_ord_z: float
-    getis_ord_p: float
-    getis_ord_G_c: float
-    getis_ord_z_c: float
-    getis_ord_p_c: float
-
-    dbscan_labels: Any = []
+    dbscan_labels: Any
     dbscan_eps: float = 0
     dbscan_min_samples: int = 0
-    # Legacy statistic/p-value from the old DBSCAN parameter search.
-    # dbscan_statistic: float = 0
-    # dbscan_p_value: float = 0
     dbscan_noise: float = 0
-
-    dbscan_labels_c: Any = []
-    dbscan_eps_c: float = 0
-    dbscan_min_samples_c: int = 0
-    # Legacy cylindrical statistic/p-value from the old DBSCAN parameter search.
-    # dbscan_statistic_c: float = 0
-    # dbscan_p_value_c: float = 0
-    dbscan_noise_c: float = 0
-
-    db_count_class: Dict[str, List[int]]
-    db_count_cluster: Dict[str, List[int]]
-    db_count_class_c: Dict[str, List[int]]
-    db_count_cluster_c: Dict[str, List[int]]
-
-    db_matrix_class: np.ndarray = np.zeros((len(classes_list), len(classes_list)))
-    db_matrix_class_c: np.ndarray = np.zeros((len(classes_list), len(classes_list)))
-    db_matrix_cluster: np.ndarray = np.zeros((len(clusters_list), len(clusters_list)))
-    db_matrix_cluster_c: np.ndarray = np.zeros((len(clusters_list), len(clusters_list)))
-
-    n_count_class: Dict[str, List[int]]
-    n_count_cluster: Dict[str, List[int]]
-    n_count_class_c: Dict[str, List[int]]
-    n_count_cluster_c: Dict[str, List[int]]
-
-    n_matrix_class: np.ndarray = np.zeros((len(classes_list), len(classes_list)))    
-    n_matrix_class_c: np.ndarray = np.zeros((len(classes_list), len(classes_list)))
-    n_matrix_cluster: np.ndarray = np.zeros((len(clusters_list), len(clusters_list)))
-    n_matrix_cluster_c: np.ndarray = np.zeros((len(clusters_list), len(clusters_list)))
 
     g_cluster_sizes: List[int]
     g_mean_cluster_size: float
@@ -218,45 +194,37 @@ class Dendrite:
     g_average_clustering: float
     g_modularity: float
 
-    n_count_c: int
+    def __init__(
+        self,
+        dendr_name: str,
+        dendrite_meshes: MeshDataset = None,
+        spine_meshes: MeshDataset = None,
+        save_spine_data_on_init: bool = True,
+    ) -> None:
+        """Инициализирует объект дендритной ветви.
+        Cоздаёт внутренние контейнеры, рассчитывает базовые метрики
+        дендрита и создаёт объекты `Spine`.
 
-    cylindr_flag: bool = True
+        Входные данные: 
+        `dendr_name` — имя ветви; 
+        `dendrite_meshes` — словарь
+        mesh-объектов дендрита, обычно из одного элемента; 
+        `spine_meshes` — словарь mesh-объектов шипиков; 
+        `save_spine_data_on_init` — флаг явного сохранения координат 
+        и морфологических метрик шипиков при инициализации.
 
-    def __init__(self, dendr_name: str, dendrite_meshes: MeshDataset = None, spine_meshes: MeshDataset = None) -> None:
+        Выходные данные: заполненный объект `Dendrite`; файлы записываются
+        только при `save_spine_data_on_init=True` или при явном вызове `save_*`.
+        """
         print('Dendrite init')
 
         self.spines = []
         self.center_coords = []
-        self.center_coords_c = []
         
         self.dists = []  
-        self.dists_c = []  
         self.pair_distance_profile_r_values = []
         self.pair_distance_profile_values = []
-        self.r_values = self.pair_distance_profile_r_values
-        self.pcf_values = self.pair_distance_profile_values
-        self.pair_distance_profile_r_values_c = []
-        self.pair_distance_profile_values_c = []
-        self.r_values_c = self.pair_distance_profile_r_values_c
-        self.pcf_values_c = self.pair_distance_profile_values_c
         self.dbscan_labels = []
-        self.dbscan_labels_c = []
-
-        self.moran_dict_c = {}
-
-        # self.n_count_class = {'Undefined' : [], 'Stubby' : [], 'Mushroom' : [],  'Thin' : [], 'Filopodia' : []}
-        # self.n_count_cluster = { 0 : [], 1 : [], 2 : [], 3 : [], 4 : [], 5 : [], 6: [] } 
-        # self.n_count_class_c = {'Undefined' : [], 'Stubby' : [], 'Mushroom' : [],  'Thin' : [], 'Filopodia' : []}
-        # self.n_count_cluster_c = { 0 : [], 1 : [], 2 : [], 3 : [], 4 : [], 5 : [], 6: [] } 
-        self.n_count_class = {'Stubby' : [], 'Mushroom' : [],  'Thin' : [], 'Filopodia' : []}
-        self.n_count_cluster = {1 : [], 2 : [], 3 : [], 4 : [], 5 : [], 6: [] } 
-        self.n_count_class_c = {'Stubby' : [], 'Mushroom' : [],  'Thin' : [], 'Filopodia' : []}
-        self.n_count_cluster_c = {1 : [], 2 : [], 3 : [], 4 : [], 5 : [], 6: [] } 
-
-        self.n_matrix_class = np.zeros((len(classes_list), len(classes_list)))    
-        self.n_matrix_class_c = np.zeros((len(classes_list), len(classes_list))) 
-        self.n_matrix_cluster = np.zeros((len(clusters_list), len(clusters_list))) 
-        self.n_matrix_cluster_c = np.zeros((len(clusters_list), len(clusters_list))) 
 
         self.g_cluster_sizes = []
         self.g_mean_cluster_size = 0
@@ -266,48 +234,28 @@ class Dendrite:
 
         self.name = dendr_name
 
-        if dendrite_meshes is not None:
-            self.calculate_init_metrics(dendrite_meshes) # вычисление метрик 
-        else:
-            self.load_init_metrics() # загрузка метрик из файла
+        if dendrite_meshes is None:
+            raise ValueError("Dendrite requires dendrite_meshes; loading old precomputed dendrite JSON is disabled.")
+        if spine_meshes is None:
+            raise ValueError("Dendrite requires spine_meshes; loading old precomputed spine JSON is disabled.")
 
-        self.center_coords: List[float] = []
-        self.center_coords_c: List[float] = []
+        self.calculate_init_metrics(dendrite_meshes)
+        self.spine_meshes = spine_meshes
+        self.calculate_and_create_spines()
 
-        if spine_meshes is not None:
-            self.spine_meshes = spine_meshes
-            self.calculate_and_create_spines()
-        else:
-            self.load_and_create_spines()
-
-        self.save_spine_coords() # сохранение координат шипиков
-        self.save_spine_metrics() # сохранение метрик
-        
-        # self.distance_matrix = squareform(pdist(self.center_coords))
-        # self.distance_matrix_c = squareform(pdist(self.center_coords_c, lambda u, v: cylindrical_distance(u, v)))
-
-        if dendrite_meshes is not None:
-            spines_len = [spine.metrics['Length'] for spine in self.spines]
-            self.dr = max(spines_len)/2 if spines_len else 0
-            self.volume_around_dendr = math.pi*self.length*((self.radius + self.dr)**2 - self.radius**2)
-
-        # if self.cylindr_flag:
-        #     self.dists_c = calculate_all_dists(self.center_coords_c, 1)
-        #     self.dists_c = [d/self.length for d in self.dists_c]
-
-    def load_init_metrics(self) -> None:
-        # with open('metrics/9009/dendr_metrics.json', 'r') as f:
-        # with open('metrics/wt_old_st/dendr_metrics.json', 'r') as f:
-        with open('input/dendr_metrics.json', 'r') as f:
-            loaded_dict = json.load(f)
-
-        self.volume = loaded_dict[self.name]['Volume']
-        self.length = loaded_dict[self.name]['Length']
-        self.radius = loaded_dict[self.name]['Radius']
-        self.dr = loaded_dict[self.name]['Dr']
-        self.volume_around_dendr = loaded_dict[self.name]['Volume_around_dendr']
+        if save_spine_data_on_init:
+            self.save_spine_coords() # сохранение координат шипиков
+            self.save_spine_metrics() # сохранение метрик
 
     def calculate_init_metrics(self, dendrite_meshes: MeshDataset = None) -> None:
+        """Вычисляет базовые геометрические метрики дендрита.
+        Выбирает меш текущей ветви, вычисляет объём, 
+        длину по скелету или fallback-методу и радиус цилиндрической
+        аппроксимации из объёма и длины.
+
+        Входные данные: словарь мешей дендрита `dendrite_meshes`.
+        Выходные данные: поля `mesh`, `volume`, `length`, `radius`.
+        """
         for (dendr_name, dendr_mesh) in  dendrite_meshes.items():
             self.name = dendr_name
             print(f'Dendrite {dendr_name}')
@@ -368,10 +316,18 @@ class Dendrite:
         # print(f'  dendr_radius = {self.radius:.2f}')
 
     def calculate_and_create_spines(self) -> None:
+        """Создаёт объекты шипиков и определяет их основные координаты.
+        Вычисляет точку крепления и геометрический центр каждого
+        шипика, сохраняет координаты во внутренний словарь `save_coords`,
+        создаёт объекты `Spine`.
+
+        Входные данные: `self.spine_meshes`, где ключ — имя шипика, значение —
+        его меш.
+        Выходные данные: заполненные `self.center_coords` и `self.spines`.
+        """
         junction_center_klass = spine_metric_classes['JunctionCenterSpineMetric']
         center_klass = spine_metric_classes['CenterSpineMetric']
 
-        junction_center_vecs = []
         junction_center_coords = [] 
 
         for (spine_name, spine_mesh) in self.spine_meshes.items():
@@ -380,7 +336,6 @@ class Dendrite:
             junction_center_vec = junction_center_klass(spine_mesh)._value
             junction_center_coord = (junction_center_vec.x(), junction_center_vec.y(), junction_center_vec.z())  # tuple, тк неизменяемый
             junction_center_coords.append(junction_center_coord)
-            junction_center_vecs.append(junction_center_vec)
             
             # середина шипика
             center_vec = center_klass(spine_mesh)._value
@@ -391,146 +346,56 @@ class Dendrite:
 
         save_coords[self.name] = {}
 
-        if len(junction_center_vecs) >= 3:
-            two_dim_points = get_2dim_coordinates(junction_center_vecs)
-            self.center_coords_c = get_cylindr_coord_from_2dim(two_dim_points, self.radius)
-
-            for i in range(len(self.spine_meshes)):
-                save_coords[self.name][spine_meshes_list[i][0]] = {'junction_center_coord': junction_center_coords[i], 'center_coord': self.center_coords[i],'center_coord_c': self.center_coords_c[i] }
-
-                self.spines.append(Spine(spine_meshes_list[i][0], junction_center_coords[i], self.center_coords[i], self.center_coords_c[i], spine_meshes_list[i][1]))
-                
-        else:
-            print('else ')
-            self.cylindr_flag = False
-            for i in range(len(self.spine_meshes)):
-                save_coords[self.name][spine_meshes_list[i][0]] = {'junction_center_coord': junction_center_coords[i], 'center_coord': self.center_coords[i],'center_coord_c': False }
-
-                self.spines.append(Spine(spine_meshes_list[i][0], junction_center_coords[i], self.center_coords[i], False, spine_meshes_list[i][1]))
-
-    def load_and_create_spines(self) -> None:
-        junction_center_coords = [] 
-
-        # with open('metrics/9009/spine_coords.json', 'r') as f:
-        # with open('metrics/wt_old_st/spine_coords.json', 'r') as f:
-        with open('input/spine_coords.json', 'r') as f:
-            spine_coords_dict = json.load(f)
-
-        for i, spine_name in enumerate(spine_coords_dict[self.name].keys()):
-            self.center_coords.append(spine_coords_dict[self.name][spine_name]['center_coord'])
-            self.center_coords_c.append(spine_coords_dict[self.name][spine_name]['center_coord_c'])
-            if self.center_coords_c[i] == False:
-                self.cylindr_flag = False
-            junction_center_coords.append(spine_coords_dict[self.name][spine_name]['junction_center_coord'])
-            self.spines.append(Spine(spine_name, junction_center_coords[i], self.center_coords[i], self.center_coords_c[i]))
+        for i in range(len(self.spine_meshes)):
+            save_coords[self.name][spine_meshes_list[i][0]] = {
+                'junction_center_coord': junction_center_coords[i],
+                'center_coord': self.center_coords[i],
+            }
+            self.spines.append(
+                Spine(
+                    spine_meshes_list[i][0],
+                    junction_center_coords[i],
+                    self.center_coords[i],
+                    spine_meshes_list[i][1],
+                )
+            )
 
     def add_spine_class(self) -> None:
+        """Загружает или назначает морфологический класс каждому шипику.
+
+        Входные данные: объекты `Spine` в `self.spines`.
+        Выходные данные: обновлённое поле класса внутри объектов `Spine`.
+        """
         for s in self.spines:
             s.add_spine_class()
 
     def add_spine_cluster(self) -> None:
+        """Загружает или назначает кластер каждому шипику.
+
+        Входные данные: объекты `Spine` в `self.spines`.
+        Выходные данные: обновлённое поле кластера внутри объектов `Spine`.
+        """
         for s in self.spines:
             s.add_spine_cluster()
 
-    def load_grouping_metrics(self) -> None:
-        metric_dict_for_autocorr = {
-            "Volume": [spine.metrics['Volume'] for spine in self.spines],
-        }
-                
-        # with open('metrics/grouping_dendr_metrics.json', 'r') as f:
-        with open('input/grouping_dendr_metrics.json', 'r') as f:
-            loaded_dict = json.load(f)
-
-        self.nndist = loaded_dict[self.name].get(
-            'spatial_nearest_neighbor_mean',
-            loaded_dict[self.name].get('NNdist', np.nan),
-        )
-        self.nndist_norm = loaded_dict[self.name].get('NNdist_norm', np.nan)
-        self.pair_distance_profile_r_values = loaded_dict[self.name].get(
-            'PairDistanceProfile_r_values',
-            loaded_dict[self.name].get('r_values', []),
-        )
-        self.pair_distance_profile_values = loaded_dict[self.name].get(
-            'PairDistanceProfile_values',
-            loaded_dict[self.name].get('PCF_values', []),
-        )
-        self.pair_distance_profile_entropy = loaded_dict[self.name].get(
-            'PairDistanceProfile_entropy',
-            loaded_dict[self.name].get('Entropy', 0.0),
-        )
-        self.r_values = self.pair_distance_profile_r_values
-        self.pcf_values = self.pair_distance_profile_values
-        self.entropy = self.pair_distance_profile_entropy
-
-        # Legacy global Volume Moran fields are no longer loaded by the current
-        # pipeline. Use spatial_morphology_permutation.csv instead.
-        # self.moran_I = loaded_dict[self.name]['Moran_I']
-        # self.moran_z = loaded_dict[self.name]['Moran_zI']
-        # self.moran_p = loaded_dict[self.name]['Moran_p']
-
-        # self.getis_ord_G = loaded_dict[self.name]['Getis_Ord_G']
-        # self.getis_ord_z = loaded_dict[self.name]['Getis_Ord_zG']
-        # self.getis_ord_p = loaded_dict[self.name]['Getis_Ord_p']
-
-        # self.getis_ord_G, self.getis_ord_z, self.getis_ord_p = calculate_Getis_Ord_G(self.center_coords, metric_dict_for_autocorr, False, 7, self.name)['Volume']
-
-
-        if self.cylindr_flag:
-            # Старые файлы могли хранить отдельные cylindrical-метрики с суффиксом _c.
-            # В новых файлах они не сохраняются: mesh_graph-метрики лежат в обычных полях.
-            self.nndist_c = loaded_dict[self.name].get('NNdist_c', self.nndist)
-            self.nndist_norm_c = loaded_dict[self.name].get('NNdist_norm_c', self.nndist_norm)
-            self.pair_distance_profile_r_values_c = loaded_dict[self.name].get(
-                'PairDistanceProfile_r_values_c',
-                loaded_dict[self.name].get('r_values_c', self.pair_distance_profile_r_values),
-            )
-            self.pair_distance_profile_values_c = loaded_dict[self.name].get(
-                'PairDistanceProfile_values_c',
-                loaded_dict[self.name].get('PCF_values_c', self.pair_distance_profile_values),
-            )
-            self.pair_distance_profile_entropy_c = loaded_dict[self.name].get(
-                'PairDistanceProfile_entropy_c',
-                loaded_dict[self.name].get('Entropy_c', self.pair_distance_profile_entropy),
-            )
-            self.r_values_c = self.pair_distance_profile_r_values_c
-            self.pcf_values_c = self.pair_distance_profile_values_c
-            self.entropy_c = self.pair_distance_profile_entropy_c
-
-            # self.moran_I_c = loaded_dict[self.name].get('Moran_I_c', self.moran_I)
-            # self.moran_z_c = loaded_dict[self.name].get('Moran_zI_c', self.moran_z)
-            # self.moran_p_c = loaded_dict[self.name].get('Moran_p_c', self.moran_p)
-
-            # self.getis_ord_G_c = loaded_dict[self.name]['Getis_Ord_G_c']
-            # self.getis_ord_z_c = loaded_dict[self.name]['Getis_Ord_zG_c']
-            # self.getis_ord_p_c = loaded_dict[self.name]['Getis_Ord_p_c']
-
-            # self.getis_ord_G_c, self.getis_ord_z_c, self.getis_ord_p_c = calculate_Getis_Ord_G(self.center_coords_c, metric_dict_for_autocorr, True, 7, self.name)['Volume']
-
-    def load_cluster_metrics(self) -> None:
-        with open('input/cluster_dendr_metrics.json', 'r') as f:
-            loaded_dict = json.load(f)
-
-        self.dbscan_eps = loaded_dict[self.name]['DBscan_eps']
-        self.dbscan_min_samples = loaded_dict[self.name]['DBscan_min_samples']
-        # Legacy statistic/p-value from the old DBSCAN parameter search are no
-        # longer loaded by the current pipeline.
-        # self.dbscan_statistic = loaded_dict[self.name]['DBscan_statistic']
-        # self.dbscan_p_value = loaded_dict[self.name]['DBscan_p_value']
-        self.dbscan_noise = loaded_dict[self.name]['DBscan_noise']
-
-        if self.cylindr_flag:
-            # Старые файлы могли хранить отдельные cylindrical-метрики с суффиксом _c.
-            # В новых файлах они не сохраняются: mesh_graph-метрики лежат в обычных полях.
-            self.dbscan_eps_c = loaded_dict[self.name].get('DBscan_eps_c', self.dbscan_eps)
-            self.dbscan_min_samples_c = loaded_dict[self.name].get('DBscan_min_samples_c', self.dbscan_min_samples)
-            # self.dbscan_statistic_c = loaded_dict[self.name].get('DBscan_statistic_c', self.dbscan_statistic)
-            # self.dbscan_p_value_c = loaded_dict[self.name].get('DBscan_p_value_c', self.dbscan_p_value)
-            self.dbscan_noise_c = loaded_dict[self.name].get('DBscan_noise_c', self.dbscan_noise)
-
     def get_spine_distance_points(self) -> List[Tuple[float, float, float]]:
+        """Возвращает координаты точек крепления шипиков к дендриту, 
+        используемые для расчёта расстояний между шипиками.
+
+        Входные данные: объекты `Spine` в `self.spines`.
+        Выходные данные: список трёхмерных координат точек крепления.
+        """
         return [s.junction_center_coord for s in self.spines]
 
     def get_mesh_graph_distance_matrix(self) -> np.ndarray:
+        """Вычисляет или возвращает кэшированную матрицу расстояний по мешу.
+        Проецирует точки крепления на вершины меша и считает кратчайшие
+        пути по рёбрам сетки дендрита.
+
+        Входные данные: меш дендрита `self.mesh` и точки крепления шипиков.
+        Выходные данные: квадратная матрица `mesh_graph` расстояний между
+        шипиками.
+        """
         if hasattr(self, "mesh_graph_distance_matrix"):
             return self.mesh_graph_distance_matrix
         if not hasattr(self, "mesh"):
@@ -547,60 +412,47 @@ class Dendrite:
         return self.mesh_graph_distance_matrix
 
     def _calculate_pair_distance_profile_metrics(self) -> None:
+        """Вычисляет ненормированный профиль попарных расстояний.
+        Считает среднее число соседей на шипик в последовательных
+        интервалах расстояний и энтропию полученного профиля.
+
+        Входные данные: матрица `mesh_graph`-расстояний между точками крепления.
+        Выходные данные: `pair_distance_profile_r_values`,
+        `pair_distance_profile_values`, `pair_distance_profile_entropy`.
+        """
         mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
         distance_points = self.get_spine_distance_points()
-        self.nndist, self.nndist_norm = calculate_NNDist(
-            distance_points,
-            self.volume_around_dendr,
-            0,
-            distance_matrix=mesh_graph_distance_matrix,
-        )
         self.pair_distance_profile_r_values, self.pair_distance_profile_values = calculate_pair_distance_profile(
             distance_points,
-            self.volume_around_dendr,
-            self.radius,
-            self.dr,
-            self.length,
-            False,
             distance_matrix=mesh_graph_distance_matrix,
         )
         self.pair_distance_profile_entropy = calculate_Shannon_entropy(self.pair_distance_profile_values)
-        # Deprecated aliases kept so older plotting/comparison code keeps working.
-        self.r_values = self.pair_distance_profile_r_values
-        self.pcf_values = self.pair_distance_profile_values
-        self.entropy = self.pair_distance_profile_entropy
 
-        if self.cylindr_flag:
-            # Backwards-compatible *_c fields now mirror mesh_graph-based metrics.
-            self.nndist_c, self.nndist_norm_c = self.nndist, self.nndist_norm
-            self.pair_distance_profile_r_values_c = self.pair_distance_profile_r_values
-            self.pair_distance_profile_values_c = self.pair_distance_profile_values
-            self.pair_distance_profile_entropy_c = self.pair_distance_profile_entropy
-            self.r_values_c = self.pair_distance_profile_r_values_c
-            self.pcf_values_c = self.pair_distance_profile_values_c
-            self.entropy_c = self.pair_distance_profile_entropy_c
-
-    def _calculate_volume_moran_metric(self) -> None:
-        # Legacy no-op. The current pipeline computes Moran's I for every
-        # available morphology metric in calculate_spatial_autocorrelation_analysis()
-        # and stores it as autocorr_<metric>_moran_i.
-        return
-
-    def calculate_grouping_metrics(self) -> None:
-        self.calculate_density_distribution_analysis()
-        self.calculate_spatial_autocorrelation_analysis(permutation_count=0)
-        
     def calculate_cluster_metrics(self) -> None:
+        """Выполняет DBSCAN-кластеризацию шипиков по расстояниям вдоль меша.
+        Подбирает `eps` по k-distance эвристике при необходимости и
+        запускает DBSCAN с предвычисленной матрицей расстояний.
+
+        Входные данные: точки крепления шипиков, морфологические метрики
+        шипиков и матрица `mesh_graph`-расстояний.
+        Выходные данные: `dbscan_labels`, `dbscan_eps`,
+        `dbscan_min_samples`, `dbscan_noise`.
+        """
         spine_metrics_dict_for_dbscan = {}
         for s in self.spines:
             spine_metrics_dict_for_dbscan[(s.center_coord[0], s.center_coord[1], s.center_coord[2])] = { 'Volume' : s.metrics['Volume'] }
         points = [[s.center_coord[0], s.center_coord[1], s.center_coord[2]] for s in self.spines]
+        if len(points) == 0:
+            self.dbscan_labels = np.array([], dtype=int)
+            self.dbscan_eps = 0
+            self.dbscan_min_samples = 0
+            self.dbscan_noise = np.nan
+            return
         mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
 
-        dbscan_labels, dbscan_eps, dbscan_min_samples, _legacy_statistic, _legacy_p_value = dbscan(
+        dbscan_labels, dbscan_eps, dbscan_min_samples = dbscan(
             points,
             spine_metrics_dict_for_dbscan,
-            0,
             'graphics/dbscan/' + self.name,
             distance_matrix=mesh_graph_distance_matrix,
             distance_label="mesh_graph",
@@ -608,6 +460,9 @@ class Dendrite:
         self.dbscan_labels = dbscan_labels
         self.dbscan_eps = dbscan_eps
         self.dbscan_min_samples = dbscan_min_samples
+        if len(self.dbscan_labels) != len(points):
+            self.dbscan_noise = np.nan
+            return
 
         points = np.array([s.center_coord for s in self.spines])
 
@@ -615,134 +470,20 @@ class Dendrite:
         filtered_points = points[class_member_mask]
         self.dbscan_noise = len(filtered_points)/len(points)
 
-        if self.cylindr_flag:
-            # Backwards-compatible *_c fields now mirror mesh_graph-based DBSCAN.
-            self.dbscan_labels_c = self.dbscan_labels
-            self.dbscan_eps_c = self.dbscan_eps
-            self.dbscan_min_samples_c = self.dbscan_min_samples
-            # Legacy statistic/p-value from the old DBSCAN parameter search are
-            # intentionally not updated in the current k-distance pipeline.
-            # self.dbscan_statistic_c = self.dbscan_statistic
-            # self.dbscan_p_value_c = self.dbscan_p_value
-            self.dbscan_noise_c = self.dbscan_noise
-
-    def cluster_analysis(self) -> None:
-        if self.dbscan_labels.size != 0 :
-            spine_vec_w_name = {}
-            for s in self.spines:
-                key = (s.center_coord[0], s.center_coord[1], s.center_coord[2])
-                spine_vec_w_name[key] = s.name
-
-            points = np.array([s.center_coord for s in self.spines])
-
-            self.db_count_class, self.db_matrix_class = class_analysis(points, self.dbscan_labels, spine_vec_w_name)
-            self.db_count_cluster, self.db_matrix_cluster = cluster_analysis(points, self.dbscan_labels, spine_vec_w_name)
-
-            if self.cylindr_flag:
-                spine_vec_w_name_c = {}
-                for s in self.spines:
-                    key = (s.center_coord_c[0], s.center_coord_c[1], s.center_coord_c[2])
-                    spine_vec_w_name_c[key] = s.name
-
-                points_c = np.array([s.center_coord_c for s in self.spines])
-
-                self.db_count_class_c, self.db_matrix_class_c = class_analysis(points_c, self.dbscan_labels_c, spine_vec_w_name_c)
-                self.db_count_cluster_c, self.db_matrix_cluster_c = cluster_analysis(points_c, self.dbscan_labels_c, spine_vec_w_name_c)
-
-    def neighborhood_analysis(self, input_eps: float = 0) -> None: 
-        counts_c = []
-
-        for i, spine in enumerate(self.spines):
-            if input_eps == 0:
-                if self.dbscan_eps != 0:
-                    eps = self.dbscan_eps
-                else:
-                    eps = 2.5
-            else:
-                eps = input_eps
-
-            distances = self.get_mesh_graph_distance_matrix()[i]
-            neighbors_ind = np.where(distances <= eps)[0]
-            neighbors_spines = [self.spines[i] for i in neighbors_ind.tolist()]
-            
-            print(f"Точка {i} ({spine.name} - ик {spine.center_coord}): соседи {neighbors_ind}")
-
-            for type in self.n_count_class.keys():
-                self.n_count_class[type].append(0)
-            for type in self.n_count_cluster.keys():
-                self.n_count_cluster[type].append(0)
-
-            if self.cylindr_flag:
-                if input_eps == 0:
-                    if self.dbscan_eps_c != 0:
-                        eps = self.dbscan_eps_c
-                    else:
-                        eps = 2.5
-
-                neighbors_ind_c = np.where(distances <= eps)[0].tolist()
-                neighbors_spines_c = [self.spines[i] for i in neighbors_ind_c]
-                counts_c.append(len(neighbors_spines_c))
-                print(f"Точка {i} ({spine.name} - цк {spine.center_coord_c}): соседи {neighbors_spines_c}")
-
-                for type in self.n_count_class.keys():
-                    self.n_count_class_c[type].append(0)
-
-                for type in self.n_count_cluster.keys():
-                    self.n_count_cluster_c[type].append(0)
-                
-                self.n_count_class_c, self.n_count_cluster_c = self.count_by_type(i, self.n_count_class_c, self.n_count_cluster_c,  neighbors_spines_c)
-                self.n_matrix_class_c, self.n_matrix_cluster_c = self.corr_matrix(self.n_matrix_class_c, self.n_matrix_cluster_c,  neighbors_spines_c)
-
-            self.n_count_class, self.n_count_cluster = self.count_by_type(i, self.n_count_class, self.n_count_cluster, neighbors_spines)
-            self.n_matrix_class, self.n_matrix_cluster = self.corr_matrix(self.n_matrix_class, self.n_matrix_cluster, neighbors_spines)
-
-            self.n_count_c = np.mean(counts_c)
-
-    def count_by_type(self, i: int, count_class: Dict[str, List[int]], count_cluster: Dict[int, List[int]], neighbors: List[Spine]):        
-        for n_spine in neighbors:
-            if n_spine.class_type != 'Undefined':
-                count_class[n_spine.class_type][i] += 1
-            if n_spine.cluster_type != 0:
-                count_cluster[n_spine.cluster_type][i] += 1
-        return count_class, count_cluster
-
-    def corr_matrix(self, matrix_class, matrix_cluster, neighbors: List[Spine]):  
-        class_type_w_index = {'Undefined' : 0, 'Stubby' : 1, 'Mushroom' : 2, 'Thin' : 3, 'Filopodia' : 4}
-        # class_type_w_index = {'Stubby' : 1, 'Mushroom' : 2, 'Thin' : 3, 'Filopodia' : 4}
-
-        class_types = np.array([class_type_w_index[s.class_type] for s in neighbors])   
-        cluster_types = np.array([s.cluster_type for s in neighbors])    
-
-        for i, type in enumerate(set(class_types)):
-            for j, n_type in enumerate(set(class_types)): 
-                if type == 0 or n_type == 0:
-                    continue
-                if i == j and np.count_nonzero(class_types == type) >= 2:
-                    matrix_class[type-1, type-1] += 1
-                else:
-                    matrix_class[type-1, n_type-1] += 1
-
-        for i, type in enumerate(set(cluster_types)):
-            for j, n_type in enumerate(set(cluster_types)): 
-                if type == 0 or n_type == 0:
-                    continue
-                if i == j and np.count_nonzero(cluster_types == type) >= 2:
-                    matrix_cluster[type-1, type-1] += 1
-                else:
-                    matrix_cluster[type-1, n_type-1] += 1
-
-        return matrix_class, matrix_cluster
-
     def graph_analysis(self) -> None:
-        # Graph analysis now uses mesh_graph distances along the dendrite mesh.
+        """Строит полный взвешенный граф шипиков с весами `1 / d`,
+        считает коэффициент кластеризации, сообщества и модульность.
+
+        Входные данные: матрица `mesh_graph`-расстояний между шипиками.
+        Выходные данные: `g_average_clustering`, `g_cluster_sizes`,
+        `g_mean_cluster_size`, `g_characteristic_extent`, `g_modularity`.
+        """
         distances = self.get_mesh_graph_distance_matrix()
 
-        # Создаем граф
         G = nx.Graph()
         n = distances.shape[0]
         G.add_nodes_from(range(n))
 
-        # Добавляем ребра с весами, обратными mesh_graph-расстоянию по сетке дендрита.
         for i in range(n):
             for j in range(i + 1, n):
                 d = distances[i][j]
@@ -758,11 +499,12 @@ class Dendrite:
             self.g_modularity = 0
             return
 
-        # Вычисляем средний коэффициент группировки
+        # средний коэффициент группировки
         self.g_average_clustering = nx.average_clustering(G, weight='weight')
 
-        # Находим сообщества. Если установлен python-louvain, используем Louvain;
-        # иначе fallback на greedy modularity из networkx.
+        # поиск сообществсли 
+        # если установлен python-louvain, используем Louvain
+        # иначе fallback на greedy modularity из networkx
         if hasattr(community_louvain, "best_partition"):
             partition = community_louvain.best_partition(G, weight='weight')
             modularity_partition = None
@@ -780,11 +522,11 @@ class Dendrite:
                 communities[comm_id] = []
             communities[comm_id].append(node)
 
-        # Количество точек в каждом кластере
+        # количество точек в каждом кластере
         self.g_cluster_sizes = [len(comm) for comm in communities.values()]
         self.g_mean_cluster_size = np.mean(self.g_cluster_sizes)
 
-        # Характерная протяженность кластера (среднее mesh_graph-расстояние между точками внутри кластера)
+        # протяженность кластера (среднее mesh_graph-расстояние между точками внутри кластера)
         self.g_characteristic_extent = 0
         valid_community_count = 0
         for comm_id, nodes in communities.items():
@@ -804,7 +546,7 @@ class Dendrite:
         if valid_community_count > 0:
             self.g_characteristic_extent /= valid_community_count
 
-        # Модульность разбиения
+        # модульность разбиения
         if hasattr(community_louvain, "modularity"):
             self.g_modularity = community_louvain.modularity(partition, G, weight='weight')
         else:
@@ -818,6 +560,13 @@ class Dendrite:
 
     @staticmethod
     def _cliffs_delta(values_a, values_b) -> float:
+        """Вычисляет размер эффекта Cliff's delta для двух выборок.
+        Сравнивает все попарные значения из двух групп и оценивает
+        преимущественное направление различий.
+
+        Входные данные: две числовые выборки.
+        Выходные данные: число от -1 до 1 или `nan` при недостатке данных.
+        """
         a = np.asarray(values_a, dtype=float)
         b = np.asarray(values_b, dtype=float)
         a = a[np.isfinite(a)]
@@ -833,6 +582,13 @@ class Dendrite:
 
     @staticmethod
     def _safe_stat_test(test_fn, values_a, values_b):
+        """Безопасно применяет статистический тест к двум выборкам.
+        Фильтрует нечисловые значения, проверяет минимальный размер
+        выборок и подавляет исключения теста.
+
+        Входные данные: функция теста и две числовые выборки.
+        Выходные данные: пара `(statistic, p_value)` или `(nan, nan)`.
+        """
         a = np.asarray(values_a, dtype=float)
         b = np.asarray(values_b, dtype=float)
         a = a[np.isfinite(a)]
@@ -847,6 +603,11 @@ class Dendrite:
 
     @staticmethod
     def _safe_spearman(values_a, values_b):
+        """Вычисляет ранговую корреляцию Спирмена с проверкой входных данных.
+
+        Входные данные: два числовых массива одинаковой длины.
+        Выходные данные: пара `(rho, p_value)` или `(nan, nan)`.
+        """
         try:
             from scipy.stats import spearmanr
             a = np.asarray(values_a, dtype=float)
@@ -861,6 +622,14 @@ class Dendrite:
 
     @staticmethod
     def _moran_i_from_weights(values: np.ndarray, weights: np.ndarray) -> float:
+        """Вычисляет глобальный индекс Морана для заданной матрицы весов.
+        Оценивает пространственную автокорреляцию значений признака
+        между соседними шипиками
+
+        Входные данные: числовой признак шипиков и матрица пространственных
+        весов.
+        Выходные данные: значение Moran's I или `nan`.
+        """
         values = np.asarray(values, dtype=float)
         mask = np.isfinite(values)
         if np.count_nonzero(mask) < 3:
@@ -882,6 +651,14 @@ class Dendrite:
 
     @staticmethod
     def _geary_c_from_weights(values: np.ndarray, weights: np.ndarray) -> float:
+        """Вычисляет глобальный коэффициент Гири для заданной матрицы весов.
+        Оценивает локальные различия значений признака между
+        соседними шипиками
+
+        Входные данные: числовой признак шипиков и матрица пространственных
+        весов.
+        Выходные данные: значение Geary's C или `nan`.
+        """
         values = np.asarray(values, dtype=float)
         mask = np.isfinite(values)
         if np.count_nonzero(mask) < 3:
@@ -904,6 +681,14 @@ class Dendrite:
 
     @staticmethod
     def _permutation_p_value(observed: float, permuted: List[float]) -> float:
+        """Вычисляет перестановочное p-значение для наблюдаемой статистики.
+        Считает долю перестановок с абсолютным отклонением не меньше
+        наблюдаемого с поправкой `+1`
+
+        Входные данные: наблюдаемое значение статистики и список значений,
+        полученных на перестановках.
+        Выходные данные: перестановочное p-значение или `nan`.
+        """
         permuted = np.asarray(permuted, dtype=float)
         permuted = permuted[np.isfinite(permuted)]
         if not np.isfinite(observed) or len(permuted) == 0:
@@ -911,6 +696,13 @@ class Dendrite:
         return float((np.sum(np.abs(permuted) >= abs(observed)) + 1) / (len(permuted) + 1))
 
     def _default_spatial_radius(self, distances: np.ndarray, min_samples: int = 3, percentile: float = 75) -> float:
+        """Определяет локальный радиус анализа по k-distance эвристике.
+        Берёт расстояние до `min_samples`-го ближайшего соседа для
+        каждого шипика и возвращает заданный перцентиль этих расстояний
+
+        Входные данные: матрица расстояний, `min_samples` и перцентиль.
+        Выходные данные: радиус локальной окрестности.
+        """
         n = distances.shape[0]
         if n < 2:
             return 0.0
@@ -927,6 +719,11 @@ class Dendrite:
         return float(np.percentile(kth, percentile))
 
     def _set_empty_spatial_analysis_results(self) -> None:
+        """Заполняет пустые результаты пространственного анализа.
+
+        Входные данные: состояние дендрита без валидных шипиков.
+        Выходные данные: инициализированные поля результатов анализа.
+        """
         self.spatial_morphology_summary = {"dendrite": self.name, "n_spines": 0}
         self.spatial_morphology_spine_records = []
         self.spatial_morphology_cluster_records = []
@@ -941,6 +738,14 @@ class Dendrite:
         self.local_neighborhood_spine_records = []
 
     def _build_spatial_analysis_context(self, local_radius: float = None) -> Dict[str, Any]:
+        """Формирует общий контекст для пространственных этапов анализа.
+        Получает матрицу расстояний, DBSCAN-метки, расстояния до
+        ближайших соседей, threshold-граф окрестностей и числовые
+        морфологические признаки шипиков.
+
+        Входные данные: опциональный радиус локальной окрестности.
+        Выходные данные: словарь контекста, используемый последующими этапами.
+        """
         distances = np.asarray(self.get_mesh_graph_distance_matrix(), dtype=float)
         n = len(self.spines)
 
@@ -1026,6 +831,16 @@ class Dendrite:
         }
 
     def calculate_density_distribution_analysis(self, local_radius: float = None) -> None:
+        """Вычисляет метрики плотности и распределения расстояний между шипиками.
+        Считает статистики расстояний до ближайшего соседа,
+        статистики всех попарных расстояний, threshold-граф и профиль попарных
+        расстояний.
+
+        Входные данные: опциональный радиус локальной окрестности; геометрия
+        дендрита и шипиков берётся из состояния объекта.
+        Выходные данные: `spatial_morphology_summary`,
+        `spatial_morphology_spine_records` и кэш `_spatial_analysis_context`.
+        """
         context = self._build_spatial_analysis_context(local_radius=local_radius)
         n = context["n"]
         if n == 0:
@@ -1122,6 +937,15 @@ class Dendrite:
         self._spatial_analysis_context = context
 
     def calculate_local_neighborhood_analysis(self, local_radius: float = None) -> None:
+        """Вычисляет характеристики локальных окрестностей шипиков.
+        Для каждого шипика находит соседей в пределах радиуса,
+        считает число соседей, graph degree, local clustering и средние
+        морфологические признаки соседей.
+
+        Входные данные: опциональный радиус локальной окрестности.
+        Выходные данные: `local_neighborhood_summary` и
+        `local_neighborhood_spine_records`.
+        """
         if (
             not hasattr(self, "_spatial_analysis_context")
             or local_radius is not None
@@ -1193,6 +1017,15 @@ class Dendrite:
         permutation_count: int = 199,
         random_state: int = 42,
     ) -> None:
+        """Вычисляет пространственную автокорреляцию морфологических признаков.
+        Для каждого числового морфологического признака считает
+        Moran's I, Geary's C, корреляцию Спирмена между значением шипика и
+        средним значением у соседей, а также перестановочные p-значения.
+
+        Входные данные: радиус локальной окрестности, число перестановок и
+        seed генератора случайных чисел.
+        Выходные данные: список `spatial_morphology_permutation_records`.
+        """
         if (
             not hasattr(self, "_spatial_analysis_context")
             or local_radius is not None
@@ -1258,6 +1091,16 @@ class Dendrite:
         self.spatial_morphology_permutation_records = permutation_records
 
     def calculate_spatial_cluster_analysis(self, local_radius: float = None) -> None:
+        """Описывает DBSCAN-кластеры и сравнивает кластеризованные шипики с шумом.
+        Вычисляет размеры и протяжённость кластеров, внутрикластерные
+        расстояния, морфологические summaries по кластерам и непараметрические
+        тесты clustered vs isolated.
+
+        Входные данные: DBSCAN-метки, матрица расстояний и морфологические
+        признаки шипиков.
+        Выходные данные: `spatial_morphology_cluster_records`,
+        `spatial_morphology_test_records` и кластерные поля в summary.
+        """
         if (
             not hasattr(self, "_spatial_analysis_context")
             or local_radius is not None
@@ -1357,6 +1200,14 @@ class Dendrite:
         permutation_count: int = 199,
         random_state: int = 42,
     ) -> None:
+        """Запускает полный актуальный пространственно-морфологический анализ.
+        Последовательно выполняет анализ плотности, локальных
+        окрестностей, автокорреляции и DBSCAN-кластеров.
+
+        Входные данные: радиус локальной окрестности, число перестановок и
+        seed генератора случайных чисел.
+        Выходные данные: все summary-таблицы пространственного анализа.
+        """
         self.calculate_density_distribution_analysis(local_radius=local_radius)
         self.calculate_local_neighborhood_analysis(local_radius=local_radius)
         self.calculate_spatial_autocorrelation_analysis(
@@ -1371,6 +1222,13 @@ class Dendrite:
         permutation_count: int = 199,
         random_state: int = 42,
     ) -> None:
+        """Совместимый alias для полного пространственно-морфологического анализа.
+
+        Входные данные: радиус локальной окрестности, число перестановок и
+        seed генератора случайных чисел.
+        Действие: вызывает `calculate_comprehensive_spatial_analysis`.
+        Выходные данные: все summary-таблицы пространственного анализа.
+        """
         self.calculate_comprehensive_spatial_analysis(
             local_radius=local_radius,
             permutation_count=permutation_count,
@@ -1378,6 +1236,12 @@ class Dendrite:
         )
 
     def save_spatial_morphology_analysis(self) -> None:
+        """Сохраняет подробные таблицы пространственно-морфологического анализа.
+
+        Входные данные: рассчитанные поля пространственного анализа текущего
+        дендрита.
+        Выходные данные: CSV-файлы в текущей output-директории.
+        """
         if (
             not hasattr(self, "spatial_morphology_summary")
             or "n_dbscan_clusters" not in self.spatial_morphology_summary
@@ -1413,6 +1277,12 @@ class Dendrite:
 
     @staticmethod
     def _is_scalar_metric_value(value: Any) -> bool:
+        """Проверяет, можно ли значение сохранить как scalar-поле таблицы
+        (проверяет принадлежность к scalar-типам Python/NumPy).
+
+        Входные данные: произвольное значение метрики.
+        Выходные данные: `True` для scalar-значений, иначе `False`.
+        """
         return value is None or isinstance(
             value,
             (
@@ -1428,6 +1298,14 @@ class Dendrite:
 
     @staticmethod
     def _to_json_compatible(value: Any) -> Any:
+        """Преобразует значение метрики к JSON-совместимому виду
+        (рекурсивно преобразует NumPy-типы в Python-типы и заменяет
+        не конечные float-значения на `None`).
+
+        Входные данные: произвольное значение, включая NumPy-типы, массивы,
+        словари и списки.
+        Выходные данные: JSON-совместимое значение.
+        """
         if isinstance(value, np.ndarray):
             return Dendrite._to_json_compatible(value.tolist())
         if isinstance(value, (np.integer, np.floating, np.bool_)):
@@ -1445,12 +1323,26 @@ class Dendrite:
 
     @staticmethod
     def _as_metric_scalar(value: Any) -> Any:
+        """Преобразует NumPy scalar к стандартному Python scalar.
+
+        Входные данные: scalar-значение Python или NumPy.
+        Действие: вызывает `.item()` для NumPy scalar.
+        Выходные данные: значение, пригодное для записи в таблицу.
+        """
         if isinstance(value, (np.integer, np.floating, np.bool_)):
             return value.item()
         return value
 
     @staticmethod
     def _add_prefixed_metrics(record: Dict[str, Any], prefix: str, metrics: Dict[str, Any], skip_keys=None) -> None:
+        """Добавляет словарь метрик в итоговую запись с префиксом.
+
+        Входные данные: целевой словарь, префикс, словарь метрик и набор
+        ключей, которые нужно пропустить.
+        Действие: scalar-значения записывает отдельными колонками, сложные
+        значения сериализует в JSON-поля.
+        Выходные данные: обновлённый словарь `record`.
+        """
         skip_keys = set(skip_keys or [])
         for key, value in metrics.items():
             if key in skip_keys:
@@ -1465,7 +1357,15 @@ class Dendrite:
                 )
 
     def build_structural_organization_vector(self) -> Dict[str, Any]:
-        if not hasattr(self, "nndist") or not hasattr(self, "pair_distance_profile_values"):
+        """Формирует единый вектор признаков дендритной ветви
+        (объединяет scalar-метрики в один словарь, исключая подробные
+        записи, предназначенные для отдельных таблиц).
+
+        Входные данные: рассчитанные базовые, плотностные, окрестностные,
+        автокорреляционные, кластерные и графовые метрики.
+        Выходные данные: словарь признаков одной дендритной ветви.
+        """
+        if not hasattr(self, "spatial_morphology_summary") or not hasattr(self, "pair_distance_profile_values"):
             self.calculate_density_distribution_analysis()
         if not hasattr(self, "local_neighborhood_summary"):
             self.calculate_local_neighborhood_analysis()
@@ -1551,7 +1451,12 @@ class Dendrite:
 
         return record
 
-    def save_structural_organization_vector(self) -> None:
+    def save_structural_organization_vector(self) -> Dict[str, Any]:
+        """Сохраняет единый вектор признаков дендритной ветви.
+
+        Входные данные: результат `build_structural_organization_vector()`.
+        Выходные данные: сохранённый словарь признаков текущего дендрита.
+        """
         record = self.build_structural_organization_vector()
 
         save_structural_organization_vector_records[:] = [
@@ -1565,8 +1470,18 @@ class Dendrite:
             output_path("dendrite_structural_organization_vectors.csv"),
             index=False,
         )
+        return record
 
     def calculate_spine_distance_matrices(self, methods=None, output_dir=None, pair_for_path=None):
+        """Вычисляет диагностические матрицы расстояний между шипиками.
+        Считает расстояния между точками крепления шипиков по
+        выбранным методам; по умолчанию используется `mesh_graph`
+
+        Входные данные: список методов расстояний, директория сохранения и
+        опциональная пара шипиков для визуализации пути.
+        Выходные данные: словарь результатов расстояний или сохранённые
+        диагностические файлы при указанном `output_dir`.
+        """
         if methods is None:
             methods = ("mesh_graph",)
 
@@ -1574,15 +1489,11 @@ class Dendrite:
             raise ValueError("Surface distance methods require Dendrite.mesh. Create Dendrite with dendrite_meshes, not only from saved input JSON.")
 
         attachment_points = [s.junction_center_coord for s in self.spines]
-        cylindrical_points = None
-        if self.cylindr_flag:
-            cylindrical_points = [s.center_coord_c for s in self.spines]
 
         if output_dir is not None:
             return save_distance_method_comparison(
                 dendrite_mesh=self.mesh,
                 attachment_points=attachment_points,
-                cylindrical_points=cylindrical_points,
                 output_dir=output_dir,
                 methods=methods,
                 radius=self.radius,
@@ -1592,13 +1503,18 @@ class Dendrite:
         return calculate_spine_distance_matrices(
             dendrite_mesh=self.mesh,
             attachment_points=attachment_points,
-            cylindrical_points=cylindrical_points,
             methods=methods,
             radius=self.radius,
             pair_for_path=pair_for_path,
         )
 
     def save_spine_coords(self) -> None:
+        """Сохраняет координаты центров и точек крепления шипиков в
+        JSON-файл.
+
+        Входные данные: глобальный накопитель `save_coords`.
+        Выходные данные: файл `spine_coords.json` в output-директории.
+        """
         # with open('spine_coords.json', 'w') as f:
         # with open('metrics/9009/spine_coords.json', 'w') as f:
         # with open('metrics/wt_old_st/spine_coords.json', 'w') as f:
@@ -1606,6 +1522,11 @@ class Dendrite:
             json.dump(save_coords, f)
 
     def save_spine_metrics(self) -> None:
+        """Сохраняет морфологические метрики шипиков в JSON.
+
+        Входные данные: объекты `Spine` текущего дендрита и их словари метрик.
+        Выходные данные: файл `spine_metrics.json` в output-директории.
+        """
         for s in self.spines:
             save_spine_metric_dict[s.name] = s.metrics
 
@@ -1616,132 +1537,19 @@ class Dendrite:
             json.dump(save_spine_metric_dict, f)
 
     def save_init_metrics(self) -> None:
+        """Сохраняет базовые метрики дендрита.
+
+        Входные данные: поля `volume`, `length`, `radius`.
+        Действие: записывает базовые геометрические метрики текущего дендрита
+        в JSON-накопитель.
+        Выходные данные: файл `dendr_metrics.json` в output-директории.
+        """
         save_dendr_metric_dict[self.name] = {'Volume' : self.volume, 
                                              'Length' : self.length, 
-                                             'Radius' : self.radius, 
-                                             'Dr' : self.dr, 
-                                             'Volume_around_dendr' : self.volume_around_dendr}
+                                             'Radius' : self.radius}
         
         with open(output_path('dendr_metrics.json'), 'w') as f:
             json.dump(save_dendr_metric_dict, f)
 
-    def save_grouping_metrics(self):
-        save_grouping_dendr_metric_dict[self.name] = {}
-        save_grouping_dendr_metric_dict[self.name]['spatial_nearest_neighbor_mean'] = self.nndist
-        # Legacy fields are no longer written by the current pipeline.
-        # save_grouping_dendr_metric_dict[self.name]['NNdist'] = self.nndist
-        # save_grouping_dendr_metric_dict[self.name]['NNdist_norm'] = self.nndist_norm
-
-        save_grouping_dendr_metric_dict[self.name]['PairDistanceProfile_values'] = np.asarray(
-            self.pair_distance_profile_values
-        ).tolist()
-        save_grouping_dendr_metric_dict[self.name]['PairDistanceProfile_r_values'] = np.asarray(
-            self.pair_distance_profile_r_values
-        ).tolist()
-        save_grouping_dendr_metric_dict[self.name]['PairDistanceProfile_entropy'] = self.pair_distance_profile_entropy
-
-        # Legacy global Volume Moran fields are no longer written by the
-        # current pipeline. Use spatial_morphology_permutation.csv and
-        # autocorr_<metric>_* columns in dendrite_structural_organization_vectors.csv.
-        # save_grouping_dendr_metric_dict[self.name]['Moran_I'] = self.moran_I
-        # save_grouping_dendr_metric_dict[self.name]['Moran_zI'] = self.moran_z
-        # save_grouping_dendr_metric_dict[self.name]['Moran_p'] = self.moran_p
-
-        # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_G'] = self.getis_ord_G
-        # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_zG'] = self.getis_ord_z
-        # save_grouping_dendr_metric_dict[self.name]['Getis_Ord_p'] = self.getis_ord_p
-
-        # with open('metrics/grouping_dendr_metrics.json', 'w') as f:
-        # with open('metrics/9009/grouping_dendr_metrics.json', 'w') as f:
-        # with open('metrics/wt_old_st/grouping_dendr_metrics.json', 'w') as f:
-        with open(output_path('grouping_dendr_metrics.json'), 'w') as f:
-            json.dump(save_grouping_dendr_metric_dict, f)
-
-    def save_cluster_metrics(self):
-        save_cluster_dendr_metric_dict[self.name] = {}
-        save_cluster_dendr_metric_dict[self.name]['DBscan_eps'] = self.dbscan_eps
-        save_cluster_dendr_metric_dict[self.name]['DBscan_min_samples'] = self.dbscan_min_samples
-        # Legacy statistic/p-value from the old DBSCAN parameter search are no
-        # longer meaningful after switching to the k-distance eps rule.
-        # save_cluster_dendr_metric_dict[self.name]['DBscan_statistic'] = self.dbscan_statistic
-        # save_cluster_dendr_metric_dict[self.name]['DBscan_p_value'] = self.dbscan_p_value
-        save_cluster_dendr_metric_dict[self.name]['DBscan_noise'] = self.dbscan_noise
-
-        # with open('metrics/grouping_dendr_metrics.json', 'w') as f:
-        # with open('metrics/9009/grouping_dendr_metrics.json', 'w') as f:
-        # with open('metrics/wt_old_st/grouping_dendr_metrics.json', 'w') as f:
-        with open(output_path('cluster_dendr_metrics.json'), 'w') as f:
-            json.dump(save_cluster_dendr_metric_dict, f)
-
-    def save_graph_metrics(self):
-        save_graph_dendr_metric_dict[self.name] = {}
-        # save_graph_dendr_metric_dict[self.name]['DBscan_eps'] = self.dbscan_eps
-        # save_graph_dendr_metric_dict[self.name]['DBscan_min_samples'] = self.dbscan_min_samples
-        # save_graph_dendr_metric_dict[self.name]['DBscan_statistic'] = self.dbscan_statistic
-        # save_graph_dendr_metric_dict[self.name]['DBscan_p_value'] = self.dbscan_p_value
-        # save_graph_dendr_metric_dict[self.name]['DBscan_noise'] = self.dbscan_noise
-
-        save_graph_dendr_metric_dict[self.name]['g_cluster_sizes'] = self.g_cluster_sizes
-        save_graph_dendr_metric_dict[self.name]['g_mean_cluster_size'] = self.g_mean_cluster_size
-        save_graph_dendr_metric_dict[self.name]['g_characteristic_extent'] = self.g_characteristic_extent
-        save_graph_dendr_metric_dict[self.name]['g_average_clustering'] = self.g_average_clustering
-        save_graph_dendr_metric_dict[self.name]['g_modularity'] = self.g_modularity
-
-        # with open('metrics/grouping_dendr_metrics.json', 'w') as f:
-        # with open('metrics/9009/grouping_dendr_metrics.json', 'w') as f:
-        # with open('metrics/wt_old_st/grouping_dendr_metrics.json', 'w') as f:
-        with open(output_path('graph_dendr_metrics.json'), 'w') as f:
-            json.dump(save_graph_dendr_metric_dict, f)
-
-    def save_dendr_metrics(self) -> None:
-        if self.cylindr_flag:
-            dendrite = {"Name": self.name, "Type": self.name[:2], "spatial_nearest_neighbor_mean": self.nndist, "density_pair_distance_profile_entropy": self.pair_distance_profile_entropy, 
-                        # Legacy global Volume Moran fields are excluded from current aggregate metrics.
-                        # "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
-                        # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,
-                        "Eps": self.dbscan_eps, "Min_samples": self.dbscan_min_samples,
-                        # "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value,
-                        "Noise": self.dbscan_noise,
-                        "g_mean_cluster_size": self.g_mean_cluster_size, "g_characteristic_extent": self.g_characteristic_extent, 
-                        "g_average_clustering": self.g_average_clustering, "g_modularity": self.g_modularity}
-            
-            for k, m in enumerate([self.db_matrix_class, self.db_matrix_cluster, self.n_matrix_class, self.n_matrix_cluster]):
-                matrix = m / m.max()
-                rows, cols = matrix.shape
-                matrix_dict = {}
-                
-                for i in range(rows):
-                    for j in range(cols):
-                        if k == 0:
-                            key = f"DBSCAN_class_{i+1}{j+1}"
-                        elif k == 1:
-                            key = f"DBSCAN_cluster_{i+1}{j+1}"
-                        elif k == 2:
-                            key = f"N_class_{i+1}{j+1}"
-                        elif k == 3:
-                            key = f"N_cluster_{i+1}{j+1}"
-                        matrix_dict[key] = matrix[i, j]
-
-                dendrite.update(matrix_dict)
-
-            save_all_dendr_metric_dict.append(dendrite)
-  
-    def save_dendr_metrics_without_class_cluster(self) -> None:
-        if self.cylindr_flag:
-                    
-            dendrite = {"Name": self.name, "Type": self.name[:2], "spatial_nearest_neighbor_mean": self.nndist, "density_pair_distance_profile_entropy": self.pair_distance_profile_entropy, 
-                        # Legacy global Volume Moran fields are excluded from current aggregate metrics.
-                        # "Moran_I": self.moran_I, "Moran_zI": self.moran_z, "Moran_p": self.moran_p,
-                        # "Getis_Ord_G": self.getis_ord_G_c, "Getis_Ord_zG": self.getis_ord_z_c, "Getis_Ord_p": self.getis_ord_p_c,
-                        "Eps": self.dbscan_eps, "Min_samples": self.dbscan_min_samples,
-                        # "DBSCAN_statistic": self.dbscan_statistic, "DBSCAN_p_value": self.dbscan_p_value,
-                        "Noise": self.dbscan_noise,
-                        "g_mean_cluster_size": self.g_mean_cluster_size, "g_characteristic_extent": self.g_characteristic_extent, 
-                        "g_average_clustering": self.g_average_clustering, "g_modularity": self.g_modularity}
-
-            save_all_dendr_metric_dict.append(dendrite)
-
-
-# Backward-compatible semantic alias: historically this class was named
-# `Dendrite`, but it represents one dendritic branch/fragment with its spines.
+# Semantic alias
 DendriteBranch = Dendrite

@@ -58,11 +58,6 @@ save_spine_metric_dict = {}
 save_coords = {}
 
 save_dendr_metric_dict = {}
-save_grouping_dendr_metric_dict = {}
-save_cluster_dendr_metric_dict = {}
-save_graph_dendr_metric_dict = {}
-save_all_dendr_metric_dict = []
-save_cluster_type_metric_dict = {}
 save_spatial_morphology_summary_records = []
 save_spatial_morphology_spine_records = []
 save_spatial_morphology_cluster_records = []
@@ -75,11 +70,6 @@ def reset_saved_data() -> None:
     save_spine_metric_dict.clear()
     save_coords.clear()
     save_dendr_metric_dict.clear()
-    save_grouping_dendr_metric_dict.clear()
-    save_cluster_dendr_metric_dict.clear()
-    save_graph_dendr_metric_dict.clear()
-    save_all_dendr_metric_dict.clear()
-    save_cluster_type_metric_dict.clear()
     save_spatial_morphology_summary_records.clear()
     save_spatial_morphology_spine_records.clear()
     save_spatial_morphology_cluster_records.clear()
