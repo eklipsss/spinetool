@@ -1392,7 +1392,7 @@ class Neuron:
 
         branch_nodes = sum(1 for _, data in graph.G.nodes(data=True) if data.get("node_type") == "branch")
         terminal_nodes = sum(1 for node in graph.G.nodes() if graph.G.degree(node) == 1)
-        total_spines = len(self.all_spine_points)
+        total_spines = int(sum(len(branch.spine_points) for branch in self.branches))
         valid_spines = len(self.spine_points)
         type_metrics = self._calculate_dendrite_type_network_metrics(graph, [])
 
