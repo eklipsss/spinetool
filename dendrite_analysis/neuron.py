@@ -1212,7 +1212,7 @@ class Neuron:
         output_dir: str | Path = "output_neuron_network_analysis",
         snap_threshold: float = 2.0,
         max_distance_to_edge: Optional[float] = None,
-        auto_max_distance_to_edge_quantile: float = 0.90,
+        auto_max_distance_to_edge_quantile: float = 1.0,
         auto_max_distance_to_edge_margin: float = 1.05,
         min_valid_branch_spines: int = 3,
         bin_size: float = 25.0,

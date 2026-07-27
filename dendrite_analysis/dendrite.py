@@ -606,19 +606,31 @@ class Dendrite:
         """Вычисляет ранговую корреляцию Спирмена с проверкой входных данных.
 
         Входные данные: два числовых массива одинаковой длины.
-        Выходные данные: пара `(rho, p_value)` или `(nan, nan)`.
+        Выходные данные: тройка `(rho, p_value, reason)`, где `reason="ok"`
+        при успешном расчёте.
         """
         try:
             from scipy.stats import spearmanr
             a = np.asarray(values_a, dtype=float)
             b = np.asarray(values_b, dtype=float)
             mask = np.isfinite(a) & np.isfinite(b)
-            if np.count_nonzero(mask) < 3:
-                return float("nan"), float("nan")
-            result = spearmanr(a[mask], b[mask])
-            return float(result.statistic), float(result.pvalue)
-        except Exception:
-            return float("nan"), float("nan")
+            n_valid = int(np.count_nonzero(mask))
+            if n_valid < 3:
+                return float("nan"), float("nan"), f"not_enough_valid_pairs(n={n_valid})"
+            a_valid = a[mask]
+            b_valid = b[mask]
+            if np.nanstd(a_valid) <= 0:
+                return float("nan"), float("nan"), "constant_first_input"
+            if np.nanstd(b_valid) <= 0:
+                return float("nan"), float("nan"), "constant_neighbor_mean"
+            result = spearmanr(a_valid, b_valid)
+            statistic = float(result.statistic)
+            p_value = float(result.pvalue)
+            if not np.isfinite(statistic) or not np.isfinite(p_value):
+                return statistic, p_value, "spearman_returned_nan"
+            return statistic, p_value, "ok"
+        except Exception as exc:
+            return float("nan"), float("nan"), f"exception:{type(exc).__name__}"
 
     @staticmethod
     def _moran_i_from_weights(values: np.ndarray, weights: np.ndarray) -> float:
@@ -1057,7 +1069,19 @@ class Dendrite:
                 np.nanmean(values[np.where(adjacency[i])[0]]) if neighbor_counts[i] > 0 else np.nan
                 for i in range(n)
             ], dtype=float)
-            neighbor_corr, neighbor_corr_p = self._safe_spearman(values, neighbor_means)
+            neighbor_corr, neighbor_corr_p, neighbor_corr_reason = self._safe_spearman(values, neighbor_means)
+            if neighbor_corr_reason != "ok":
+                n_valid_neighbor_pairs = int(np.count_nonzero(np.isfinite(values) & np.isfinite(neighbor_means)))
+                n_spines_with_neighbors = int(np.count_nonzero(neighbor_counts > 0))
+                print(
+                    "[autocorr] "
+                    f"{self.name}: Spearman for {metric} is NaN; "
+                    f"reason={neighbor_corr_reason}; "
+                    f"valid_pairs={n_valid_neighbor_pairs}; "
+                    f"spines_with_neighbors={n_spines_with_neighbors}/{n}; "
+                    f"local_radius={local_radius:.4f}",
+                    flush=True,
+                )
 
             perm_moran = []
             perm_geary = []
@@ -1071,7 +1095,7 @@ class Dendrite:
                     np.nanmean(permuted[np.where(adjacency[i])[0]]) if neighbor_counts[i] > 0 else np.nan
                     for i in range(n)
                 ], dtype=float)
-                perm_corr, _ = self._safe_spearman(permuted, perm_neighbor_means)
+                perm_corr, _perm_p, _perm_reason = self._safe_spearman(permuted, perm_neighbor_means)
                 perm_neighbor_corr.append(perm_corr)
 
             permutation_records.append({
@@ -1085,6 +1109,7 @@ class Dendrite:
                 "neighbor_spearman_r": neighbor_corr,
                 "neighbor_spearman_p": neighbor_corr_p,
                 "neighbor_spearman_permutation_p": self._permutation_p_value(neighbor_corr, perm_neighbor_corr),
+                "neighbor_spearman_reason": neighbor_corr_reason,
                 "n_permutations": int(max(0, int(permutation_count))),
             })
 
@@ -1152,10 +1177,43 @@ class Dendrite:
             isolated_finite = isolated_values[np.isfinite(isolated_values)]
             clustered_mean = float(np.mean(clustered_finite)) if len(clustered_finite) else np.nan
             isolated_mean = float(np.mean(isolated_finite)) if len(isolated_finite) else np.nan
-            clustered_std = float(np.std(clustered_finite, ddof=1)) if len(clustered_finite) > 1 else 0.0
-            isolated_std = float(np.std(isolated_finite, ddof=1)) if len(isolated_finite) > 1 else 0.0
+            clustered_std = (
+                float(np.std(clustered_finite, ddof=1))
+                if len(clustered_finite) > 1
+                else (0.0 if len(clustered_finite) == 1 else np.nan)
+            )
+            isolated_std = (
+                float(np.std(isolated_finite, ddof=1))
+                if len(isolated_finite) > 1
+                else (0.0 if len(isolated_finite) == 1 else np.nan)
+            )
             u_stat, u_p = self._safe_stat_test(mannwhitneyu, clustered_values, isolated_values)
             bm_stat, bm_p = self._safe_stat_test(brunnermunzel, clustered_values, isolated_values)
+            if len(clustered_finite) == 0 and len(isolated_finite) == 0:
+                comparison_reason = "empty_clustered_and_isolated_groups"
+            elif len(clustered_finite) == 0:
+                comparison_reason = "empty_clustered_group"
+            elif len(isolated_finite) == 0:
+                comparison_reason = "empty_isolated_group"
+            elif len(clustered_finite) < 2 or len(isolated_finite) < 2:
+                comparison_reason = (
+                    f"not_enough_values_for_two_sample_tests("
+                    f"n_clustered={len(clustered_finite)},n_isolated={len(isolated_finite)})"
+                )
+            elif not np.isfinite(u_stat) or not np.isfinite(u_p) or not np.isfinite(bm_stat) or not np.isfinite(bm_p):
+                comparison_reason = "statistical_test_returned_nan"
+            else:
+                comparison_reason = "ok"
+            if comparison_reason != "ok":
+                print(
+                    "[clustered-vs-isolated] "
+                    f"{self.name}: tests for {metric} are NaN/limited; "
+                    f"reason={comparison_reason}; "
+                    f"n_clustered={len(clustered_finite)}; "
+                    f"n_isolated={len(isolated_finite)}; "
+                    f"dbscan_noise_fraction={getattr(self, 'dbscan_noise', np.nan)}",
+                    flush=True,
+                )
             test_records.append({
                 "dendrite": self.name,
                 "analysis": "clustered_vs_isolated",
@@ -1183,6 +1241,7 @@ class Dendrite:
                 "brunnermunzel_statistic": bm_stat,
                 "brunnermunzel_p": bm_p,
                 "cliffs_delta": self._cliffs_delta(clustered_values, isolated_values),
+                "comparison_reason": comparison_reason,
             })
 
         cluster_sizes = [record["cluster_size"] for record in cluster_records]
@@ -1424,7 +1483,7 @@ class Dendrite:
             metric = permutation_record.get("metric", "unknown")
             metric_prefix = f"autocorr_{metric}"
             for key, value in permutation_record.items():
-                if key in {"dendrite", "metric"}:
+                if key in {"dendrite", "metric", "neighbor_spearman_reason"}:
                     continue
                 if self._is_scalar_metric_value(value):
                     record[f"{metric_prefix}_{key}"] = self._as_metric_scalar(value)
@@ -1439,7 +1498,7 @@ class Dendrite:
             analysis = test_record.get("analysis", "test")
             test_prefix = f"test_{analysis}_{metric}"
             for key, value in test_record.items():
-                if key in {"dendrite", "analysis", "metric", "n_clustered", "n_isolated"}:
+                if key in {"dendrite", "analysis", "metric", "n_clustered", "n_isolated", "comparison_reason"}:
                     continue
                 if self._is_scalar_metric_value(value):
                     record[f"{test_prefix}_{key}"] = self._as_metric_scalar(value)
