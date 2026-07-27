@@ -317,6 +317,7 @@ def _projection_distance_summary(graph: DendriticGraph, spine_points: Dict[str, 
             "median": np.nan,
             "q90": np.nan,
             "max": np.nan,
+            "distances": [],
             "worst_spine_id": None,
             "graph_bbox_min": graph_bbox_min,
             "graph_bbox_max": graph_bbox_max,
@@ -372,6 +373,7 @@ def _projection_distance_summary(graph: DendriticGraph, spine_points: Dict[str, 
             "median": np.nan,
             "q90": np.nan,
             "max": np.nan,
+            "distances": [],
             "worst_spine_id": worst_spine_id,
             "graph_bbox_min": graph_bbox_min,
             "graph_bbox_max": graph_bbox_max,
@@ -386,12 +388,275 @@ def _projection_distance_summary(graph: DendriticGraph, spine_points: Dict[str, 
         "median": float(np.median(distances)),
         "q90": float(np.quantile(distances, 0.90)),
         "max": float(np.max(distances)),
+        "distances": distances.tolist(),
         "worst_spine_id": worst_spine_id,
         "graph_bbox_min": graph_bbox_min,
         "graph_bbox_max": graph_bbox_max,
         "spine_bbox_min": spine_bbox_min,
         "spine_bbox_max": spine_bbox_max,
     }
+
+
+def _spine_expected_branch_id(spine_id: str) -> Optional[str]:
+    """Извлекает ожидаемый branch-id из пути шипика.
+
+    Входные данные: `spine_id`, обычно вида
+    `limb_000/branch_000/spines/spine_000.off`.
+    Действие: находит компоненты `limb_*` и `branch_*`.
+    Выходные данные: строка `limb_*/branch_*` или `None`.
+    """
+    parts = Path(str(spine_id).replace("\\", "/")).parts
+    limb_part = next((part for part in parts if part.startswith("limb_")), None)
+    branch_part = next((part for part in parts if part.startswith("branch_")), None)
+    if limb_part is None or branch_part is None:
+        return None
+    return f"{limb_part}/{branch_part}"
+
+
+def _edge_dendrite_id(graph: DendriticGraph, u: int, v: int) -> str:
+    """Возвращает dendrite_id ребра графа.
+
+    Входные данные: граф и id двух концов ребра.
+    Действие: сравнивает `dendrite_id` конечных узлов; если они совпадают,
+    возвращает это значение, иначе формирует смешанный id.
+    Выходные данные: строковый идентификатор dendrite/branch.
+    """
+    u_id = str(graph.G.nodes[u].get("dendrite_id", ""))
+    v_id = str(graph.G.nodes[v].get("dendrite_id", ""))
+    if u_id == v_id:
+        return u_id
+    return f"{u_id}|{v_id}"
+
+
+def _project_point_to_segment_local(
+    point: np.ndarray,
+    seg_start: np.ndarray,
+    seg_end: np.ndarray,
+) -> Tuple[np.ndarray, float, float]:
+    """Проецирует точку на 3D-сегмент.
+
+    Входные данные: точка и два конца сегмента.
+    Действие: вычисляет ближайшую точку на сегменте, параметр `t` и
+    евклидово расстояние.
+    Выходные данные: `(projected_point, t, distance)`.
+    """
+    direction = seg_end - seg_start
+    segment_length_sq = float(np.dot(direction, direction))
+    if segment_length_sq < 1e-20:
+        return seg_start.copy(), 0.0, float(np.linalg.norm(point - seg_start))
+    t = float(np.dot(point - seg_start, direction) / segment_length_sq)
+    t = max(0.0, min(1.0, t))
+    projection = seg_start + t * direction
+    return projection, t, float(np.linalg.norm(point - projection))
+
+
+def _nearest_edge_on_expected_branch(
+    graph: DendriticGraph,
+    point: np.ndarray,
+    expected_branch_id: Optional[str],
+) -> Dict[str, Any]:
+    """Ищет ближайшее ребро на ожидаемой branch шипика.
+
+    Входные данные: граф, точка шипика и expected branch-id.
+    Действие: фильтрует рёбра по `dendrite_id`, проецирует точку на каждое
+    подходящее ребро и выбирает минимальное расстояние.
+    Выходные данные: словарь с ближайшим ребром, точкой проекции и расстоянием.
+    """
+    best: Dict[str, Any] = {
+        "branch_edge_source": None,
+        "branch_edge_target": None,
+        "branch_edge_id": None,
+        "branch_projected_point": np.array([np.nan, np.nan, np.nan], dtype=float),
+        "branch_edge_position": np.nan,
+        "branch_distance_to_edge": np.nan,
+    }
+    if expected_branch_id is None:
+        return best
+
+    best_distance = np.inf
+    point = np.asarray(point, dtype=float)
+    for u, v, _edata in graph.G.edges(data=True):
+        if _edge_dendrite_id(graph, u, v) != expected_branch_id:
+            continue
+        pu = graph.node_position(u)
+        pv = graph.node_position(v)
+        projected_point, t, distance = _project_point_to_segment_local(point, pu, pv)
+        if distance < best_distance:
+            best_distance = distance
+            best = {
+                "branch_edge_source": u,
+                "branch_edge_target": v,
+                "branch_edge_id": f"{u}_{v}",
+                "branch_projected_point": projected_point,
+                "branch_edge_position": t,
+                "branch_distance_to_edge": distance,
+            }
+    return best
+
+
+def _build_projection_branch_diagnostics(
+    graph: DendriticGraph,
+    spine_points: Dict[str, np.ndarray],
+    projected_spines: Sequence[Any],
+    unassigned_ids: Sequence[str],
+) -> pd.DataFrame:
+    """Формирует таблицу проверки соответствия шипика и branch проекции.
+
+    Входные данные: граф, исходные точки шипиков, список спроецированных
+    шипиков и список неспроецированных id.
+    Действие: для каждого шипика извлекает expected branch из пути, определяет
+    branch фактически выбранного ребра и отдельно считает ближайшее расстояние
+    до skeleton ожидаемой branch.
+    Выходные данные: `DataFrame` с диагностикой проекции.
+    """
+    projected_by_id = {spine.spine_id: spine for spine in projected_spines}
+    unassigned_set = set(unassigned_ids)
+    rows = []
+    for spine_id, point in spine_points.items():
+        point = np.asarray(point, dtype=float)
+        expected_branch_id = _spine_expected_branch_id(spine_id)
+        projected = projected_by_id.get(spine_id)
+        projected_branch_id = (
+            _edge_dendrite_id(graph, projected.edge_source, projected.edge_target)
+            if projected is not None
+            else None
+        )
+        expected_projection = _nearest_edge_on_expected_branch(graph, point, expected_branch_id)
+        branch_projected_point = np.asarray(expected_projection["branch_projected_point"], dtype=float)
+        rows.append(
+            {
+                "spine_id": spine_id,
+                "expected_branch_id": expected_branch_id,
+                "projected_branch_id": projected_branch_id,
+                "same_branch": (
+                    bool(expected_branch_id == projected_branch_id)
+                    if projected is not None and expected_branch_id is not None
+                    else False
+                ),
+                "is_projected": projected is not None,
+                "is_unassigned": spine_id in unassigned_set,
+                "network_distance_to_edge": projected.distance_to_edge if projected is not None else np.nan,
+                "expected_branch_distance_to_edge": expected_projection["branch_distance_to_edge"],
+                "expected_branch_edge_id": expected_projection["branch_edge_id"],
+                "expected_branch_edge_source": expected_projection["branch_edge_source"],
+                "expected_branch_edge_target": expected_projection["branch_edge_target"],
+                "original_x": point[0],
+                "original_y": point[1],
+                "original_z": point[2],
+                "expected_projected_x": branch_projected_point[0],
+                "expected_projected_y": branch_projected_point[1],
+                "expected_projected_z": branch_projected_point[2],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _plot_branch_projection_debug(
+    graph: DendriticGraph,
+    branch: Branch,
+    spine_id: str,
+    spine_mesh: Any,
+    original_point: np.ndarray,
+    projected_point: np.ndarray,
+    distance_to_edge: float,
+    save_path: Path,
+    show: bool = True,
+) -> Optional[Any]:
+    """Строит 3D-график расстояния от шипика до skeleton его branch.
+
+    Входные данные: полный граф, объект branch, id шипика, mesh шипика,
+    исходная точка крепления, ближайшая точка на skeleton branch, расстояние,
+    путь сохранения и флаг отображения.
+    Действие: рисует рёбра skeleton соответствующей branch, mesh шипика,
+    точку крепления, точку проекции и отрезок кратчайшего расстояния.
+    Выходные данные: Plotly figure или `None`, если Plotly недоступен.
+    """
+    try:
+        import plotly.graph_objects as go
+    except Exception:
+        warnings.warn("plotly is required for branch projection debug plots.", stacklevel=2)
+        return None
+
+    branch_id = f"{branch.limb_name}/{branch.name}"
+    fig = go.Figure()
+
+    for u, v, _edata in graph.G.edges(data=True):
+        if _edge_dendrite_id(graph, u, v) != branch_id:
+            continue
+        pu = graph.node_position(u)
+        pv = graph.node_position(v)
+        fig.add_trace(
+            go.Scatter3d(
+                x=[pu[0], pv[0], None],
+                y=[pu[1], pv[1], None],
+                z=[pu[2], pv[2], None],
+                mode="lines",
+                line=dict(color="steelblue", width=5),
+                name="branch skeleton",
+                showlegend=False,
+            )
+        )
+
+    if spine_mesh is not None and hasattr(spine_mesh, "vertices") and hasattr(spine_mesh, "faces"):
+        vertices = np.asarray(spine_mesh.vertices, dtype=float)
+        faces = np.asarray(spine_mesh.faces, dtype=int)
+        if vertices.ndim == 2 and vertices.shape[1] >= 3 and faces.ndim == 2 and faces.shape[1] >= 3:
+            fig.add_trace(
+                go.Mesh3d(
+                    x=vertices[:, 0],
+                    y=vertices[:, 1],
+                    z=vertices[:, 2],
+                    i=faces[:, 0],
+                    j=faces[:, 1],
+                    k=faces[:, 2],
+                    color="lightpink",
+                    opacity=0.55,
+                    name="spine mesh",
+                )
+            )
+
+    original_point = np.asarray(original_point, dtype=float)
+    projected_point = np.asarray(projected_point, dtype=float)
+    fig.add_trace(
+        go.Scatter3d(
+            x=[original_point[0]],
+            y=[original_point[1]],
+            z=[original_point[2]],
+            mode="markers",
+            marker=dict(size=6, color="crimson"),
+            name="attachment point",
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=[projected_point[0]],
+            y=[projected_point[1]],
+            z=[projected_point[2]],
+            mode="markers",
+            marker=dict(size=6, color="black"),
+            name="nearest skeleton point",
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=[original_point[0], projected_point[0]],
+            y=[original_point[1], projected_point[1]],
+            z=[original_point[2], projected_point[2]],
+            mode="lines",
+            line=dict(color="red", width=7),
+            name=f"shortest distance = {distance_to_edge:.2f}",
+        )
+    )
+    fig.update_layout(
+        title=f"{spine_id}<br>branch={branch_id}, distance={distance_to_edge:.2f}",
+        scene=dict(aspectmode="data"),
+        margin=dict(l=0, r=0, t=60, b=0),
+    )
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(str(save_path))
+    if show:
+        fig.show()
+    return fig
 
 
 @dataclass
@@ -603,6 +868,7 @@ class NeuronNetworkAnalysisResult:
     graph: DendriticGraph
     projected_spines: List[Any]
     unassigned_ids: List[str]
+    projection_branch_diagnostics: pd.DataFrame
     binned_intensity: pd.DataFrame
     smooth_d: np.ndarray
     smooth_lambda: np.ndarray
@@ -682,6 +948,15 @@ class Neuron:
         """
         return [branch for limb in self.limbs for branch in limb.branches]
 
+    def branch_by_id(self) -> Dict[str, Branch]:
+        """Возвращает branch-объекты по id `limb_*/branch_*`.
+
+        Входные данные: список branch-объектов нейрона.
+        Действие: формирует ключ из имени limb и имени branch.
+        Выходные данные: словарь `{branch_id: Branch}`.
+        """
+        return {f"{branch.limb_name}/{branch.name}": branch for branch in self.branches}
+
     @property
     def all_spine_points(self) -> Dict[str, np.ndarray]:
         """Возвращает точки всех загруженных шипиков без фильтрации ветвей.
@@ -728,6 +1003,26 @@ class Neuron:
         soma_point = self.soma.centroid
         graphs: List[DendriticGraph] = []
         for limb in self.limbs:
+            limb_branch_graphs: List[DendriticGraph] = []
+            for branch in limb.branches:
+                if branch.skeleton is None:
+                    continue
+                try:
+                    limb_branch_graphs.append(
+                        build_dendritic_graph_from_skeleton(
+                            branch.skeleton,
+                            soma_point=soma_point,
+                            dendrite_id=f"{limb.name}/{branch.name}",
+                            dendrite_type=branch.dendrite_type,
+                            snap_threshold=snap_threshold,
+                        )
+                    )
+                except Exception as exc:
+                    warnings.warn(f"Cannot build graph from {branch.skeleton_path}: {exc}", stacklevel=2)
+            if limb_branch_graphs:
+                graphs.extend(limb_branch_graphs)
+                continue
+
             if limb.skeleton is not None:
                 try:
                     graphs.append(
@@ -742,21 +1037,6 @@ class Neuron:
                     continue
                 except Exception as exc:
                     warnings.warn(f"Cannot build graph from {limb.skeleton_path}: {exc}", stacklevel=2)
-            for branch in limb.branches:
-                if branch.skeleton is None:
-                    continue
-                try:
-                    graphs.append(
-                        build_dendritic_graph_from_skeleton(
-                            branch.skeleton,
-                            soma_point=soma_point,
-                            dendrite_id=f"{limb.name}/{branch.name}",
-                            dendrite_type=branch.dendrite_type,
-                            snap_threshold=snap_threshold,
-                        )
-                    )
-                except Exception as exc:
-                    warnings.warn(f"Cannot build graph from {branch.skeleton_path}: {exc}", stacklevel=2)
         if not graphs:
             raise ValueError(f"Neuron {self.name!r} has no valid limb or branch skeletons.")
         graph = _compose_graphs(graphs, snap_threshold=snap_threshold)
@@ -931,7 +1211,9 @@ class Neuron:
         self,
         output_dir: str | Path = "output_neuron_network_analysis",
         snap_threshold: float = 2.0,
-        max_distance_to_edge: float = 5.0,
+        max_distance_to_edge: Optional[float] = None,
+        auto_max_distance_to_edge_quantile: float = 0.90,
+        auto_max_distance_to_edge_margin: float = 1.05,
         min_valid_branch_spines: int = 3,
         bin_size: float = 25.0,
         covariates: Sequence[str] = ("intercept", "distance_to_soma", "distance_to_soma_squared"),
@@ -942,6 +1224,9 @@ class Neuron:
         random_state: Optional[int] = 42,
         save_outputs: bool = True,
         log_projection_diagnostics: bool = True,
+        save_projection_branch_debug_plots: bool = True,
+        show_projection_branch_debug_plots: bool = True,
+        projection_branch_debug_plot_count: int = 3,
     ) -> NeuronNetworkAnalysisResult:
         """Запускает полный анализ пространственной организации шипиков на сети нейрона.
         Строит дендритный граф, проецирует шипики на сеть, считает
@@ -957,15 +1242,39 @@ class Neuron:
         graph = self.build_network_graph(snap_threshold=snap_threshold)
         spine_points = self.get_spine_points(min_valid_branch_spines=min_valid_branch_spines)
         projection_distance_summary = _projection_distance_summary(graph, spine_points)
+        projection_threshold_is_auto = max_distance_to_edge is None
+        if projection_threshold_is_auto:
+            nearest_distances = np.asarray(projection_distance_summary.get("distances", []), dtype=float)
+            nearest_distances = nearest_distances[np.isfinite(nearest_distances)]
+            if len(nearest_distances) > 0:
+                quantile = float(np.clip(auto_max_distance_to_edge_quantile, 0.0, 1.0))
+                margin = float(auto_max_distance_to_edge_margin)
+                max_distance_to_edge_effective = float(np.quantile(nearest_distances, quantile) * margin)
+            else:
+                max_distance_to_edge_effective = 0.0
+        else:
+            max_distance_to_edge_effective = float(max_distance_to_edge)
         projected_spines, unassigned_ids = project_spines_to_graph(
             graph,
             spine_points,
-            max_distance_to_edge=max_distance_to_edge,
+            max_distance_to_edge=max_distance_to_edge_effective,
+        )
+        projection_branch_diagnostics = _build_projection_branch_diagnostics(
+            graph,
+            spine_points,
+            projected_spines,
+            unassigned_ids,
         )
         if log_projection_diagnostics:
+            threshold_label = (
+                f"auto={max_distance_to_edge_effective:.4f} "
+                f"(q={auto_max_distance_to_edge_quantile}, margin={auto_max_distance_to_edge_margin})"
+                if projection_threshold_is_auto
+                else f"{max_distance_to_edge_effective:.4f}"
+            )
             print(
                 "[network projection] "
-                f"{self.name}: threshold={max_distance_to_edge}, "
+                f"{self.name}: threshold={threshold_label}, "
                 f"projected={len(projected_spines)}/{len(spine_points)}, "
                 f"nearest_edge_distance min={projection_distance_summary['min']:.4f}, "
                 f"q10={projection_distance_summary['q10']:.4f}, "
@@ -974,6 +1283,37 @@ class Neuron:
                 f"max={projection_distance_summary['max']:.4f}",
                 flush=True,
             )
+            if len(projection_branch_diagnostics) > 0:
+                projected_diag = projection_branch_diagnostics[
+                    projection_branch_diagnostics["is_projected"].astype(bool)
+                ]
+                same_branch_count = int(projected_diag["same_branch"].sum()) if len(projected_diag) else 0
+                mismatch_count = int(len(projected_diag) - same_branch_count)
+                missing_branch_count = int(
+                    projection_branch_diagnostics["expected_branch_distance_to_edge"].isna().sum()
+                )
+                print(
+                    "[network projection branch-check] "
+                    f"{self.name}: same_branch={same_branch_count}/{len(projected_diag)}, "
+                    f"mismatch={mismatch_count}, "
+                    f"missing_expected_branch_edges={missing_branch_count}",
+                    flush=True,
+                )
+                if mismatch_count > 0:
+                    mismatch_preview = projected_diag[~projected_diag["same_branch"].astype(bool)].head(5)
+                    print(
+                        "[network projection branch-check] mismatches preview:\n"
+                        + mismatch_preview[
+                            [
+                                "spine_id",
+                                "expected_branch_id",
+                                "projected_branch_id",
+                                "network_distance_to_edge",
+                                "expected_branch_distance_to_edge",
+                            ]
+                        ].to_string(index=False),
+                        flush=True,
+                    )
             if len(projected_spines) == 0 and len(spine_points) > 0:
                 print(
                     "[network projection] "
@@ -991,6 +1331,39 @@ class Neuron:
                     f"{projection_distance_summary['spine_bbox_max']}",
                     flush=True,
                 )
+
+        if save_projection_branch_debug_plots and len(projection_branch_diagnostics) > 0:
+            branch_map = self.branch_by_id()
+            debug_dir = Path(output_dir) / self.name / "projection_branch_debug"
+            finite_diag = projection_branch_diagnostics[
+                projection_branch_diagnostics["expected_branch_distance_to_edge"].notna()
+            ].copy()
+            finite_diag = finite_diag.sort_values("expected_branch_distance_to_edge", ascending=False)
+            for rank, row in enumerate(finite_diag.head(int(projection_branch_debug_plot_count)).itertuples(index=False), start=1):
+                branch = branch_map.get(row.expected_branch_id)
+                if branch is None:
+                    continue
+                spine_mesh = branch.spine_meshes.get(row.spine_id)
+                original_point = np.array([row.original_x, row.original_y, row.original_z], dtype=float)
+                projected_point = np.array(
+                    [row.expected_projected_x, row.expected_projected_y, row.expected_projected_z],
+                    dtype=float,
+                )
+                safe_spine_name = str(row.spine_id).replace("\\", "_").replace("/", "_").replace(":", "_")
+                save_path = debug_dir / f"top_{rank}_{safe_spine_name}.html"
+                fig = _plot_branch_projection_debug(
+                    graph=graph,
+                    branch=branch,
+                    spine_id=row.spine_id,
+                    spine_mesh=spine_mesh,
+                    original_point=original_point,
+                    projected_point=projected_point,
+                    distance_to_edge=float(row.expected_branch_distance_to_edge),
+                    save_path=save_path,
+                    show=show_projection_branch_debug_plots,
+                )
+                if fig is not None:
+                    print(f"[network projection branch-debug] saved: {save_path}", flush=True)
 
         binned_intensity = estimate_binned_intensity(graph, projected_spines, bin_size=bin_size)
         smooth_d, smooth_lambda = estimate_smooth_intensity(graph, projected_spines)
@@ -1051,6 +1424,11 @@ class Neuron:
             poisson_result=poisson_result,
             k_result=k_result,
         )
+        projected_diag = projection_branch_diagnostics[
+            projection_branch_diagnostics["is_projected"].astype(bool)
+        ] if len(projection_branch_diagnostics) else projection_branch_diagnostics
+        same_branch_projected_count = int(projected_diag["same_branch"].sum()) if len(projected_diag) else 0
+        branch_mismatch_count = int(len(projected_diag) - same_branch_projected_count)
         metadata_vector.update(
             {
                 "projection_nearest_edge_distance_min": projection_distance_summary["min"],
@@ -1059,7 +1437,17 @@ class Neuron:
                 "projection_nearest_edge_distance_q90": projection_distance_summary["q90"],
                 "projection_nearest_edge_distance_max": projection_distance_summary["max"],
                 "projection_worst_spine_id": projection_distance_summary["worst_spine_id"],
-                "projection_max_distance_to_edge": max_distance_to_edge,
+                "projection_max_distance_to_edge": max_distance_to_edge_effective,
+                "projection_threshold_auto": projection_threshold_is_auto,
+                "projection_threshold_quantile": auto_max_distance_to_edge_quantile if projection_threshold_is_auto else np.nan,
+                "projection_threshold_margin": auto_max_distance_to_edge_margin if projection_threshold_is_auto else np.nan,
+                "projection_same_branch_count": same_branch_projected_count,
+                "projection_branch_mismatch_count": branch_mismatch_count,
+                "projection_same_branch_rate": (
+                    same_branch_projected_count / len(projected_diag)
+                    if len(projected_diag)
+                    else np.nan
+                ),
             }
         )
 
@@ -1067,6 +1455,7 @@ class Neuron:
             graph=graph,
             projected_spines=projected_spines,
             unassigned_ids=unassigned_ids,
+            projection_branch_diagnostics=projection_branch_diagnostics,
             binned_intensity=binned_intensity,
             smooth_d=smooth_d,
             smooth_lambda=smooth_lambda,
@@ -1457,6 +1846,7 @@ class Neuron:
 
         result.binned_intensity.to_csv(neuron_dir / "binned_intensity.csv", index=False)
         projected_spines_dataframe(result.projected_spines).to_csv(neuron_dir / "projected_spines.csv", index=False)
+        result.projection_branch_diagnostics.to_csv(neuron_dir / "projection_branch_diagnostics.csv", index=False)
         pd.DataFrame([result.intensity_cdf_test]).to_csv(neuron_dir / "intensity_cdf_test.csv", index=False)
         pd.DataFrame([result.intensity_lr_test]).to_csv(neuron_dir / "intensity_lr_test.csv", index=False)
         if result.k_result is not None:
