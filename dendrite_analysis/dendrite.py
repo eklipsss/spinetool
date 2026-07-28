@@ -624,13 +624,22 @@ class Dendrite:
             if np.nanstd(b_valid) <= 0:
                 return float("nan"), float("nan"), "constant_neighbor_mean"
             result = spearmanr(a_valid, b_valid)
-            statistic = float(result.statistic)
-            p_value = float(result.pvalue)
+            if hasattr(result, "statistic"):
+                statistic = float(result.statistic)
+            elif hasattr(result, "correlation"):
+                statistic = float(result.correlation)
+            else:
+                statistic = float(result[0])
+
+            if hasattr(result, "pvalue"):
+                p_value = float(result.pvalue)
+            else:
+                p_value = float(result[1])
             if not np.isfinite(statistic) or not np.isfinite(p_value):
                 return statistic, p_value, "spearman_returned_nan"
             return statistic, p_value, "ok"
         except Exception as exc:
-            return float("nan"), float("nan"), f"exception:{type(exc).__name__}"
+            return float("nan"), float("nan"), f"exception:{type(exc).__name__}:{exc}"
 
     @staticmethod
     def _moran_i_from_weights(values: np.ndarray, weights: np.ndarray) -> float:
