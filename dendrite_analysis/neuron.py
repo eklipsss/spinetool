@@ -1361,6 +1361,7 @@ class Neuron:
         n_r_values: int = 20,
         r_max: Optional[float] = None,
         n_simulations: int = 99,
+        n_jobs: int = 8,
         k_correction: str = "geometric",
         random_state: Optional[int] = 42,
         save_outputs: bool = True,
@@ -1376,7 +1377,8 @@ class Neuron:
         неоднородную пуассоновскую модель и сетевую функцию Рипли.
 
         Входные данные: параметры построения графа, проекции шипиков,
-        интенсивности, пуассоновской модели, K-функции, сохранения и флаг
+        интенсивности, пуассоновской модели, K-функции, число параллельных
+        процессов для Monte Carlo симуляций, параметры сохранения и флаг
         отображения progress bar.
         Выходные данные: объект `NeuronNetworkAnalysisResult` с графом,
         projected spines, таблицами анализа, ML-вектором и metadata-вектором.
@@ -1555,9 +1557,11 @@ class Neuron:
                     projected_spines,
                     r_values,
                     n_simulations=n_simulations,
+                    n_jobs=n_jobs,
                     intensity_model=poisson_result,
                     correction=k_correction,
                     random_state=random_state,
+                    timing_label=f"{self.name}:full",
                 )
                 self._log_timing("ripley_k_envelopes", stage_start)
                 _advance_progress(network_progress, "ripley_k_envelopes")
@@ -1573,6 +1577,7 @@ class Neuron:
             projected_spines=projected_spines,
             n_r_values=n_r_values,
             n_simulations=n_simulations,
+            n_jobs=n_jobs,
             k_correction=k_correction,
             covariates=covariates,
             random_state=random_state,
@@ -1882,6 +1887,7 @@ class Neuron:
         projected_spines: Sequence[Any],
         n_r_values: int,
         n_simulations: int,
+        n_jobs: int,
         k_correction: str,
         covariates: Sequence[str],
         random_state: Optional[int],
@@ -1891,7 +1897,8 @@ class Neuron:
         типу рёбер и считает compartment-specific K-кривые.
 
         Входные данные: полный граф нейрона, спроецированные шипики, параметры
-        K-функции, ковариаты пуассоновской модели и seed.
+        K-функции, число параллельных процессов для Monte Carlo симуляций,
+        ковариаты пуассоновской модели и seed.
         Выходные данные: словарь `{тип дендрита: KFunctionResult}`.
         """
         results: Dict[str, KFunctionResult] = {}
@@ -1926,10 +1933,12 @@ class Neuron:
                     compartment_spines,
                     r_values,
                     n_simulations=n_simulations,
+                    n_jobs=n_jobs,
                     intensity_model=compartment_poisson,
                     correction=k_correction,
                     fit_intensity_if_missing=False,
                     random_state=int(rng.integers(0, np.iinfo(np.int32).max)),
+                    timing_label=f"{self.name}:{dendrite_type}",
                 )
             except Exception as exc:
                 warnings.warn(

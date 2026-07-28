@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import math
+import os
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import networkx as nx
@@ -153,6 +156,7 @@ class KFunctionResult:
     p_value: Optional[float] = None
     method: str = "homogeneous"
     interpretation: str = ""
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Преобразует результат K-анализа в таблицу.
@@ -1564,6 +1568,8 @@ def ripley_k_network(
     Выходные данные: объект `KFunctionResult` с наблюдаемой и ожидаемой
     K-кривой.
     """
+    total_start = perf_counter()
+    diagnostics: Dict[str, Any] = {}
     n = len(spines)
     r_values = np.asarray(r_values, dtype=float)
     correction = correction.lower()
@@ -1582,7 +1588,11 @@ def ripley_k_network(
         )
 
     if dist_matrix is None:
+        stage_start = perf_counter()
         dist_matrix = compute_spine_pairwise_distances(graph, spines)
+        diagnostics["pairwise_distance_seconds"] = perf_counter() - stage_start
+    else:
+        diagnostics["pairwise_distance_seconds"] = 0.0
 
     L = graph.total_length
     method = "homogeneous" if intensity is None else "inhomogeneous"
@@ -1590,8 +1600,13 @@ def ripley_k_network(
     k_obs = np.zeros(len(r_values))
     multiplicity: Optional[np.ndarray] = None
     if use_geometric:
+        stage_start = perf_counter()
         multiplicity = _geometric_multiplicity_matrix(graph, spines, dist_matrix)
+        diagnostics["geometric_multiplicity_seconds"] = perf_counter() - stage_start
+    else:
+        diagnostics["geometric_multiplicity_seconds"] = 0.0
 
+    stage_start = perf_counter()
     if intensity is None:
         pair_weights = np.ones_like(dist_matrix, dtype=float)
         np.fill_diagonal(pair_weights, 0.0)
@@ -1618,6 +1633,7 @@ def ripley_k_network(
             mask = (dist_matrix <= r).astype(float)
             np.fill_diagonal(mask, 0.0)
             k_obs[ri] = (1.0 / L) * float(np.sum(mask * weights))
+    diagnostics["k_accumulation_seconds"] = perf_counter() - stage_start
 
     dev = k_obs - k_expected
     max_pos_r = float(r_values[np.argmax(dev)]) if len(dev) else 0.0
@@ -1641,6 +1657,13 @@ def ripley_k_network(
         k_expected=k_expected,
         method=f"{'geometrically_corrected_' if use_geometric else ''}{method}",
         interpretation=interp,
+        diagnostics={
+            **diagnostics,
+            "n_spines": int(n),
+            "n_r_values": int(len(r_values)),
+            "correction": correction,
+            "total_seconds": perf_counter() - total_start,
+        },
     )
 
 
@@ -1755,6 +1778,123 @@ def simulate_poisson_on_graph(
         return results[:n_points]
 
 
+def _resolve_n_jobs(n_jobs: Optional[int], n_tasks: int) -> int:
+    """Определяет эффективное число рабочих процессов.
+
+    Входные данные: желаемое число процессов и число задач.
+    Выходные данные: число процессов от 1 до `n_tasks`.
+    """
+    n_tasks = int(max(1, n_tasks))
+    if n_jobs is None:
+        n_jobs = 1
+    n_jobs = int(n_jobs)
+    if n_jobs < 0:
+        n_jobs = os.cpu_count() or 1
+    if n_jobs == 0:
+        n_jobs = 1
+    return int(max(1, min(n_jobs, n_tasks)))
+
+
+def _print_k_timing(label: str, stage: str, seconds: float) -> None:
+    """Печатает timing-log этапа K-анализа.
+
+    Входные данные: подпись K-анализа, имя этапа и длительность в секундах.
+    Выходные данные: строка timing-log в stdout.
+    """
+    print(f"[time][K] {label}: {stage} took {seconds:.3f}s", flush=True)
+
+
+def _sum_timing_dicts(records: Sequence[Dict[str, float]]) -> Dict[str, float]:
+    """Суммирует одноимённые поля времени из нескольких словарей.
+
+    Входные данные: последовательность словарей timing-метрик.
+    Выходные данные: словарь суммарных длительностей.
+    """
+    total: Dict[str, float] = {}
+    for record in records:
+        for key, value in record.items():
+            total[key] = total.get(key, 0.0) + float(value)
+    return total
+
+
+def _simulate_k_envelope_chunk(args: Tuple[Any, int, np.ndarray, str, np.ndarray, Optional[List[str]], Optional[np.ndarray], np.ndarray]) -> Tuple[np.ndarray, Dict[str, float], int]:
+    """Выполняет пачку Monte Carlo симуляций K-функции.
+
+    Входные данные: tuple с графом, числом точек, радиусами, типом поправки,
+    seeds, параметрами интенсивности и ожидаемой K-кривой.
+    Выходные данные: матрица симулированных K-кривых, timing-метрики пачки и
+    число выполненных симуляций.
+    """
+    (
+        graph,
+        n_points,
+        r_values,
+        correction,
+        seeds,
+        covariate_names,
+        coefficients,
+        k_expected,
+    ) = args
+    k_rows: List[np.ndarray] = []
+    timing = {
+        "simulate_poisson_seconds": 0.0,
+        "simulation_pairwise_distance_seconds": 0.0,
+        "simulation_k_function_seconds": 0.0,
+        "simulation_geometric_multiplicity_seconds": 0.0,
+        "simulation_k_accumulation_seconds": 0.0,
+    }
+
+    if covariate_names is not None and coefficients is not None:
+        coeffs = np.asarray(coefficients, dtype=float)
+
+        def intensity_fn(distance: float) -> float:
+            x = _build_covariates(np.array([distance]), covariate_names)[0]
+            return float(np.exp(np.clip(np.dot(x, coeffs), -500, 500)))
+    else:
+        intensity_fn = None
+
+    for seed in np.asarray(seeds, dtype=np.int64):
+        rng = np.random.default_rng(int(seed))
+        stage_start = perf_counter()
+        sim_spines = simulate_poisson_on_graph(graph, n_points=n_points, intensity_fn=intensity_fn, rng=rng)
+        timing["simulate_poisson_seconds"] += perf_counter() - stage_start
+        if len(sim_spines) < 2:
+            k_rows.append(np.asarray(k_expected, dtype=float))
+            continue
+
+        sim_intensity: Optional[np.ndarray] = None
+        if covariate_names is not None and coefficients is not None:
+            sim_dists = np.array([s.distance_to_soma for s in sim_spines])
+            X_sim = _build_covariates(sim_dists, covariate_names)
+            sim_intensity = np.exp(np.clip(X_sim @ np.asarray(coefficients, dtype=float), -500, 500))
+
+        stage_start = perf_counter()
+        sim_dist_mat = compute_spine_pairwise_distances(graph, sim_spines)
+        timing["simulation_pairwise_distance_seconds"] += perf_counter() - stage_start
+
+        stage_start = perf_counter()
+        sim_k = ripley_k_network(
+            graph,
+            sim_spines,
+            r_values,
+            intensity=sim_intensity,
+            dist_matrix=sim_dist_mat,
+            correction=correction,
+        )
+        timing["simulation_k_function_seconds"] += perf_counter() - stage_start
+        timing["simulation_geometric_multiplicity_seconds"] += float(
+            sim_k.diagnostics.get("geometric_multiplicity_seconds", 0.0)
+        )
+        timing["simulation_k_accumulation_seconds"] += float(
+            sim_k.diagnostics.get("k_accumulation_seconds", 0.0)
+        )
+        k_rows.append(sim_k.k_observed)
+
+    if not k_rows:
+        return np.empty((0, len(r_values)), dtype=float), timing, 0
+    return np.asarray(k_rows, dtype=float), timing, len(k_rows)
+
+
 def compute_simulation_envelopes(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
@@ -1765,21 +1905,27 @@ def compute_simulation_envelopes(
     correction: str = "geometric",
     fit_intensity_if_missing: bool = True,
     random_state: Optional[int] = None,
+    n_jobs: int = 8,
+    timing_label: str = "K",
+    verbose_timing: bool = True,
 ) -> KFunctionResult:
     """Строит Monte Carlo envelope для сетевой функции Рипли.
     Вычисляет наблюдаемую K-кривую, симулирует пуассоновские точки
     на том же графе, строит нижнюю/верхнюю envelope и Monte Carlo p-значение.
 
     Входные данные: дендритный граф, наблюдаемые шипики, значения радиуса,
-    число симуляций, модель интенсивности, способ поправки и seed.
+    число симуляций, модель интенсивности, способ поправки, seed, число
+    параллельных процессов и параметры timing-лога.
     Выходные данные: объект `KFunctionResult` с наблюдаемой, ожидаемой и
     симулированными границами K-кривой.
     """
+    total_start = perf_counter()
     rng = np.random.default_rng(random_state)
     n = len(spines)
     r_values = np.asarray(r_values, dtype=float)
     use_geometric = correction.lower() in {"geometric", "reference", "kl", "k_l"}
     n_simulations = int(max(0, n_simulations))
+    n_jobs_effective = _resolve_n_jobs(n_jobs, max(1, n_simulations))
 
     if n < 2:
         k_exp = r_values.copy() if use_geometric else 2.0 * r_values
@@ -1792,11 +1938,19 @@ def compute_simulation_envelopes(
             p_value=1.0,
             method="inhomogeneous",
             interpretation="Too few spines for simulation envelopes.",
+            diagnostics={
+                "n_jobs": int(n_jobs_effective),
+                "n_simulations": int(n_simulations),
+                "total_seconds": perf_counter() - total_start,
+            },
         )
 
     if intensity_model is None and fit_intensity_if_missing:
         try:
+            stage_start = perf_counter()
             intensity_model = fit_inhomogeneous_poisson(graph, spines)
+            if verbose_timing:
+                _print_k_timing(timing_label, "fit_intensity_if_missing", perf_counter() - stage_start)
         except Exception as exc:
             warnings.warn(f"Intensity model fitting failed: {exc}; using homogeneous CSR.", stacklevel=2)
             intensity_model = None
@@ -1806,7 +1960,13 @@ def compute_simulation_envelopes(
     else:
         obs_intensity = None
 
+    stage_start = perf_counter()
     obs_dist = compute_spine_pairwise_distances(graph, spines)
+    observed_pairwise_seconds = perf_counter() - stage_start
+    if verbose_timing:
+        _print_k_timing(timing_label, "observed_pairwise_distances", observed_pairwise_seconds)
+
+    stage_start = perf_counter()
     k_obs_result = ripley_k_network(
         graph,
         spines,
@@ -1815,18 +1975,13 @@ def compute_simulation_envelopes(
         dist_matrix=obs_dist,
         correction=correction,
     )
+    observed_k_seconds = perf_counter() - stage_start
+    observed_geometric_seconds = float(k_obs_result.diagnostics.get("geometric_multiplicity_seconds", 0.0))
+    if verbose_timing:
+        _print_k_timing(timing_label, "observed_k_function", observed_k_seconds)
+        _print_k_timing(timing_label, "observed_geometric_multiplicity", observed_geometric_seconds)
     k_observed = k_obs_result.k_observed
     k_expected = k_obs_result.k_expected
-
-    if intensity_model is not None:
-        covariate_names = intensity_model.covariate_names
-        theta_hat = intensity_model.coefficients
-
-        def intensity_fn(d: float) -> float:
-            x = _build_covariates(np.array([d]), covariate_names)[0]
-            return float(np.exp(np.clip(np.dot(x, theta_hat), -500, 500)))
-    else:
-        intensity_fn = None
 
     if n_simulations <= 0:
         return KFunctionResult(
@@ -1838,34 +1993,102 @@ def compute_simulation_envelopes(
             p_value=np.nan,
             method=k_obs_result.method,
             interpretation="K function computed without Monte Carlo simulations.",
+            diagnostics={
+                "n_jobs": int(n_jobs_effective),
+                "n_simulations": int(n_simulations),
+                "observed_pairwise_distance_seconds": observed_pairwise_seconds,
+                "observed_k_function_seconds": observed_k_seconds,
+                "observed_geometric_multiplicity_seconds": observed_geometric_seconds,
+                "total_seconds": perf_counter() - total_start,
+            },
         )
 
-    k_sim_all = np.zeros((n_simulations, len(r_values)))
-    iter_range: Any = range(n_simulations)
-    if _TQDM:
-        iter_range = _tqdm(iter_range, desc="K envelopes", leave=False)
+    simulation_start = perf_counter()
+    seeds = rng.integers(
+        0,
+        np.iinfo(np.int32).max,
+        size=n_simulations,
+        dtype=np.int64,
+    )
+    if intensity_model is not None:
+        worker_covariates = list(intensity_model.covariate_names)
+        worker_coefficients = np.asarray(intensity_model.coefficients, dtype=float)
+    else:
+        worker_covariates = None
+        worker_coefficients = None
 
-    for sim in iter_range:
-        sim_spines = simulate_poisson_on_graph(graph, n_points=n, intensity_fn=intensity_fn, rng=rng)
-        if len(sim_spines) < 2:
-            k_sim_all[sim] = k_expected
-            continue
-        sim_intensity: Optional[np.ndarray] = None
-        if intensity_model is not None:
-            sim_dists = np.array([s.distance_to_soma for s in sim_spines])
-            X_sim = _build_covariates(sim_dists, intensity_model.covariate_names)
-            sim_intensity = np.exp(np.clip(X_sim @ intensity_model.coefficients, -500, 500))
-        sim_dist_mat = compute_spine_pairwise_distances(graph, sim_spines)
-        sim_k = ripley_k_network(
+    seed_chunks = [
+        chunk
+        for chunk in np.array_split(seeds, n_jobs_effective)
+        if len(chunk) > 0
+    ]
+    worker_args = [
+        (
             graph,
-            sim_spines,
+            n,
             r_values,
-            intensity=sim_intensity,
-            dist_matrix=sim_dist_mat,
-            correction=correction,
+            correction,
+            chunk,
+            worker_covariates,
+            worker_coefficients,
+            k_expected,
         )
-        k_sim_all[sim] = sim_k.k_observed
+        for chunk in seed_chunks
+    ]
 
+    chunk_results: List[Tuple[np.ndarray, Dict[str, float], int]] = []
+    if n_jobs_effective == 1:
+        iter_range: Any = worker_args
+        if _TQDM:
+            iter_range = _tqdm(iter_range, desc=f"{timing_label} simulations", leave=False)
+        for args in iter_range:
+            chunk_results.append(_simulate_k_envelope_chunk(args))
+    else:
+        try:
+            with ProcessPoolExecutor(max_workers=n_jobs_effective) as executor:
+                mapped: Any = executor.map(_simulate_k_envelope_chunk, worker_args)
+                if _TQDM:
+                    mapped = _tqdm(
+                        mapped,
+                        total=len(worker_args),
+                        desc=f"{timing_label} simulations",
+                        leave=False,
+                    )
+                for result in mapped:
+                    chunk_results.append(result)
+        except Exception as exc:
+            warnings.warn(
+                f"Parallel K simulations failed ({exc}); falling back to sequential execution.",
+                stacklevel=2,
+            )
+            n_jobs_effective = 1
+            chunk_results = [_simulate_k_envelope_chunk(args) for args in worker_args]
+
+    if chunk_results:
+        valid_chunks = [result[0] for result in chunk_results if len(result[0]) > 0]
+        k_sim_all = np.vstack(valid_chunks) if valid_chunks else np.empty((0, len(r_values)), dtype=float)
+    else:
+        k_sim_all = np.empty((0, len(r_values)), dtype=float)
+    if len(k_sim_all) < n_simulations:
+        missing = n_simulations - len(k_sim_all)
+        k_sim_all = np.vstack([
+            k_sim_all,
+            np.repeat(k_expected.reshape(1, -1), missing, axis=0),
+        ])
+    simulation_seconds = perf_counter() - simulation_start
+    simulation_timing = _sum_timing_dicts([result[1] for result in chunk_results])
+    if verbose_timing:
+        _print_k_timing(timing_label, f"simulations_total(n={n_simulations}, jobs={n_jobs_effective})", simulation_seconds)
+        for key in (
+            "simulate_poisson_seconds",
+            "simulation_pairwise_distance_seconds",
+            "simulation_k_function_seconds",
+            "simulation_geometric_multiplicity_seconds",
+            "simulation_k_accumulation_seconds",
+        ):
+            _print_k_timing(timing_label, key, simulation_timing.get(key, 0.0))
+
+    stage_start = perf_counter()
     lo_idx = int(math.floor(alpha / 2.0 * n_simulations))
     hi_idx = int(math.ceil((1.0 - alpha / 2.0) * n_simulations))
     lo_idx = max(0, lo_idx)
@@ -1878,6 +2101,9 @@ def compute_simulation_envelopes(
     obs_dev = float(np.max(np.abs(k_observed - k_expected)))
     sim_devs = np.max(np.abs(k_sim_all - k_expected[None, :]), axis=1)
     p_value = float((1 + np.sum(sim_devs >= obs_dev)) / (1 + n_simulations))
+    envelope_seconds = perf_counter() - stage_start
+    if verbose_timing:
+        _print_k_timing(timing_label, "envelope_and_p_value", envelope_seconds)
 
     if p_value < alpha:
         if np.mean(k_observed - k_expected) > 0:
@@ -1905,6 +2131,18 @@ def compute_simulation_envelopes(
         p_value=p_value,
         method=k_obs_result.method,
         interpretation=interp,
+        diagnostics={
+            "n_jobs": int(n_jobs_effective),
+            "n_simulations": int(n_simulations),
+            "n_chunks": int(len(seed_chunks)),
+            "observed_pairwise_distance_seconds": observed_pairwise_seconds,
+            "observed_k_function_seconds": observed_k_seconds,
+            "observed_geometric_multiplicity_seconds": observed_geometric_seconds,
+            "simulation_total_wall_seconds": simulation_seconds,
+            "simulation_envelope_seconds": envelope_seconds,
+            **simulation_timing,
+            "total_seconds": perf_counter() - total_start,
+        },
     )
 
 
@@ -2588,6 +2826,7 @@ def run_analysis(
     r_values = np.linspace(0.0, r_max, n_r + 1)[1:]
 
     n_sim = int(config.get("n_simulations", 99))
+    n_jobs = int(config.get("n_jobs", 8))
     k_correction = str(config.get("k_correction", "geometric"))
     random_state_value = config.get("random_state", 42)
     random_state = None if random_state_value is None else int(random_state_value)
@@ -2599,9 +2838,11 @@ def run_analysis(
                 projected_spines,
                 r_values,
                 n_simulations=n_sim,
+                n_jobs=n_jobs,
                 intensity_model=poisson_result,
                 correction=k_correction,
                 random_state=random_state,
+                timing_label=str(config.get("timing_label", "network")),
             )
         except Exception as exc:
             warnings.warn(f"K function computation failed: {exc}", stacklevel=2)
