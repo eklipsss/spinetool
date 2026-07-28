@@ -218,6 +218,99 @@ def calculate_mesh_graph_distance_matrix(
     return _shortest_paths_on_mesh(mesh, points, "mesh_graph", pair_for_path)
 
 
+def calculate_skeleton_graph_distance_matrix(
+    dendrite_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    skeleton: Optional[Any] = None,
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> DistanceMatrixResult:
+    """Вычисляет расстояния между шипиками через skeleton дендрита.
+    Точки крепления проецируются на ближайшие рёбра skeleton-графа.
+    Итоговое расстояние между двумя шипиками равно сумме расстояния от первой
+    точки до skeleton, кратчайшего пути между проекциями по skeleton и
+    расстояния от skeleton до второй точки.
+
+    Входные данные: mesh дендрита, точки крепления шипиков, опциональный
+    skeleton-объект и опциональная пара точек для диагностического пути.
+    Выходные данные: `DistanceMatrixResult` с матрицей skeleton-расстояний.
+    """
+    start = perf_counter()
+    points = _as_points(attachment_points)
+    if skeleton is None:
+        try:
+            from spine_analysis.shape_metric.utils import get_dendrite_skeleton
+
+            skeleton = get_dendrite_skeleton(dendrite_mesh)
+        except Exception:
+            skeleton = None
+    if skeleton is None:
+        raise ValueError(
+            "skeleton_graph distance requires a registered/provided dendrite skeleton. "
+            "For MICrONS branches this is usually branch_skeleton.npy."
+        )
+
+    from dendrite_analysis.network import (
+        build_dendritic_graph_from_skeleton,
+        compute_spine_pairwise_distances,
+        project_spines_to_graph,
+    )
+
+    graph = build_dendritic_graph_from_skeleton(skeleton, dendrite_id="dendrite")
+    if graph.soma_node is None and graph.G.number_of_nodes() > 0:
+        graph.soma_node = next(iter(graph.G.nodes()))
+    spine_points = {str(index): point for index, point in enumerate(points)}
+    projected_spines, unassigned_ids = project_spines_to_graph(
+        graph,
+        spine_points,
+        max_distance_to_edge=np.inf,
+        use_k_nearest_edges=max(1, graph.G.number_of_edges()),
+        allow_unassigned=True,
+    )
+    if unassigned_ids:
+        raise ValueError(
+            "Cannot project all attachment points to skeleton. "
+            f"Unassigned point ids: {unassigned_ids[:10]}"
+        )
+
+    projected_by_index = {
+        int(spine.spine_id): spine
+        for spine in projected_spines
+    }
+    ordered_projected = [projected_by_index[index] for index in range(len(points))]
+    skeleton_distances = compute_spine_pairwise_distances(graph, ordered_projected)
+    offset = np.asarray([spine.distance_to_edge for spine in ordered_projected], dtype=float)
+    distance_matrix = skeleton_distances + offset[:, None] + offset[None, :]
+    np.fill_diagonal(distance_matrix, 0.0)
+
+    paths: Dict[Tuple[int, int], np.ndarray] = {}
+    if pair_for_path is not None and len(points) >= 2:
+        i, j = pair_for_path
+        if 0 <= i < len(points) and 0 <= j < len(points):
+            paths[(i, j)] = np.vstack(
+                [
+                    ordered_projected[i].original_point,
+                    ordered_projected[i].projected_point,
+                    ordered_projected[j].projected_point,
+                    ordered_projected[j].original_point,
+                ]
+            )
+
+    return DistanceMatrixResult(
+        method="skeleton_graph",
+        distance_matrix=np.asarray(distance_matrix, dtype=float),
+        elapsed_seconds=perf_counter() - start,
+        mesh=None,
+        projected_points=np.asarray([spine.projected_point for spine in ordered_projected], dtype=float),
+        point_vertex_indices=None,
+        paths=paths,
+        metadata={
+            "skeleton_graph": graph,
+            "projection_distances": offset,
+            "pair_for_path": pair_for_path,
+        },
+    )
+
+
 def _point_to_array(point: Any) -> np.ndarray:
     return np.array([point.x(), point.y(), point.z()], dtype=float)
 
@@ -663,6 +756,8 @@ def _recompute_path_for_result(
     pair: Tuple[int, int],
 ) -> Optional[np.ndarray]:
     i, j = pair
+    if result.method == "skeleton_graph":
+        return (result.paths or {}).get(pair)
     if result.method in ("mesh_graph", "stem_graph"):
         if (
             result.predecessors is not None
@@ -738,6 +833,8 @@ def calculate_spine_distance_matrices(
             )
         elif method == "mesh_graph":
             results[method] = calculate_mesh_graph_distance_matrix(dendrite_mesh, points, pair_for_path)
+        elif method == "skeleton_graph":
+            results[method] = calculate_skeleton_graph_distance_matrix(dendrite_mesh, points, pair_for_path=pair_for_path)
         elif method in {"heat", "heat_method"}:
             results["heat"] = calculate_heat_distance_matrix(dendrite_mesh, points, pair_for_path)
         else:

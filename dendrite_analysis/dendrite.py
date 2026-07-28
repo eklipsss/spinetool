@@ -2,8 +2,10 @@ from .dependencies import *
 from .config import *
 from .metrics import *
 from .spine import Spine
+from time import perf_counter
 from .surface_distances import (
     calculate_mesh_graph_distance_matrix,
+    calculate_skeleton_graph_distance_matrix,
     calculate_spine_distance_matrices,
     centerline_length_from_mesh,
     polyhedron_to_trimesh,
@@ -187,6 +189,7 @@ class Dendrite:
     dbscan_eps: float = 0
     dbscan_min_samples: int = 0
     dbscan_noise: float = 0
+    distance_calculation_method: str = "mesh_graph"
 
     g_cluster_sizes: List[int]
     g_mean_cluster_size: float
@@ -200,6 +203,7 @@ class Dendrite:
         dendrite_meshes: MeshDataset = None,
         spine_meshes: MeshDataset = None,
         save_spine_data_on_init: bool = True,
+        distance_calculation_method: str = "mesh_graph",
     ) -> None:
         """Инициализирует объект дендритной ветви.
         Cоздаёт внутренние контейнеры, рассчитывает базовые метрики
@@ -211,12 +215,16 @@ class Dendrite:
         mesh-объектов дендрита, обычно из одного элемента; 
         `spine_meshes` — словарь mesh-объектов шипиков; 
         `save_spine_data_on_init` — флаг явного сохранения координат 
-        и морфологических метрик шипиков при инициализации.
+        и морфологических метрик шипиков при инициализации;
+        `distance_calculation_method` — метод расчёта расстояний между
+        шипиками: `mesh_graph` или `skeleton_graph`.
 
         Выходные данные: заполненный объект `Dendrite`; файлы записываются
         только при `save_spine_data_on_init=True` или при явном вызове `save_*`.
         """
         print('Dendrite init')
+        self.distance_calculation_method = self._normalize_distance_calculation_method(distance_calculation_method)
+        print(f"  distance_calculation_method = {self.distance_calculation_method}", flush=True)
 
         self.spines = []
         self.center_coords = []
@@ -239,13 +247,53 @@ class Dendrite:
         if spine_meshes is None:
             raise ValueError("Dendrite requires spine_meshes; loading old precomputed spine JSON is disabled.")
 
+        start = perf_counter()
         self.calculate_init_metrics(dendrite_meshes)
+        self._log_timing("init_metrics", start)
         self.spine_meshes = spine_meshes
+        start = perf_counter()
         self.calculate_and_create_spines()
+        self._log_timing("create_spines", start)
 
         if save_spine_data_on_init:
+            start = perf_counter()
             self.save_spine_coords() # сохранение координат шипиков
             self.save_spine_metrics() # сохранение метрик
+            self._log_timing("save_initial_spine_data", start)
+
+    @staticmethod
+    def _normalize_distance_calculation_method(method: str) -> str:
+        """Нормализует имя метода расчёта расстояний между шипиками.
+
+        Входные данные: строка с именем метода.
+        Выходные данные: `mesh_graph` или `skeleton_graph`.
+        """
+        method = str(method or "mesh_graph").lower()
+        aliases = {
+            "mesh": "mesh_graph",
+            "surface": "mesh_graph",
+            "surface_mesh": "mesh_graph",
+            "skeleton": "skeleton_graph",
+            "skeleton_distance": "skeleton_graph",
+        }
+        method = aliases.get(method, method)
+        if method not in {"mesh_graph", "skeleton_graph"}:
+            raise ValueError(
+                "distance_calculation_method must be 'mesh_graph' or 'skeleton_graph'; "
+                f"got {method!r}"
+            )
+        return method
+
+    def _log_timing(self, stage: str, start_time: float) -> None:
+        """Печатает длительность этапа анализа текущей дендритной ветви.
+
+        Входные данные: имя этапа и время старта `perf_counter`.
+        Выходные данные: строка timing-log в stdout.
+        """
+        print(
+            f"[time][dendrite] {self.name}: {stage} took {perf_counter() - start_time:.3f}s",
+            flush=True,
+        )
 
     def calculate_init_metrics(self, dendrite_meshes: MeshDataset = None) -> None:
         """Вычисляет базовые геометрические метрики дендрита.
@@ -407,24 +455,66 @@ class Dendrite:
         if len(points) == 0:
             self.mesh_graph_distance_matrix = np.zeros((0, 0), dtype=float)
             return self.mesh_graph_distance_matrix
+        start = perf_counter()
         result = calculate_mesh_graph_distance_matrix(self.mesh, points)
         self.mesh_graph_distance_matrix = np.asarray(result.distance_matrix, dtype=float)
+        self._log_timing("mesh_graph_distance_matrix", start)
         return self.mesh_graph_distance_matrix
+
+    def get_skeleton_graph_distance_matrix(self) -> np.ndarray:
+        """Вычисляет или возвращает кэшированную матрицу расстояний по skeleton.
+        Проецирует точки крепления на skeleton-граф и считает расстояние как
+        сумму двух перпендикуляров к skeleton и кратчайшего пути между
+        проекциями по skeleton.
+
+        Входные данные: mesh дендрита с зарегистрированным skeleton и точки
+        крепления шипиков.
+        Выходные данные: квадратная матрица `skeleton_graph` расстояний между
+        шипиками.
+        """
+        if hasattr(self, "skeleton_graph_distance_matrix"):
+            return self.skeleton_graph_distance_matrix
+        if not hasattr(self, "mesh"):
+            raise ValueError(
+                "Skeleton-graph distances require Dendrite.mesh. "
+                "Create Dendrite with dendrite_meshes."
+            )
+        points = self.get_spine_distance_points()
+        if len(points) == 0:
+            self.skeleton_graph_distance_matrix = np.zeros((0, 0), dtype=float)
+            return self.skeleton_graph_distance_matrix
+        start = perf_counter()
+        result = calculate_skeleton_graph_distance_matrix(self.mesh, points)
+        self.skeleton_graph_distance_matrix = np.asarray(result.distance_matrix, dtype=float)
+        self.skeleton_graph_distance_result = result
+        self._log_timing("skeleton_graph_distance_matrix", start)
+        return self.skeleton_graph_distance_matrix
+
+    def get_spine_distance_matrix(self) -> np.ndarray:
+        """Возвращает матрицу расстояний между шипиками выбранным методом.
+
+        Входные данные: поле `distance_calculation_method`.
+        Действие: вызывает mesh-graph или skeleton-graph расчёт.
+        Выходные данные: квадратная матрица расстояний между шипиками.
+        """
+        if self.distance_calculation_method == "skeleton_graph":
+            return self.get_skeleton_graph_distance_matrix()
+        return self.get_mesh_graph_distance_matrix()
 
     def _calculate_pair_distance_profile_metrics(self) -> None:
         """Вычисляет ненормированный профиль попарных расстояний.
         Считает среднее число соседей на шипик в последовательных
         интервалах расстояний и энтропию полученного профиля.
 
-        Входные данные: матрица `mesh_graph`-расстояний между точками крепления.
+        Входные данные: выбранная матрица расстояний между точками крепления.
         Выходные данные: `pair_distance_profile_r_values`,
         `pair_distance_profile_values`, `pair_distance_profile_entropy`.
         """
-        mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
+        distance_matrix = self.get_spine_distance_matrix()
         distance_points = self.get_spine_distance_points()
         self.pair_distance_profile_r_values, self.pair_distance_profile_values = calculate_pair_distance_profile(
             distance_points,
-            distance_matrix=mesh_graph_distance_matrix,
+            distance_matrix=distance_matrix,
         )
         self.pair_distance_profile_entropy = calculate_Shannon_entropy(self.pair_distance_profile_values)
 
@@ -448,15 +538,17 @@ class Dendrite:
             self.dbscan_min_samples = 0
             self.dbscan_noise = np.nan
             return
-        mesh_graph_distance_matrix = self.get_mesh_graph_distance_matrix()
+        distance_matrix = self.get_spine_distance_matrix()
 
+        start = perf_counter()
         dbscan_labels, dbscan_eps, dbscan_min_samples = dbscan(
             points,
             spine_metrics_dict_for_dbscan,
             'graphics/dbscan/' + self.name,
-            distance_matrix=mesh_graph_distance_matrix,
-            distance_label="mesh_graph",
+            distance_matrix=distance_matrix,
+            distance_label=self.distance_calculation_method,
         )
+        self._log_timing("dbscan_clustering", start)
         self.dbscan_labels = dbscan_labels
         self.dbscan_eps = dbscan_eps
         self.dbscan_min_samples = dbscan_min_samples
@@ -474,11 +566,12 @@ class Dendrite:
         """Строит полный взвешенный граф шипиков с весами `1 / d`,
         считает коэффициент кластеризации, сообщества и модульность.
 
-        Входные данные: матрица `mesh_graph`-расстояний между шипиками.
+        Входные данные: выбранная матрица расстояний между шипиками.
         Выходные данные: `g_average_clustering`, `g_cluster_sizes`,
         `g_mean_cluster_size`, `g_characteristic_extent`, `g_modularity`.
         """
-        distances = self.get_mesh_graph_distance_matrix()
+        start = perf_counter()
+        distances = self.get_spine_distance_matrix()
 
         G = nx.Graph()
         n = distances.shape[0]
@@ -497,6 +590,7 @@ class Dendrite:
             self.g_mean_cluster_size = 0
             self.g_characteristic_extent = 0
             self.g_modularity = 0
+            self._log_timing("graph_analysis", start)
             return
 
         # средний коэффициент группировки
@@ -526,7 +620,7 @@ class Dendrite:
         self.g_cluster_sizes = [len(comm) for comm in communities.values()]
         self.g_mean_cluster_size = np.mean(self.g_cluster_sizes)
 
-        # протяженность кластера (среднее mesh_graph-расстояние между точками внутри кластера)
+        # протяженность кластера (среднее расстояние между точками внутри кластера выбранным методом)
         self.g_characteristic_extent = 0
         valid_community_count = 0
         for comm_id, nodes in communities.items():
@@ -557,6 +651,7 @@ class Dendrite:
                 modularity_partition,
                 weight='weight',
             )
+        self._log_timing("graph_analysis", start)
 
     @staticmethod
     def _cliffs_delta(values_a, values_b) -> float:
@@ -767,7 +862,7 @@ class Dendrite:
         Входные данные: опциональный радиус локальной окрестности.
         Выходные данные: словарь контекста, используемый последующими этапами.
         """
-        distances = np.asarray(self.get_mesh_graph_distance_matrix(), dtype=float)
+        distances = np.asarray(self.get_spine_distance_matrix(), dtype=float)
         n = len(self.spines)
 
         if local_radius is None:
@@ -862,11 +957,13 @@ class Dendrite:
         Выходные данные: `spatial_morphology_summary`,
         `spatial_morphology_spine_records` и кэш `_spatial_analysis_context`.
         """
+        start = perf_counter()
         context = self._build_spatial_analysis_context(local_radius=local_radius)
         n = context["n"]
         if n == 0:
             self._set_empty_spatial_analysis_results()
             self._spatial_analysis_context = context
+            self._log_timing("density_distribution_analysis", start)
             return
         self._calculate_pair_distance_profile_metrics()
 
@@ -913,6 +1010,7 @@ class Dendrite:
 
         summary = {
             "dendrite": self.name,
+            "distance_calculation_method": self.distance_calculation_method,
             "n_spines": int(n),
             "local_radius": float(local_radius),
             "dbscan_eps": float(getattr(self, "dbscan_eps", 0) or 0),
@@ -956,6 +1054,7 @@ class Dendrite:
         self.spatial_morphology_test_records = []
         self.spatial_morphology_permutation_records = []
         self._spatial_analysis_context = context
+        self._log_timing("density_distribution_analysis", start)
 
     def calculate_local_neighborhood_analysis(self, local_radius: float = None) -> None:
         """Вычисляет характеристики локальных окрестностей шипиков.
@@ -967,6 +1066,7 @@ class Dendrite:
         Выходные данные: `local_neighborhood_summary` и
         `local_neighborhood_spine_records`.
         """
+        start = perf_counter()
         if (
             not hasattr(self, "_spatial_analysis_context")
             or local_radius is not None
@@ -978,6 +1078,7 @@ class Dendrite:
         n = context["n"]
         if n == 0:
             self._set_empty_spatial_analysis_results()
+            self._log_timing("local_neighborhood_analysis", start)
             return
 
         adjacency = context["adjacency"]
@@ -1031,6 +1132,7 @@ class Dendrite:
             "close_pair_fraction": float(np.mean(pair_distances <= local_radius)) if len(pair_distances) else np.nan,
         }
         self.local_neighborhood_spine_records = local_records
+        self._log_timing("local_neighborhood_analysis", start)
 
     def calculate_spatial_autocorrelation_analysis(
         self,
@@ -1047,6 +1149,7 @@ class Dendrite:
         seed генератора случайных чисел.
         Выходные данные: список `spatial_morphology_permutation_records`.
         """
+        start = perf_counter()
         if (
             not hasattr(self, "_spatial_analysis_context")
             or local_radius is not None
@@ -1058,6 +1161,7 @@ class Dendrite:
         n = context["n"]
         if n == 0:
             self._set_empty_spatial_analysis_results()
+            self._log_timing("spatial_autocorrelation_analysis", start)
             return
 
         self.calculate_local_neighborhood_analysis(local_radius=local_radius)
@@ -1123,6 +1227,7 @@ class Dendrite:
             })
 
         self.spatial_morphology_permutation_records = permutation_records
+        self._log_timing("spatial_autocorrelation_analysis", start)
 
     def calculate_spatial_cluster_analysis(self, local_radius: float = None) -> None:
         """Описывает DBSCAN-кластеры и сравнивает кластеризованные шипики с шумом.
@@ -1135,6 +1240,7 @@ class Dendrite:
         Выходные данные: `spatial_morphology_cluster_records`,
         `spatial_morphology_test_records` и кластерные поля в summary.
         """
+        start = perf_counter()
         if (
             not hasattr(self, "_spatial_analysis_context")
             or local_radius is not None
@@ -1146,6 +1252,7 @@ class Dendrite:
         n = context["n"]
         if n == 0:
             self._set_empty_spatial_analysis_results()
+            self._log_timing("spatial_cluster_analysis", start)
             return
 
         distances = context["distances"]
@@ -1261,6 +1368,7 @@ class Dendrite:
         })
         self.spatial_morphology_cluster_records = cluster_records
         self.spatial_morphology_test_records = test_records
+        self._log_timing("spatial_cluster_analysis", start)
 
     def calculate_comprehensive_spatial_analysis(
         self,
@@ -1276,6 +1384,7 @@ class Dendrite:
         seed генератора случайных чисел.
         Выходные данные: все summary-таблицы пространственного анализа.
         """
+        start = perf_counter()
         self.calculate_density_distribution_analysis(local_radius=local_radius)
         self.calculate_local_neighborhood_analysis(local_radius=local_radius)
         self.calculate_spatial_autocorrelation_analysis(
@@ -1283,6 +1392,7 @@ class Dendrite:
             random_state=random_state,
         )
         self.calculate_spatial_cluster_analysis()
+        self._log_timing("comprehensive_spatial_analysis", start)
 
     def calculate_spatial_morphology_analysis(
         self,

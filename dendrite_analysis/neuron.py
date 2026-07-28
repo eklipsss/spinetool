@@ -4,6 +4,7 @@ import math
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import networkx as nx
@@ -17,6 +18,69 @@ try:
 except ImportError:
     trimesh = None  # type: ignore
     _TRIMESH = False
+
+try:
+    from tqdm.auto import tqdm as _tqdm
+    _TQDM_AVAILABLE = True
+except Exception:
+    _tqdm = None  # type: ignore
+    _TQDM_AVAILABLE = False
+
+
+class _NullProgress:
+    """Минимальная замена tqdm, если progress bar недоступен или отключён."""
+
+    def __init__(self, total: int = 0, desc: str = "", unit: str = "it") -> None:
+        self.total = int(total or 0)
+        self.desc = desc
+        self.unit = unit
+        self.n = 0
+
+    def __enter__(self) -> "_NullProgress":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+    def update(self, value: int = 1) -> None:
+        self.n += int(value)
+
+    def set_postfix_str(self, _value: str) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+def _make_progress(total: int, desc: str, unit: str, disable: bool = False) -> Any:
+    """Создаёт tqdm-progress-bar или no-op объект с тем же минимальным API.
+
+    Входные данные: общее число шагов, подпись, единица прогресса и флаг
+    отключения.
+    Выходные данные: объект progress bar с методами `update`, `set_postfix_str`,
+    `close`.
+    """
+    if _TQDM_AVAILABLE and not disable:
+        return _tqdm(total=int(total or 0), desc=desc, unit=unit, leave=True)
+    return _NullProgress(total=total, desc=desc, unit=unit)
+
+
+def _advance_progress(progress: Any, label: str) -> None:
+    """Продвигает progress bar на один шаг и обновляет строку состояния.
+
+    Входные данные: progress bar и название завершённого этапа.
+    Выходные данные: обновлённый progress bar.
+    """
+    if progress is None:
+        return
+    progress.update(1)
+    total = int(getattr(progress, "total", 0) or 0)
+    done = int(getattr(progress, "n", 0) or 0)
+    remaining = max(total - done, 0)
+    try:
+        progress.set_postfix_str(f"{label}; done={done}; left={remaining}")
+    except Exception:
+        pass
 
 from .network import (
     DendriticGraph,
@@ -1088,11 +1152,23 @@ class Neuron:
     def _safe_branch_key(branch: Branch) -> str:
         return f"{branch.limb_name}/{branch.name}"
 
+    def _log_timing(self, stage: str, start_time: float) -> None:
+        """Печатает длительность этапа анализа текущего нейрона.
+
+        Входные данные: имя этапа и время старта `perf_counter`.
+        Выходные данные: строка timing-log в stdout.
+        """
+        print(
+            f"[time][neuron] {self.name}: {stage} took {perf_counter() - start_time:.3f}s",
+            flush=True,
+        )
+
     def run_branch_analysis(
         self,
         output_dir: str | Path = "output_dendrite_metrics",
         reset_output: bool = False,
         min_valid_spines: int = 3,
+        distance_calculation_method: str = "mesh_graph",
         print_structural_vectors: bool = True,
         calculate_cluster_metrics: bool = True,
         calculate_comprehensive_spatial_analysis: bool = True,
@@ -1100,6 +1176,7 @@ class Neuron:
         spatial_morphology_random_state: int = 42,
         calculate_graph_metrics: bool = True,
         save_structural_organization_vector: bool = True,
+        show_progress: bool = True,
     ) -> NeuronBranchAnalysisResult:
         """Запускает анализ всех валидных дендритных ветвей нейрона.
         Для каждой branch с достаточным числом шипиков создаёт
@@ -1107,65 +1184,129 @@ class Neuron:
         таблицы.
 
         Входные данные: директория вывода, параметры фильтрации ветвей,
-        параметры пространственного анализа и флаги сохранения результатов.
+        метод расчёта расстояний между шипиками, параметры
+        пространственного анализа, флаги сохранения результатов и флаг
+        отображения progress bar.
         Выходные данные: `NeuronBranchAnalysisResult` со списком рассчитанных
         дендритов и списком пропущенных ветвей.
         """
+        total_start = perf_counter()
         set_output_dir(str(output_dir))
         if reset_output:
             reset_saved_data()
 
         dendrites: List[Dendrite] = []
         skipped: List[str] = []
+        branches_progress = _make_progress(
+            total=len(self.branches),
+            desc=f"{self.name}: branches",
+            unit="branch",
+            disable=not show_progress,
+        )
 
-        for branch in self.branches:
-            branch_key = self._safe_branch_key(branch)
-            dendrite_name = f"{self.name}/{branch_key}"
-            if branch.mesh is None or not branch.spine_meshes:
-                skipped.append(f"{dendrite_name}: missing mesh or spines")
-                continue
-            if len(branch.spine_meshes) < min_valid_spines:
-                skipped.append(f"{dendrite_name}: too few spines ({len(branch.spine_meshes)} < {min_valid_spines})")
+        try:
+            for branch in self.branches:
+                branch_key = self._safe_branch_key(branch)
+                dendrite_name = f"{self.name}/{branch_key}"
+                if branch.mesh is None or not branch.spine_meshes:
+                    skipped.append(f"{dendrite_name}: missing mesh or spines")
+                    _advance_progress(branches_progress, f"skipped {branch_key}")
+                    continue
+                if len(branch.spine_meshes) < min_valid_spines:
+                    skipped.append(f"{dendrite_name}: too few spines ({len(branch.spine_meshes)} < {min_valid_spines})")
+                    print(
+                        f"[branches] skipped {dendrite_name}: too few spines "
+                        f"({len(branch.spine_meshes)} < {min_valid_spines})",
+                        flush=True,
+                    )
+                    _advance_progress(branches_progress, f"skipped {branch_key}")
+                    continue
+
+                branch_stage_labels = [
+                    "dendrite_init",
+                    "save_init_metrics",
+                ]
+                if calculate_cluster_metrics:
+                    branch_stage_labels.append("calculate_cluster_metrics")
+                if calculate_comprehensive_spatial_analysis:
+                    branch_stage_labels.extend([
+                        "comprehensive_spatial_analysis",
+                        "save_spatial_morphology_analysis",
+                    ])
+                if calculate_graph_metrics:
+                    branch_stage_labels.append("graph_analysis")
+                if save_structural_organization_vector:
+                    branch_stage_labels.append("save_structural_vector")
+
+                branch_progress = _make_progress(
+                    total=len(branch_stage_labels),
+                    desc=f"{dendrite_name}: stages",
+                    unit="stage",
+                    disable=not show_progress,
+                )
+
                 print(
-                    f"[branches] skipped {dendrite_name}: too few spines "
-                    f"({len(branch.spine_meshes)} < {min_valid_spines})",
+                    f"[branches] analyzing {dendrite_name}: "
+                    f"n_spines={len(branch.spine_meshes)}",
                     flush=True,
                 )
-                continue
-
-            print(
-                f"[branches] analyzing {dendrite_name}: "
-                f"n_spines={len(branch.spine_meshes)}",
-                flush=True,
-            )
-            dendrite = Dendrite(
-                dendrite_name,
-                dendrite_meshes={dendrite_name: branch.mesh},
-                spine_meshes=dict(branch.spine_meshes),
-            )
-            dendrite.save_init_metrics()
-
-            if calculate_cluster_metrics:
-                dendrite.calculate_cluster_metrics()
-
-            if calculate_comprehensive_spatial_analysis:
-                dendrite.calculate_comprehensive_spatial_analysis(
-                    permutation_count=spatial_morphology_permutation_count,
-                    random_state=spatial_morphology_random_state,
+                branch_start = perf_counter()
+                dendrite = Dendrite(
+                    dendrite_name,
+                    dendrite_meshes={dendrite_name: branch.mesh},
+                    spine_meshes=dict(branch.spine_meshes),
+                    distance_calculation_method=distance_calculation_method,
                 )
-                dendrite.save_spatial_morphology_analysis()
+                self._log_timing(f"branch {dendrite_name} dendrite_init", branch_start)
+                _advance_progress(branch_progress, "dendrite_init")
 
-            if calculate_graph_metrics:
-                dendrite.graph_analysis()
+                stage_start = perf_counter()
+                dendrite.save_init_metrics()
+                self._log_timing(f"branch {dendrite_name} save_init_metrics", stage_start)
+                _advance_progress(branch_progress, "save_init_metrics")
 
-            if save_structural_organization_vector:
-                structural_record = dendrite.save_structural_organization_vector()
-                if print_structural_vectors:
-                    print(f"[branches] structural vector {dendrite_name}", flush=True)
-                    print(pd.Series(structural_record).to_string(), flush=True)
+                if calculate_cluster_metrics:
+                    stage_start = perf_counter()
+                    dendrite.calculate_cluster_metrics()
+                    self._log_timing(f"branch {dendrite_name} calculate_cluster_metrics", stage_start)
+                    _advance_progress(branch_progress, "calculate_cluster_metrics")
 
-            dendrites.append(dendrite)
+                if calculate_comprehensive_spatial_analysis:
+                    stage_start = perf_counter()
+                    dendrite.calculate_comprehensive_spatial_analysis(
+                        permutation_count=spatial_morphology_permutation_count,
+                        random_state=spatial_morphology_random_state,
+                    )
+                    self._log_timing(f"branch {dendrite_name} comprehensive_spatial_analysis", stage_start)
+                    _advance_progress(branch_progress, "comprehensive_spatial_analysis")
 
+                    stage_start = perf_counter()
+                    dendrite.save_spatial_morphology_analysis()
+                    self._log_timing(f"branch {dendrite_name} save_spatial_morphology_analysis", stage_start)
+                    _advance_progress(branch_progress, "save_spatial_morphology_analysis")
+
+                if calculate_graph_metrics:
+                    stage_start = perf_counter()
+                    dendrite.graph_analysis()
+                    self._log_timing(f"branch {dendrite_name} graph_analysis", stage_start)
+                    _advance_progress(branch_progress, "graph_analysis")
+
+                if save_structural_organization_vector:
+                    stage_start = perf_counter()
+                    structural_record = dendrite.save_structural_organization_vector()
+                    self._log_timing(f"branch {dendrite_name} save_structural_vector", stage_start)
+                    _advance_progress(branch_progress, "save_structural_vector")
+                    if print_structural_vectors:
+                        print(f"[branches] structural vector {dendrite_name}", flush=True)
+                        print(pd.Series(structural_record).to_string(), flush=True)
+
+                branch_progress.close()
+                dendrites.append(dendrite)
+                _advance_progress(branches_progress, f"done {branch_key}")
+        finally:
+            branches_progress.close()
+
+        self._log_timing("branch_analysis_total", total_start)
         return NeuronBranchAnalysisResult(dendrites=dendrites, skipped_branches=skipped)
 
     def run_full_analysis(
@@ -1224,9 +1365,10 @@ class Neuron:
         random_state: Optional[int] = 42,
         save_outputs: bool = True,
         log_projection_diagnostics: bool = True,
-        save_projection_branch_debug_plots: bool = True,
-        show_projection_branch_debug_plots: bool = True,
+        save_projection_branch_debug_plots: bool = False,
+        show_projection_branch_debug_plots: bool = False,
         projection_branch_debug_plot_count: int = 3,
+        show_progress: bool = True,
     ) -> NeuronNetworkAnalysisResult:
         """Запускает полный анализ пространственной организации шипиков на сети нейрона.
         Строит дендритный граф, проецирует шипики на сеть, считает
@@ -1234,12 +1376,24 @@ class Neuron:
         неоднородную пуассоновскую модель и сетевую функцию Рипли.
 
         Входные данные: параметры построения графа, проекции шипиков,
-        интенсивности, пуассоновской модели, K-функции и сохранения.
+        интенсивности, пуассоновской модели, K-функции, сохранения и флаг
+        отображения progress bar.
         Выходные данные: объект `NeuronNetworkAnalysisResult` с графом,
         projected spines, таблицами анализа, ML-вектором и metadata-вектором.
         """
+        total_start = perf_counter()
+        network_progress = _make_progress(
+            total=8 if save_outputs else 7,
+            desc=f"{self.name}: network analysis",
+            unit="stage",
+            disable=not show_progress,
+        )
         output_dir = Path(output_dir)
+        stage_start = perf_counter()
         graph = self.build_network_graph(snap_threshold=snap_threshold)
+        self._log_timing("build_network_graph", stage_start)
+        _advance_progress(network_progress, "build_network_graph")
+        stage_start = perf_counter()
         spine_points = self.get_spine_points(min_valid_branch_spines=min_valid_branch_spines)
         projection_distance_summary = _projection_distance_summary(graph, spine_points)
         projection_threshold_is_auto = max_distance_to_edge is None
@@ -1265,6 +1419,8 @@ class Neuron:
             projected_spines,
             unassigned_ids,
         )
+        self._log_timing("project_spines_to_graph", stage_start)
+        _advance_progress(network_progress, "project_spines_to_graph")
         if log_projection_diagnostics:
             threshold_label = (
                 f"auto={max_distance_to_edge_effective:.4f} "
@@ -1365,17 +1521,26 @@ class Neuron:
                 if fig is not None:
                     print(f"[network projection branch-debug] saved: {save_path}", flush=True)
 
+        stage_start = perf_counter()
         binned_intensity = estimate_binned_intensity(graph, projected_spines, bin_size=bin_size)
         smooth_d, smooth_lambda = estimate_smooth_intensity(graph, projected_spines)
         intensity_cdf_test = test_intensity_dependence_cdf(graph, projected_spines)
         intensity_lr_test = test_intensity_dependence(graph, projected_spines)
+        self._log_timing("intensity_analysis", stage_start)
+        _advance_progress(network_progress, "intensity_analysis")
 
         poisson_result: Optional[PoissonModelResult] = None
         if len(projected_spines) >= 3:
             try:
+                stage_start = perf_counter()
                 poisson_result = fit_inhomogeneous_poisson(graph, projected_spines, covariates=covariates)
+                self._log_timing("fit_inhomogeneous_poisson", stage_start)
+                _advance_progress(network_progress, "fit_inhomogeneous_poisson")
             except Exception as exc:
                 warnings.warn(f"Poisson model fitting failed for neuron {self.name}: {exc}", stacklevel=2)
+                _advance_progress(network_progress, "fit_inhomogeneous_poisson failed")
+        else:
+            _advance_progress(network_progress, "fit_inhomogeneous_poisson skipped")
 
         if r_max is None:
             r_max = graph.total_length * 0.3
@@ -1384,6 +1549,7 @@ class Neuron:
         k_result: Optional[KFunctionResult] = None
         if len(projected_spines) >= 2:
             try:
+                stage_start = perf_counter()
                 k_result = compute_simulation_envelopes(
                     graph,
                     projected_spines,
@@ -1393,9 +1559,15 @@ class Neuron:
                     correction=k_correction,
                     random_state=random_state,
                 )
+                self._log_timing("ripley_k_envelopes", stage_start)
+                _advance_progress(network_progress, "ripley_k_envelopes")
             except Exception as exc:
                 warnings.warn(f"K analysis failed for neuron {self.name}: {exc}", stacklevel=2)
+                _advance_progress(network_progress, "ripley_k_envelopes failed")
+        else:
+            _advance_progress(network_progress, "ripley_k_envelopes skipped")
 
+        stage_start = perf_counter()
         compartment_k_results = self._run_compartment_k_analysis(
             graph=graph,
             projected_spines=projected_spines,
@@ -1405,7 +1577,10 @@ class Neuron:
             covariates=covariates,
             random_state=random_state,
         )
+        self._log_timing("compartment_k_analysis", stage_start)
+        _advance_progress(network_progress, "compartment_k_analysis")
 
+        stage_start = perf_counter()
         metrics_vector = self.build_structural_network_vector(
             graph=graph,
             projected_spines=projected_spines,
@@ -1424,6 +1599,8 @@ class Neuron:
             poisson_result=poisson_result,
             k_result=k_result,
         )
+        self._log_timing("build_network_vectors", stage_start)
+        _advance_progress(network_progress, "build_network_vectors")
         projected_diag = projection_branch_diagnostics[
             projection_branch_diagnostics["is_projected"].astype(bool)
         ] if len(projection_branch_diagnostics) else projection_branch_diagnostics
@@ -1469,8 +1646,13 @@ class Neuron:
         )
 
         if save_outputs:
+            stage_start = perf_counter()
             self.save_network_analysis_result(result, output_dir=output_dir)
+            self._log_timing("save_network_outputs", stage_start)
+            _advance_progress(network_progress, "save_network_outputs")
 
+        self._log_timing("network_analysis_total", total_start)
+        network_progress.close()
         return result
 
     def build_structural_network_vector(
