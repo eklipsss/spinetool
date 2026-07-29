@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import warnings
@@ -69,9 +70,12 @@ __all__ = [
     
     # graph
     "DendriticGraph",
+    "build_dendritic_graph_from_vertices_edges",
     "build_dendritic_graph",
     "build_dendritic_graph_from_skeleton",
     "build_graph_from_meshes",
+    "load_standard_network",
+    "save_standard_network",
 
     # spine attachment
     "project_spines_to_graph",
@@ -83,6 +87,9 @@ __all__ = [
     "compute_spine_pairwise_distances_mesh",
     "compute_distance_to_branching",
     "compute_distance_to_terminals",
+    "network_circumradius",
+    "resolve_k_r_values",
+    "auto_bin_size_for_network",
 
     # intensity
     "estimate_binned_intensity",
@@ -201,6 +208,19 @@ class DendriticGraph:
         self.G: nx.Graph = nx.Graph()
         self.soma_node: Optional[int] = None
         self._soma_distances: Optional[Dict[int, float]] = None
+        self._sample_points_cache: Dict[float, Tuple[np.ndarray, np.ndarray]] = {}
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Подготавливает граф к сериализации между процессами.
+
+        Входные данные: текущий объект `DendriticGraph`.
+        Действие: исключает кэш сэмплированных точек, чтобы не копировать
+        крупные массивы в дочерние процессы.
+        Выходные данные: словарь состояния объекта.
+        """
+        state = self.__dict__.copy()
+        state["_sample_points_cache"] = {}
+        return state
 
     # ------------------------------------------------------------------
     # Properties
@@ -343,12 +363,20 @@ class DendriticGraph:
         Входные данные: шаг сэмплирования вдоль рёбер.
         Выходные данные: массив координат точек и массив расстояний от сомы.
         """
+        step = float(max(step, 1e-9))
+        if not hasattr(self, "_sample_points_cache"):
+            self._sample_points_cache = {}
+        cache_key = round(step, 9)
+        cached = self._sample_points_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if self.G.number_of_edges() == 0:
             return np.empty((0, 3)), np.empty((0,))
 
         sd = self.soma_distances()
         all_pts: List[np.ndarray] = []
-        all_sd: List[float] = []
+        all_sd: List[np.ndarray] = []
 
         for u, v, edata in self.G.edges(data=True):
             length = float(edata.get("length", 0.0))
@@ -361,18 +389,17 @@ class DendriticGraph:
 
             n_segs = max(1, int(math.ceil(length / step)))
             ts = (np.arange(n_segs) + 0.5) / n_segs  # midpoints in [0,1]
-
-            for t in ts:
-                pt = p_u + t * (p_v - p_u)
-                
-                dist = min(d_u + t * length, d_v + (1.0 - t) * length)
-                all_pts.append(pt)
-                all_sd.append(dist)
+            pts = p_u[None, :] + ts[:, None] * (p_v - p_u)[None, :]
+            dists = np.minimum(d_u + ts * length, d_v + (1.0 - ts) * length)
+            all_pts.append(pts)
+            all_sd.append(dists)
 
         if not all_pts:
             return np.empty((0, 3)), np.empty((0,))
 
-        return np.array(all_pts), np.array(all_sd)
+        result = (np.vstack(all_pts), np.concatenate(all_sd))
+        self._sample_points_cache[cache_key] = result
+        return result
 
 
 # ===========================================================================
@@ -527,6 +554,317 @@ def _segments_from_skeleton_object(skeleton: Any) -> List[Tuple[np.ndarray, np.n
         return segments
 
     return []
+
+
+def _coord_columns(frame: pd.DataFrame) -> Tuple[str, str, str]:
+    """Определяет имена координатных столбцов.
+
+    Входные данные: таблица с координатами.
+    Выходные данные: tuple имён столбцов `(x, y, z)`.
+    """
+    lower_to_column = {str(column).lower(): column for column in frame.columns}
+    for names in (("x", "y", "z"), ("X", "Y", "Z")):
+        if all(name.lower() in lower_to_column for name in names):
+            return tuple(lower_to_column[name.lower()] for name in names)  # type: ignore[return-value]
+    numeric_columns = list(frame.select_dtypes(include=[np.number]).columns)
+    numeric_columns = [column for column in numeric_columns if str(column).lower() not in {"vertex_id", "spine_id"}]
+    if len(numeric_columns) >= 3:
+        return str(numeric_columns[0]), str(numeric_columns[1]), str(numeric_columns[2])
+    raise ValueError("Cannot infer x/y/z coordinate columns.")
+
+
+def build_dendritic_graph_from_vertices_edges(
+    vertices: Union[pd.DataFrame, np.ndarray],
+    edges: Union[pd.DataFrame, np.ndarray],
+    root_vertex_id: Optional[int] = None,
+    soma_point: Optional[np.ndarray] = None,
+    dendrite_id: str = "d0",
+    dendrite_type: str = "unknown",
+    snap_threshold: float = 2.0,
+) -> DendriticGraph:
+    """Строит дендритный граф из канонических таблиц vertices/edges.
+
+    Входные данные: таблица/массив вершин, таблица/массив рёбер, id корневой
+    вершины или точка сомы, идентификатор и тип дендрита.
+    Действие: создаёт `DendriticGraph` без mesh/skeletonization, сохраняет
+    координаты вершин и длины рёбер в графовой метрике.
+    Выходные данные: объект `DendriticGraph`.
+    """
+    if isinstance(vertices, pd.DataFrame):
+        vertices_frame = vertices.copy()
+        x_col, y_col, z_col = _coord_columns(vertices_frame)
+        if "vertex_id" in vertices_frame.columns:
+            vertex_ids = vertices_frame["vertex_id"].astype(int).to_numpy()
+        else:
+            vertex_ids = np.arange(len(vertices_frame), dtype=int)
+        coords = vertices_frame[[x_col, y_col, z_col]].to_numpy(dtype=float)
+    else:
+        coords = np.asarray(vertices, dtype=float)
+        if coords.ndim != 2 or coords.shape[1] < 3:
+            raise ValueError("vertices array must have shape (n_vertices, >=3).")
+        coords = coords[:, :3]
+        vertex_ids = np.arange(len(coords), dtype=int)
+
+    if len(vertex_ids) != len(coords):
+        raise ValueError("Number of vertex ids does not match number of coordinates.")
+    if not np.isfinite(coords).all():
+        raise ValueError("vertices contain NaN or Inf coordinates.")
+
+    id_to_pos = {int(vertex_id): np.asarray(coord, dtype=float) for vertex_id, coord in zip(vertex_ids, coords)}
+    graph = DendriticGraph()
+    for vertex_id, coord in id_to_pos.items():
+        graph.G.add_node(
+            int(vertex_id),
+            pos=np.asarray(coord, dtype=float),
+            node_type="intermediate",
+            dendrite_id=dendrite_id,
+            dendrite_type=dendrite_type,
+        )
+
+    if isinstance(edges, pd.DataFrame):
+        if not {"source", "target"}.issubset(edges.columns):
+            raise ValueError("edges DataFrame must contain 'source' and 'target' columns.")
+        edge_array = edges[["source", "target"]].to_numpy(dtype=int)
+    else:
+        edge_array = np.asarray(edges, dtype=int)
+        if edge_array.ndim != 2 or edge_array.shape[1] < 2:
+            raise ValueError("edges array must have shape (n_edges, >=2).")
+        edge_array = edge_array[:, :2]
+
+    for source, target in edge_array:
+        source = int(source)
+        target = int(target)
+        if source == target or source not in id_to_pos or target not in id_to_pos:
+            continue
+        length = float(np.linalg.norm(id_to_pos[target] - id_to_pos[source]))
+        if length <= 0:
+            continue
+        if graph.G.has_edge(source, target):
+            graph.G[source][target]["length"] = min(float(graph.G[source][target]["length"]), length)
+        else:
+            graph.G.add_edge(source, target, length=length)
+
+    for node in graph.G.nodes():
+        degree = graph.G.degree(node)
+        if degree == 1:
+            graph.G.nodes[node]["node_type"] = "terminal"
+        elif degree >= 3:
+            graph.G.nodes[node]["node_type"] = "branch"
+        else:
+            graph.G.nodes[node]["node_type"] = "intermediate"
+
+    if root_vertex_id is not None and int(root_vertex_id) in graph.G:
+        graph.soma_node = int(root_vertex_id)
+        graph.G.nodes[graph.soma_node]["node_type"] = "soma"
+    elif soma_point is not None and graph.G.number_of_nodes() > 0:
+        soma_pt = np.asarray(soma_point, dtype=float)
+        node_ids = list(graph.G.nodes())
+        positions = np.asarray([graph.node_position(node) for node in node_ids], dtype=float)
+        distances = np.linalg.norm(positions - soma_pt, axis=1)
+        nearest_idx = int(np.argmin(distances))
+        if distances[nearest_idx] <= snap_threshold:
+            graph.soma_node = int(node_ids[nearest_idx])
+            graph.G.nodes[graph.soma_node]["node_type"] = "soma"
+    elif 0 in graph.G:
+        graph.soma_node = 0
+        graph.G.nodes[0]["node_type"] = "soma"
+
+    return graph
+
+
+def load_standard_network(
+    network_dir: Union[str, Path],
+    root_vertex_id: Optional[int] = None,
+    dendrite_id: Optional[str] = None,
+    dendrite_type: Optional[str] = None,
+    project_spines: bool = True,
+    max_distance_to_edge: float = np.inf,
+) -> Tuple[DendriticGraph, Dict[str, np.ndarray], Dict[str, Any]]:
+    """Загружает каноническую 3D-сеть из папки.
+
+    Входные данные: папка с `vertices.csv`, `edges.csv`, `spines.csv` и
+    опциональным `metadata.json`; параметры корня и проекции шипиков.
+    Действие: строит граф из vertices/edges и читает точки шипиков X.
+    Выходные данные: `(graph, spine_points, metadata)`.
+    """
+    network_dir = Path(network_dir)
+    vertices_path = network_dir / "vertices.csv"
+    edges_path = network_dir / "edges.csv"
+    spines_path = network_dir / "spines.csv"
+    metadata_path = network_dir / "metadata.json"
+    if not vertices_path.exists() or not edges_path.exists() or not spines_path.exists():
+        raise FileNotFoundError(
+            f"Standard network folder must contain vertices.csv, edges.csv and spines.csv: {network_dir}"
+        )
+
+    metadata: Dict[str, Any] = {}
+    if metadata_path.exists():
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+            metadata = loaded if isinstance(loaded, dict) else {}
+    if root_vertex_id is None:
+        root_value = metadata.get("root_vertex_id", metadata.get("soma_vertex_id", 0))
+        root_vertex_id = None if root_value is None else int(root_value)
+    soma_point = metadata.get("soma_point", None)
+    soma_point_array = None if soma_point is None else np.asarray(soma_point, dtype=float)
+    dendrite_id = dendrite_id or str(metadata.get("network_name", network_dir.name))
+    dendrite_type = dendrite_type or str(metadata.get("group", metadata.get("dendrite_type", "unknown")))
+
+    vertices = pd.read_csv(vertices_path)
+    edges = pd.read_csv(edges_path)
+    spines = pd.read_csv(spines_path)
+    graph = build_dendritic_graph_from_vertices_edges(
+        vertices,
+        edges,
+        root_vertex_id=root_vertex_id,
+        soma_point=soma_point_array,
+        dendrite_id=dendrite_id,
+        dendrite_type=dendrite_type,
+    )
+
+    x_col, y_col, z_col = _coord_columns(spines)
+    if "spine_id" in spines.columns:
+        spine_ids = spines["spine_id"].astype(str).to_numpy()
+    else:
+        spine_ids = np.asarray([f"spine_{index}" for index in range(len(spines))], dtype=object)
+    spine_points = {
+        str(spine_id): np.asarray(point, dtype=float)
+        for spine_id, point in zip(spine_ids, spines[[x_col, y_col, z_col]].to_numpy(dtype=float))
+    }
+
+    metadata = {
+        **metadata,
+        "standard_network_dir": str(network_dir),
+        "root_vertex_id": root_vertex_id,
+        "dendrite_id": dendrite_id,
+        "dendrite_type": dendrite_type,
+        "spines_are_projected_to_graph": bool(project_spines),
+    }
+    if project_spines:
+        projected, unassigned = project_spines_to_graph(
+            graph,
+            spine_points,
+            max_distance_to_edge=max_distance_to_edge,
+        )
+        metadata["projection_unassigned_count"] = int(len(unassigned))
+        spine_points = {spine.spine_id: spine.original_point for spine in projected}
+    return graph, spine_points, metadata
+
+
+def save_standard_network(
+    graph: DendriticGraph,
+    spine_points: Union[Dict[str, np.ndarray], Sequence[ProjectedSpine]],
+    output_dir: Union[str, Path],
+    metadata: Optional[Dict[str, Any]] = None,
+    network_name: Optional[str] = None,
+    dendrite_type: str = "unknown",
+    soma_point: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Сохраняет граф и точки шипиков в каноническом формате.
+
+    Входные данные: `DendriticGraph`, точки шипиков или `ProjectedSpine`,
+    папка вывода и metadata.
+    Действие: записывает `vertices.csv`, `edges.csv`, `spines.csv`,
+    `matrix.npy` и `metadata.json`.
+    Выходные данные: metadata сохранённой сети.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    network_name = network_name or output_dir.name
+    metadata = dict(metadata or {})
+
+    node_ids = list(graph.G.nodes())
+    vertices_frame = pd.DataFrame(
+        [
+            {
+                "vertex_id": int(node),
+                "x": float(graph.node_position(node)[0]),
+                "y": float(graph.node_position(node)[1]),
+                "z": float(graph.node_position(node)[2]),
+            }
+            for node in node_ids
+        ]
+    )
+    edges_frame = pd.DataFrame(
+        [
+            {
+                "edge_id": index,
+                "source": int(source),
+                "target": int(target),
+                "weight": 1.0,
+                "length": float(data.get("length", np.linalg.norm(graph.node_position(source) - graph.node_position(target)))),
+            }
+            for index, (source, target, data) in enumerate(graph.G.edges(data=True))
+        ]
+    )
+
+    if isinstance(spine_points, dict):
+        spine_rows = [
+            {
+                "spine_id": str(spine_id),
+                "x": float(np.asarray(point, dtype=float)[0]),
+                "y": float(np.asarray(point, dtype=float)[1]),
+                "z": float(np.asarray(point, dtype=float)[2]),
+            }
+            for spine_id, point in spine_points.items()
+        ]
+    else:
+        spine_rows = [
+            {
+                "spine_id": str(spine.spine_id),
+                "x": float(spine.original_point[0]),
+                "y": float(spine.original_point[1]),
+                "z": float(spine.original_point[2]),
+                "projected_x": float(spine.projected_point[0]),
+                "projected_y": float(spine.projected_point[1]),
+                "projected_z": float(spine.projected_point[2]),
+                "edge_source": int(spine.edge_source),
+                "edge_target": int(spine.edge_target),
+                "edge_position": float(spine.edge_position),
+                "distance_to_edge": float(spine.distance_to_edge),
+            }
+            for spine in spine_points
+        ]
+    spines_frame = pd.DataFrame(spine_rows)
+
+    vertices_frame.to_csv(output_dir / "vertices.csv", index=False)
+    edges_frame.to_csv(output_dir / "edges.csv", index=False)
+    spines_frame.to_csv(output_dir / "spines.csv", index=False)
+
+    node_to_idx = {node: index for index, node in enumerate(node_ids)}
+    matrix = np.zeros((len(node_ids), len(node_ids)), dtype=int)
+    for source, target in graph.G.edges():
+        matrix[node_to_idx[source], node_to_idx[target]] = 1
+        matrix[node_to_idx[target], node_to_idx[source]] = 1
+    np.save(output_dir / "matrix.npy", matrix)
+
+    if soma_point is not None:
+        soma_array = np.asarray(soma_point, dtype=float)
+        soma_value = [float(soma_array[0]), float(soma_array[1]), float(soma_array[2])]
+    else:
+        soma_value = metadata.get("soma_point", None)
+
+    saved_metadata = {
+        **metadata,
+        "network_name": network_name,
+        "dendrite_type": dendrite_type,
+        "root_vertex_id": graph.soma_node,
+        "soma_point": soma_value,
+        "soma_point_is_graph_vertex": bool(graph.soma_node is not None and soma_value is not None and np.allclose(
+            graph.node_position(graph.soma_node),
+            np.asarray(soma_value, dtype=float),
+        )),
+        "vertex_count": int(len(vertices_frame)),
+        "edge_count": int(len(edges_frame)),
+        "spine_count": int(len(spines_frame)),
+        "coordinate_columns": ["x", "y", "z"],
+        "matrix_shape": list(matrix.shape),
+        "matrix_format": "adjacency_matrix",
+        "indexing": "graph_vertex_ids",
+    }
+    with (output_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(saved_metadata, handle, ensure_ascii=False, indent=2)
+    return saved_metadata
 
 
 def build_dendritic_graph_from_skeleton(
@@ -884,6 +1222,66 @@ def compute_spine_pairwise_distances(
     return dist_matrix
 
 
+def network_circumradius(graph: DendriticGraph) -> float:
+    """Оценивает circumradius дендритной сети в графовой метрике.
+
+    Входные данные: дендритный граф с длинами рёбер.
+    Действие: для каждой связной компоненты оценивает диаметр двумя запусками
+    Dijkstra и возвращает половину максимального диаметра.
+    Выходные данные: радиус сети в единицах длины графа.
+    """
+    if graph.G.number_of_edges() == 0:
+        return 0.0
+
+    radii: List[float] = []
+    for component_nodes in nx.connected_components(graph.G):
+        nodes = list(component_nodes)
+        if len(nodes) < 2:
+            radii.append(0.0)
+            continue
+        subgraph = graph.G.subgraph(nodes)
+        start = nodes[0]
+        first_dist = nx.single_source_dijkstra_path_length(subgraph, start, weight="length")
+        if not first_dist:
+            radii.append(0.0)
+            continue
+        u = max(first_dist, key=first_dist.get)
+        second_dist = nx.single_source_dijkstra_path_length(subgraph, u, weight="length")
+        diameter = max(second_dist.values()) if second_dist else 0.0
+        radii.append(0.5 * float(diameter))
+    return float(max(radii)) if radii else 0.0
+
+
+def resolve_k_r_values(
+    graph: DendriticGraph,
+    n_r_values: int,
+    r_max: Optional[Any] = "circumradius",
+) -> Tuple[np.ndarray, float, str]:
+    """Формирует сетку радиусов для сетевой K-функции.
+
+    Входные данные: граф, число радиусов и значение `r_max`.
+    Действие: если `r_max` равно `None`, `"circumradius"` или `"auto"`,
+    использует circumradius сети; иначе использует численное значение.
+    Выходные данные: массив радиусов, использованный максимум и источник
+    выбора радиуса.
+    """
+    n_r_values = int(max(1, n_r_values))
+    source = "explicit"
+    if r_max is None or str(r_max).lower() in {"auto", "circumradius", "reference"}:
+        resolved_r_max = network_circumradius(graph)
+        source = "circumradius"
+    else:
+        resolved_r_max = float(r_max)
+    if not np.isfinite(resolved_r_max) or resolved_r_max <= 0:
+        resolved_r_max = float(graph.total_length)
+        source = "fallback_total_length"
+    if not np.isfinite(resolved_r_max) or resolved_r_max <= 0:
+        resolved_r_max = 1.0
+        source = "fallback_unit"
+    r_values = np.linspace(0.0, float(resolved_r_max), n_r_values + 1)[1:]
+    return r_values, float(resolved_r_max), source
+
+
 def compute_spine_pairwise_distances_mesh(
     dendrite_mesh: Any,
     spines: List[ProjectedSpine],
@@ -985,10 +1383,90 @@ def compute_distance_to_terminals(
 # Intensity analysis
 # ===========================================================================
 
+def _adaptive_graph_sample_step(
+    graph: DendriticGraph,
+    requested_step: float,
+    max_samples: int = 50_000,
+) -> float:
+    """Подбирает шаг сэмплирования графа с ограничением числа точек.
+
+    Входные данные: граф, желаемый шаг и максимальное число sample-точек.
+    Действие: увеличивает шаг, если заданный шаг создаёт слишком много
+    точек на длинной дендритной сети.
+    Выходные данные: эффективный шаг сэмплирования.
+    """
+    requested_step = float(max(requested_step, 1e-9))
+    total_len = float(graph.total_length)
+    if total_len <= 0 or max_samples <= 0:
+        return requested_step
+    min_step_for_budget = total_len / float(max_samples)
+    return float(max(requested_step, min_step_for_budget))
+
+
+def _print_network_timing(label: str, stage: str, seconds: float) -> None:
+    """Печатает timing-log для этапов сетевого анализа.
+
+    Входные данные: подпись анализа, название этапа и длительность в секундах.
+    Выходные данные: строка timing-log в stdout.
+    """
+    print(f"[time][network] {label}: {stage} took {seconds:.3f}s", flush=True)
+
+
+def auto_bin_size_for_network(
+    graph: DendriticGraph,
+    spines: List[ProjectedSpine],
+    min_bins: int = 8,
+    max_bins: int = 30,
+    min_expected_spines_per_bin: float = 3.0,
+) -> float:
+    """Подбирает диагностический bin_size для расстояния от сомы.
+
+    Входные данные: дендритный граф, спроецированные шипики и ограничения
+    на число бинов/ожидаемое число шипиков в бине.
+    Действие: выбирает ширину бина по протяжённости distance-to-soma оси,
+    числу шипиков и локальным расстояниям между соседними значениями
+    distance-to-soma.
+    Выходные данные: положительная ширина бина.
+    """
+    soma_distances = np.asarray(list(graph.soma_distances().values()), dtype=float)
+    spine_distances = np.asarray([spine.distance_to_soma for spine in spines], dtype=float)
+    soma_distances = soma_distances[np.isfinite(soma_distances)]
+    spine_distances = spine_distances[np.isfinite(spine_distances)]
+
+    if len(soma_distances) > 0:
+        distance_extent = float(np.max(soma_distances))
+    elif len(spine_distances) > 0:
+        distance_extent = float(np.max(spine_distances))
+    else:
+        distance_extent = float(graph.total_length)
+    distance_extent = max(distance_extent, 1e-9)
+
+    n_spines = int(len(spine_distances))
+    if n_spines <= 0:
+        return distance_extent / max(1, int(min_bins))
+
+    target_n_bins = int(np.clip(np.sqrt(n_spines), int(min_bins), int(max_bins)))
+    bin_size_from_bins = distance_extent / max(target_n_bins, 1)
+    bin_size_from_counts = (
+        float(min_expected_spines_per_bin) * distance_extent / max(n_spines, 1)
+    )
+
+    bin_size_from_local_spacing = 0.0
+    if len(spine_distances) >= 2:
+        sorted_distances = np.sort(spine_distances)
+        local_gaps = np.diff(sorted_distances)
+        local_gaps = local_gaps[np.isfinite(local_gaps) & (local_gaps > 0)]
+        if len(local_gaps) > 0:
+            bin_size_from_local_spacing = float(np.quantile(local_gaps, 0.75))
+
+    return float(max(bin_size_from_bins, bin_size_from_counts, bin_size_from_local_spacing, 1e-9))
+
+
 def estimate_binned_intensity(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
     bin_size: float = 25.0,
+    max_network_samples: int = 50_000,
 ) -> pd.DataFrame:
     """Оценивает биннированную линейную интенсивность шипиков.
     Делит ось расстояния от сомы на интервалы, считает число шипиков
@@ -1011,7 +1489,8 @@ def estimate_binned_intensity(
         )
 
     spine_dists = np.array([s.distance_to_soma for s in spines])
-    sample_pts, sample_sd = graph.sample_points_on_graph(step=1.0)
+    sample_step = _adaptive_graph_sample_step(graph, requested_step=1.0, max_samples=max_network_samples)
+    _, sample_sd = graph.sample_points_on_graph(step=sample_step)
 
     max_dist = max(
         spine_dists.max() if len(spine_dists) else 0.0,
@@ -1022,19 +1501,25 @@ def estimate_binned_intensity(
     total_len = graph.total_length
     n_samples = len(sample_sd)
 
+    bin_edges = np.arange(0.0, (n_bins + 1) * bin_size, bin_size)
+    spine_counts, _ = np.histogram(spine_dists, bins=bin_edges)
+    if n_samples > 0:
+        sample_counts, _ = np.histogram(sample_sd, bins=bin_edges)
+    else:
+        sample_counts = np.zeros(n_bins, dtype=int)
+
     rows = []
     for k in range(n_bins):
         bin_start = k * bin_size
         bin_end = (k + 1) * bin_size
 
-        count = int(np.sum((spine_dists >= bin_start) & (spine_dists < bin_end)))
-
         if n_samples > 0:
-            frac = float(np.sum((sample_sd >= bin_start) & (sample_sd < bin_end))) / n_samples
+            frac = float(sample_counts[k]) / n_samples
             net_len = frac * total_len
         else:
             net_len = 0.0
 
+        count = int(spine_counts[k])
         intensity = count / net_len if net_len > 1e-12 else 0.0
         rows.append(
             {
@@ -1054,6 +1539,8 @@ def estimate_smooth_intensity(
     spines: List[ProjectedSpine],
     bandwidth: Optional[float] = None,
     eval_step: float = 1.0,
+    max_eval_points: int = 50_000,
+    max_network_samples: int = 50_000,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Оценивает сглаженную интенсивность шипиков вдоль расстояния от сомы.
     Строит KDE по расстояниям шипиков от сомы и нормирует её на
@@ -1078,6 +1565,8 @@ def estimate_smooth_intensity(
 
     d_min = 0.0
     d_max = float(spine_dists.max()) + 3.0 * h
+    if max_eval_points > 0 and d_max / max(eval_step, 1e-9) > max_eval_points:
+        eval_step = d_max / float(max_eval_points)
     d_grid = np.arange(d_min, d_max, eval_step)
 
     if len(d_grid) == 0:
@@ -1086,16 +1575,23 @@ def estimate_smooth_intensity(
     diff = d_grid[:, None] - spine_dists[None, :]        
     kde = np.sum(np.exp(-0.5 * (diff / h) ** 2), axis=1) / (n * h * math.sqrt(2 * math.pi))
 
-    sample_pts, sample_sd = graph.sample_points_on_graph(step=eval_step / 2.0)
+    sample_step = _adaptive_graph_sample_step(
+        graph,
+        requested_step=eval_step / 2.0,
+        max_samples=max_network_samples,
+    )
+    _, sample_sd = graph.sample_points_on_graph(step=sample_step)
     total_len = graph.total_length
 
     rho_net = np.zeros(len(d_grid))
     if len(sample_sd) > 0 and total_len > 0:
-        for m, d in enumerate(d_grid):
-            window = h
-            mask = np.abs(sample_sd - d) <= window
-            frac = float(np.sum(mask)) / len(sample_sd)
-            rho_net[m] = frac * total_len / (2.0 * window) if window > 0 else 0.0
+        window = h
+        sample_sd_sorted = np.sort(sample_sd)
+        left = np.searchsorted(sample_sd_sorted, d_grid - window, side="left")
+        right = np.searchsorted(sample_sd_sorted, d_grid + window, side="right")
+        counts = right - left
+        frac = counts.astype(float) / len(sample_sd_sorted)
+        rho_net = frac * total_len / (2.0 * window) if window > 0 else rho_net
 
     lambda_hat = np.where(rho_net > 1e-12, kde / rho_net, 0.0)
 
@@ -1106,6 +1602,7 @@ def test_intensity_dependence(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
     n_bins: int = 10,
+    max_network_samples: int = 50_000,
 ) -> Dict[str, Any]:
     """Проверяет зависимость интенсивности шипиков от расстояния до сомы.
     Сравнивает постоянную пуассоновскую модель и модель с линейной
@@ -1130,7 +1627,12 @@ def test_intensity_dependence(
     spine_dists = np.array([s.distance_to_soma for s in spines])
     max_dist = float(spine_dists.max())
     bin_size = max_dist / n_bins
-    bin_df = estimate_binned_intensity(graph, spines, bin_size=bin_size)
+    bin_df = estimate_binned_intensity(
+        graph,
+        spines,
+        bin_size=bin_size,
+        max_network_samples=max_network_samples,
+    )
     bin_df = bin_df[bin_df["network_length"] > 0].copy()
 
     if len(bin_df) < 2:
@@ -1200,6 +1702,7 @@ def test_intensity_dependence_cdf(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
     sample_step: float = 1.0,
+    max_network_samples: int = 50_000,
 ) -> Dict[str, Any]:
     """Проверка зависимости от расстояния до сомы 
     с использованием сравнения функций распределения.
@@ -1220,6 +1723,11 @@ def test_intensity_dependence_cdf(
             "interpretation": "Insufficient data.",
         }
 
+    sample_step = _adaptive_graph_sample_step(
+        graph,
+        requested_step=sample_step,
+        max_samples=max_network_samples,
+    )
     _, sample_sd = graph.sample_points_on_graph(step=sample_step)
     spine_sd = np.array([s.distance_to_soma for s in spines], dtype=float)
     spine_sd = spine_sd[np.isfinite(spine_sd)]
@@ -1290,6 +1798,7 @@ def _network_integral(
     covariate_names: List[str],
     graph: DendriticGraph,
     n_samples_per_unit: float = 2.0,
+    max_network_samples: int = 50_000,
 ) -> Tuple[float, np.ndarray]:
     """Аппроксимирует интеграл интенсивности по дендритной сети.
     Сэмплирует точки на графе, вычисляет интенсивность и градиент
@@ -1300,7 +1809,12 @@ def _network_integral(
     Выходные данные: значение интеграла и его градиент.
     """
     step = max(1.0 / n_samples_per_unit, 1e-6)
-    sample_pts, sample_sd = graph.sample_points_on_graph(step=step)
+    step = _adaptive_graph_sample_step(
+        graph,
+        requested_step=step,
+        max_samples=max_network_samples,
+    )
+    _, sample_sd = graph.sample_points_on_graph(step=step)
 
     if len(sample_sd) == 0:
         K = len(theta)
@@ -1324,10 +1838,16 @@ def fit_inhomogeneous_poisson(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
     covariates: Sequence[str] = ("intercept", "distance_to_soma", "distance_to_soma_squared"),
+    integration_sample_step: float = 0.5,
+    max_integration_samples: int = 50_000,
+    verbose_timing: bool = False,
+    timing_label: str = "poisson",
 ) -> PoissonModelResult:
     """Подгоняет неоднородную пуассоновскую модель интенсивности шипиков.
 
     Входные данные: дендритный граф, спроецированные шипики и список ковариат.
+    Дополнительно принимает шаг и лимит quadrature-сэмплирования сети,
+    а также параметры timing-лога.
     Действие: максимизирует логарифм функции правдоподобия точечного процесса на сети,
     вычисляет коэффициенты, стандартные ошибки, AIC, BIC и residuals.
     Выходные данные: объект `PoissonModelResult`.
@@ -1341,23 +1861,50 @@ def fit_inhomogeneous_poisson(
     K = len(covariate_names)
 
     X_spines = _build_covariates(spine_dists, covariate_names)  # (N, K)
-
     sum_X = X_spines.sum(axis=0)  # (K,)
 
+    total_start = perf_counter()
+    stage_start = perf_counter()
+    effective_step = _adaptive_graph_sample_step(
+        graph,
+        requested_step=integration_sample_step,
+        max_samples=max_integration_samples,
+    )
+    _, sample_sd = graph.sample_points_on_graph(step=effective_step)
+    X_samp = _build_covariates(sample_sd, covariate_names) if len(sample_sd) else np.empty((0, K))
+    total_len = graph.total_length
+    actual_step = total_len / len(sample_sd) if len(sample_sd) else 0.0
+    preparation_seconds = perf_counter() - stage_start
+    if verbose_timing:
+        _print_network_timing(
+            timing_label,
+            f"poisson_prepare_quadrature(samples={len(sample_sd)}, step={effective_step:.4f})",
+            preparation_seconds,
+        )
+
+    def integral_and_grad_precomputed(theta: np.ndarray) -> Tuple[float, np.ndarray]:
+        if len(sample_sd) == 0:
+            return 0.0, np.zeros(K)
+        log_lambda = X_samp @ theta
+        lam = np.exp(np.clip(log_lambda, -500, 500))
+        integral = float(np.sum(lam) * actual_step)
+        grad_integral = (X_samp.T @ lam) * actual_step
+        return integral, grad_integral
+
     def neg_logL_and_grad(theta: np.ndarray) -> Tuple[float, np.ndarray]:
-        sum_log_lambda = float(X_spines @ theta).real if np.isscalar(X_spines @ theta) \
-            else float(np.sum(X_spines @ theta))
-        integral, grad_integral = _network_integral(theta, covariate_names, graph)
+        sum_log_lambda = float(np.sum(X_spines @ theta))
+        integral, grad_integral = integral_and_grad_precomputed(theta)
         neg_ll = -(sum_log_lambda - integral)
         grad = -(sum_X - grad_integral)
         return float(neg_ll), grad
 
-    L = graph.total_length
+    L = total_len
     theta0 = np.zeros(K)
     if "intercept" in covariate_names:
         idx0 = covariate_names.index("intercept")
         theta0[idx0] = math.log(max(N, 1) / max(L, 1e-6))
 
+    stage_start = perf_counter()
     result = minimize(
         neg_logL_and_grad,
         x0=theta0,
@@ -1365,9 +1912,13 @@ def fit_inhomogeneous_poisson(
         method="L-BFGS-B",
         options={"maxiter": 500, "ftol": 1e-12, "gtol": 1e-8},
     )
+    optimization_seconds = perf_counter() - stage_start
+    if verbose_timing:
+        _print_network_timing(timing_label, "poisson_optimization", optimization_seconds)
 
     theta_hat = result.x
 
+    stage_start = perf_counter()
     eps = 1e-5
     hessian = np.zeros((K, K))
     _, g0 = neg_logL_and_grad(theta_hat)
@@ -1382,6 +1933,9 @@ def fit_inhomogeneous_poisson(
         se = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0))
     except np.linalg.LinAlgError:
         se = np.full(K, np.nan)
+    hessian_seconds = perf_counter() - stage_start
+    if verbose_timing:
+        _print_network_timing(timing_label, "poisson_hessian", hessian_seconds)
 
     log_likelihood = -float(result.fun)
     aic = -2.0 * log_likelihood + 2.0 * K
@@ -1391,6 +1945,7 @@ def fit_inhomogeneous_poisson(
     fitted_intensity = np.exp(np.clip(log_lambda_spines, -500, 500))
 
     n_bins = min(10, max(2, N // 5))
+    stage_start = perf_counter()
     bin_df = estimate_binned_intensity(graph, spines, bin_size=graph.total_length / n_bins)
     bin_df = bin_df[bin_df["network_length"] > 0]
 
@@ -1408,6 +1963,9 @@ def fit_inhomogeneous_poisson(
         )
     else:
         residuals = np.array([])
+    residuals_seconds = perf_counter() - stage_start
+    if verbose_timing:
+        _print_network_timing(timing_label, "poisson_residuals", residuals_seconds)
 
     diagnostics = {
         "converged": bool(result.success),
@@ -1415,6 +1973,13 @@ def fit_inhomogeneous_poisson(
         "n_iterations": result.get("nit", None),
         "n_spines": N,
         "network_length": L,
+        "integration_sample_step": float(effective_step),
+        "n_integration_samples": int(len(sample_sd)),
+        "preparation_seconds": float(preparation_seconds),
+        "optimization_seconds": float(optimization_seconds),
+        "hessian_seconds": float(hessian_seconds),
+        "residuals_seconds": float(residuals_seconds),
+        "total_seconds": float(perf_counter() - total_start),
     }
 
     return PoissonModelResult(
@@ -1903,6 +2468,8 @@ def compute_simulation_envelopes(
     alpha: float = 0.05,
     intensity_model: Optional[PoissonModelResult] = None,
     correction: str = "geometric",
+    envelope_type: str = "global_constant_width",
+    require_inhomogeneous: bool = True,
     fit_intensity_if_missing: bool = True,
     random_state: Optional[int] = None,
     n_jobs: int = 8,
@@ -1914,8 +2481,9 @@ def compute_simulation_envelopes(
     на том же графе, строит нижнюю/верхнюю envelope и Monte Carlo p-значение.
 
     Входные данные: дендритный граф, наблюдаемые шипики, значения радиуса,
-    число симуляций, модель интенсивности, способ поправки, seed, число
-    параллельных процессов и параметры timing-лога.
+    число симуляций, модель интенсивности, способ поправки, тип envelope,
+    флаг обязательной неоднородной модели, seed, число параллельных процессов
+    и параметры timing-лога.
     Выходные данные: объект `KFunctionResult` с наблюдаемой, ожидаемой и
     симулированными границами K-кривой.
     """
@@ -1924,6 +2492,7 @@ def compute_simulation_envelopes(
     n = len(spines)
     r_values = np.asarray(r_values, dtype=float)
     use_geometric = correction.lower() in {"geometric", "reference", "kl", "k_l"}
+    envelope_type_normalized = str(envelope_type).lower()
     n_simulations = int(max(0, n_simulations))
     n_jobs_effective = _resolve_n_jobs(n_jobs, max(1, n_simulations))
 
@@ -1941,6 +2510,8 @@ def compute_simulation_envelopes(
             diagnostics={
                 "n_jobs": int(n_jobs_effective),
                 "n_simulations": int(n_simulations),
+                "envelope_type": envelope_type_normalized,
+                "require_inhomogeneous": bool(require_inhomogeneous),
                 "total_seconds": perf_counter() - total_start,
             },
         )
@@ -1952,8 +2523,15 @@ def compute_simulation_envelopes(
             if verbose_timing:
                 _print_k_timing(timing_label, "fit_intensity_if_missing", perf_counter() - stage_start)
         except Exception as exc:
+            if require_inhomogeneous:
+                raise RuntimeError(
+                    "Inhomogeneous K analysis requires a fitted intensity model, "
+                    f"but model fitting failed: {type(exc).__name__}: {exc!r}"
+                ) from exc
             warnings.warn(f"Intensity model fitting failed: {exc}; using homogeneous CSR.", stacklevel=2)
             intensity_model = None
+    if intensity_model is None and require_inhomogeneous:
+        raise ValueError("Inhomogeneous K analysis requires `intensity_model`.")
 
     if intensity_model is not None:
         obs_intensity = intensity_model.fitted_intensity
@@ -1996,6 +2574,8 @@ def compute_simulation_envelopes(
             diagnostics={
                 "n_jobs": int(n_jobs_effective),
                 "n_simulations": int(n_simulations),
+                "envelope_type": envelope_type_normalized,
+                "require_inhomogeneous": bool(require_inhomogeneous),
                 "observed_pairwise_distance_seconds": observed_pairwise_seconds,
                 "observed_k_function_seconds": observed_k_seconds,
                 "observed_geometric_multiplicity_seconds": observed_geometric_seconds,
@@ -2089,17 +2669,33 @@ def compute_simulation_envelopes(
             _print_k_timing(timing_label, key, simulation_timing.get(key, 0.0))
 
     stage_start = perf_counter()
-    lo_idx = int(math.floor(alpha / 2.0 * n_simulations))
-    hi_idx = int(math.ceil((1.0 - alpha / 2.0) * n_simulations))
-    lo_idx = max(0, lo_idx)
-    hi_idx = min(n_simulations - 1, hi_idx)
-
-    k_sim_sorted = np.sort(k_sim_all, axis=0)
-    k_lower = k_sim_sorted[lo_idx]
-    k_upper = k_sim_sorted[hi_idx]
-
     obs_dev = float(np.max(np.abs(k_observed - k_expected)))
     sim_devs = np.max(np.abs(k_sim_all - k_expected[None, :]), axis=1)
+    if envelope_type_normalized in {"global_constant_width", "global", "constant_width", "reference"}:
+        if len(sim_devs):
+            sorted_devs = np.sort(sim_devs)
+            envelope_rank = int(math.ceil((1.0 - alpha) * (n_simulations + 1)))
+            envelope_rank = int(np.clip(envelope_rank, 1, n_simulations))
+            w_max = float(sorted_devs[envelope_rank - 1])
+        else:
+            envelope_rank = 0
+            w_max = 0.0
+        k_lower = k_expected - w_max
+        k_upper = k_expected + w_max
+        envelope_width = w_max
+    elif envelope_type_normalized in {"pointwise_quantile", "pointwise", "quantile"}:
+        lo_idx = int(math.floor(alpha / 2.0 * n_simulations))
+        hi_idx = int(math.ceil((1.0 - alpha / 2.0) * n_simulations))
+        lo_idx = max(0, lo_idx)
+        hi_idx = min(n_simulations - 1, hi_idx)
+        k_sim_sorted = np.sort(k_sim_all, axis=0)
+        k_lower = k_sim_sorted[lo_idx]
+        k_upper = k_sim_sorted[hi_idx]
+        envelope_width = float(np.max(k_upper - k_lower) / 2.0) if len(k_upper) else 0.0
+    else:
+        raise ValueError(
+            "envelope_type must be one of: 'global_constant_width', 'pointwise_quantile'."
+        )
     p_value = float((1 + np.sum(sim_devs >= obs_dev)) / (1 + n_simulations))
     envelope_seconds = perf_counter() - stage_start
     if verbose_timing:
@@ -2135,6 +2731,12 @@ def compute_simulation_envelopes(
             "n_jobs": int(n_jobs_effective),
             "n_simulations": int(n_simulations),
             "n_chunks": int(len(seed_chunks)),
+            "envelope_type": envelope_type_normalized,
+            "require_inhomogeneous": bool(require_inhomogeneous),
+            "r_min": float(r_values[0]) if len(r_values) else np.nan,
+            "r_max": float(r_values[-1]) if len(r_values) else np.nan,
+            "global_envelope_width": float(envelope_width),
+            "global_envelope_rank": int(envelope_rank) if "envelope_rank" in locals() else np.nan,
             "observed_pairwise_distance_seconds": observed_pairwise_seconds,
             "observed_k_function_seconds": observed_k_seconds,
             "observed_geometric_multiplicity_seconds": observed_geometric_seconds,
@@ -2720,17 +3322,21 @@ def run_analysis(
     mesh_path: Optional[str] = None,
     config_path: Optional[str] = None,
     dendrite_mesh: Optional[Any] = None,
+    graph: Optional[DendriticGraph] = None,
+    standard_network_dir: Optional[Union[str, Path]] = None,
     spine_points: Optional[Dict[str, np.ndarray]] = None,
     soma_point: Optional[np.ndarray] = None,
     output_dir: str = "output_network_analysis",
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Запускает автономный анализ шипиков на одном дендритном mesh.
-    Строит граф дендрита, проецирует шипики, считает интенсивность,
+    """Запускает автономный анализ шипиков на одной дендритной сети.
+    Принимает готовый граф, каноническую папку или mesh. Строит/загружает
+    граф дендрита, проецирует шипики, считает интенсивность,
     тесты зависимости от сомы, пуассоновскую модель, K-функцию и отчёт.
 
-    Входные данные: путь к mesh или готовый mesh, словарь точек шипиков,
-    опциональная точка сомы, директория вывода и параметры анализа.
+    Входные данные: готовый граф, каноническая папка, путь к mesh или готовый
+    mesh, словарь точек шипиков, опциональная точка сомы, директория вывода
+    и параметры анализа.
     Выходные данные: словарь с графом, результатами проекции, таблицами,
     моделями, K-результатом и путём отчёта.
     """
@@ -2742,7 +3348,21 @@ def run_analysis(
             warnings.warn(f"Failed to load config {config_path!r}: {exc}", stacklevel=2)
     config.update(kwargs)
 
-    if dendrite_mesh is None and mesh_path is not None:
+    standard_metadata: Dict[str, Any] = {}
+    if graph is None and standard_network_dir is None:
+        standard_network_dir = config.get("standard_network_dir", None)
+    if graph is None and standard_network_dir is not None:
+        graph, loaded_spine_points, standard_metadata = load_standard_network(
+            standard_network_dir,
+            root_vertex_id=config.get("root_vertex_id", None),
+            dendrite_id=config.get("dendrite_id", None),
+            dendrite_type=config.get("dendrite_type", None),
+            project_spines=False,
+        )
+        if spine_points is None:
+            spine_points = loaded_spine_points
+
+    if graph is None and dendrite_mesh is None and mesh_path is not None:
         if not _TRIMESH:
             raise ImportError("trimesh is required to load mesh files.")
         import trimesh as _tr
@@ -2759,8 +3379,8 @@ def run_analysis(
         else:
             dendrite_mesh = tm
 
-    if dendrite_mesh is None:
-        raise ValueError("Either dendrite_mesh or mesh_path must be provided.")
+    if graph is None and dendrite_mesh is None:
+        raise ValueError("Either graph, standard_network_dir, dendrite_mesh or mesh_path must be provided.")
 
     if spine_points is None or len(spine_points) == 0:
         raise ValueError("spine_points must be a non-empty dict of spine attachment points.")
@@ -2769,15 +3389,17 @@ def run_analysis(
     dendrite_type = config.get("dendrite_type", "unknown")
     snap_threshold = float(config.get("snap_threshold", 2.0))
 
-    graph = build_dendritic_graph(
-        dendrite_mesh,
-        soma_point=soma_point,
-        dendrite_id=dendrite_id,
-        dendrite_type=dendrite_type,
-        snap_threshold=snap_threshold,
-    )
+    if graph is None:
+        graph = build_dendritic_graph(
+            dendrite_mesh,
+            soma_point=soma_point,
+            dendrite_id=dendrite_id,
+            dendrite_type=dendrite_type,
+            snap_threshold=snap_threshold,
+        )
 
-    max_dist_to_edge = float(config.get("max_distance_to_edge", 5.0))
+    max_dist_config = config.get("max_distance_to_edge", np.inf if standard_network_dir is not None else 5.0)
+    max_dist_to_edge = float(max_dist_config)
     projected_spines, unassigned_ids = project_spines_to_graph(
         graph,
         spine_points,
@@ -2793,22 +3415,46 @@ def run_analysis(
 
     _ = graph.soma_distances()
 
-    bin_size = float(config.get("bin_size", 25.0))
-    binned_intensity = estimate_binned_intensity(graph, projected_spines, bin_size=bin_size)
+    bin_size_config = config.get("bin_size", "auto")
+    max_network_samples = int(config.get("max_network_samples", 50_000))
+    max_integration_samples = int(config.get("max_integration_samples", 50_000))
+    if bin_size_config is None or (
+        isinstance(bin_size_config, str)
+        and bin_size_config.lower() in {"auto", "auto_diagnostic_only", "reference"}
+    ):
+        bin_size = auto_bin_size_for_network(graph, projected_spines)
+        print(
+            f"[network intensity] bin_size=auto -> {bin_size:.4f} "
+            "(diagnostic binned intensity only)",
+            flush=True,
+        )
+    else:
+        bin_size = float(bin_size_config)
+    binned_intensity = estimate_binned_intensity(
+        graph,
+        projected_spines,
+        bin_size=bin_size,
+        max_network_samples=max_network_samples,
+    )
     intensity_cdf_test = test_intensity_dependence_cdf(
         graph,
         projected_spines,
         sample_step=float(config.get("cdf_sample_step", 1.0)),
+        max_network_samples=max_network_samples,
     )
     intensity_lr_test = test_intensity_dependence(
         graph,
         projected_spines,
         n_bins=int(config.get("intensity_test_bins", 10)),
+        max_network_samples=max_network_samples,
     )
 
     bandwidth = config.get("bandwidth", None)
     smooth_d, smooth_lambda = estimate_smooth_intensity(
-        graph, projected_spines, bandwidth=bandwidth
+        graph,
+        projected_spines,
+        bandwidth=bandwidth,
+        max_network_samples=max_network_samples,
     )
 
     covariates = config.get(
@@ -2817,17 +3463,37 @@ def run_analysis(
     poisson_result: Optional[PoissonModelResult] = None
     if len(projected_spines) >= 3:
         try:
-            poisson_result = fit_inhomogeneous_poisson(graph, projected_spines, covariates=covariates)
+            poisson_result = fit_inhomogeneous_poisson(
+                graph,
+                projected_spines,
+                covariates=covariates,
+                max_integration_samples=max_integration_samples,
+                verbose_timing=bool(config.get("verbose_timing", True)),
+                timing_label=str(config.get("timing_label", "network")),
+            )
         except Exception as exc:
-            warnings.warn(f"Poisson model fitting failed: {exc}", stacklevel=2)
+            warnings.warn(
+                f"Poisson model fitting failed: {type(exc).__name__}: {exc!r}",
+                stacklevel=2,
+            )
 
     n_r = int(config.get("n_r_values", 20))
-    r_max = float(config.get("r_max", graph.total_length * 0.3))
-    r_values = np.linspace(0.0, r_max, n_r + 1)[1:]
+    r_values, resolved_r_max, r_max_source = resolve_k_r_values(
+        graph,
+        n_r_values=n_r,
+        r_max=config.get("r_max", "circumradius"),
+    )
+    print(
+        f"[network K] r_max={resolved_r_max:.4f} "
+        f"(source={r_max_source}), n_r_values={len(r_values)}",
+        flush=True,
+    )
 
     n_sim = int(config.get("n_simulations", 99))
     n_jobs = int(config.get("n_jobs", 8))
     k_correction = str(config.get("k_correction", "geometric"))
+    envelope_type = str(config.get("envelope_type", "global_constant_width"))
+    k_inhomogeneous = bool(config.get("k_inhomogeneous", True))
     random_state_value = config.get("random_state", 42)
     random_state = None if random_state_value is None else int(random_state_value)
     k_result: Optional[KFunctionResult] = None
@@ -2841,15 +3507,16 @@ def run_analysis(
                 n_jobs=n_jobs,
                 intensity_model=poisson_result,
                 correction=k_correction,
+                envelope_type=envelope_type,
+                require_inhomogeneous=k_inhomogeneous,
                 random_state=random_state,
                 timing_label=str(config.get("timing_label", "network")),
             )
         except Exception as exc:
-            warnings.warn(f"K function computation failed: {exc}", stacklevel=2)
-            try:
-                k_result = ripley_k_network(graph, projected_spines, r_values, correction=k_correction)
-            except Exception:
-                pass
+            warnings.warn(
+                f"K function computation failed: {type(exc).__name__}: {exc!r}",
+                stacklevel=2,
+            )
 
     report_format = config.get("report_format", "html")
     try:
@@ -2877,5 +3544,6 @@ def run_analysis(
         "intensity_lr_test": intensity_lr_test,
         "poisson_result": poisson_result,
         "k_result": k_result,
+        "standard_metadata": standard_metadata,
         "report_path": report_path,
     }

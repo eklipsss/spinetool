@@ -86,13 +86,17 @@ from .network import (
     DendriticGraph,
     KFunctionResult,
     PoissonModelResult,
+    auto_bin_size_for_network,
     build_dendritic_graph_from_skeleton,
     compute_simulation_envelopes,
     estimate_binned_intensity,
     estimate_smooth_intensity,
     fit_inhomogeneous_poisson,
+    network_circumradius,
     project_spines_to_graph,
     projected_spines_dataframe,
+    resolve_k_r_values,
+    save_standard_network,
     test_intensity_dependence,
     test_intensity_dependence_cdf,
 )
@@ -1112,6 +1116,116 @@ class Neuron:
             graph.G.nodes[graph.soma_node]["node_type"] = "soma"
         return graph
 
+    def build_limb_network_graph(self, limb: Limb, snap_threshold: float = 2.0) -> DendriticGraph:
+        """Строит дендритный граф одного limb.
+
+        Входные данные: объект `Limb` и радиус сшивания близких узлов.
+        Действие: строит граф по branch-skeletons выбранного limb; если они
+        недоступны, использует skeleton самого limb.
+        Выходные данные: `DendriticGraph` выбранного limb.
+        """
+        soma_point = self.soma.centroid
+        graphs: List[DendriticGraph] = []
+        for branch in limb.branches:
+            if branch.skeleton is None:
+                continue
+            graphs.append(
+                build_dendritic_graph_from_skeleton(
+                    branch.skeleton,
+                    soma_point=soma_point,
+                    dendrite_id=f"{limb.name}/{branch.name}",
+                    dendrite_type=branch.dendrite_type,
+                    snap_threshold=snap_threshold,
+                )
+            )
+        if not graphs and limb.skeleton is not None:
+            graphs.append(
+                build_dendritic_graph_from_skeleton(
+                    limb.skeleton,
+                    soma_point=soma_point,
+                    dendrite_id=limb.name,
+                    dendrite_type=limb.dendrite_type,
+                    snap_threshold=snap_threshold,
+                )
+            )
+        if not graphs:
+            raise ValueError(f"Limb {limb.name!r} has no valid skeleton.")
+        graph = _compose_graphs(graphs, snap_threshold=snap_threshold)
+        if graph.soma_node is None and soma_point is not None and graph.G.number_of_nodes() > 0:
+            node_ids = list(graph.G.nodes())
+            positions = np.array([graph.G.nodes[n]["pos"] for n in node_ids])
+            nearest_idx = int(np.argmin(np.linalg.norm(positions - soma_point, axis=1)))
+            graph.soma_node = node_ids[nearest_idx]
+            graph.G.nodes[graph.soma_node]["node_type"] = "soma"
+        return graph
+
+    def export_standard_networks(
+        self,
+        output_dir: str | Path = "standard_networks",
+        snap_threshold: float = 2.0,
+        min_valid_branch_spines: int = 3,
+    ) -> Dict[str, Path]:
+        """Экспортирует MICrONS-нейрон в канонический формат 3D-сетей.
+
+        Входные данные: директория вывода, радиус сшивания skeleton-узлов и
+        минимальное число шипиков на branch.
+        Действие: сохраняет сеть всего нейрона и отдельную сеть каждого limb
+        в формате `vertices.csv`, `edges.csv`, `spines.csv`, `matrix.npy`,
+        `metadata.json`.
+        Выходные данные: словарь путей сохранённых сетей.
+        """
+        output_dir = Path(output_dir) / self.name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        exported: Dict[str, Path] = {}
+
+        whole_graph = self.build_network_graph(snap_threshold=snap_threshold)
+        whole_spines = self.get_spine_points(min_valid_branch_spines=min_valid_branch_spines)
+        whole_dir = output_dir / "whole_neuron"
+        soma_point = self.soma.centroid
+        save_standard_network(
+            whole_graph,
+            whole_spines,
+            whole_dir,
+            metadata={
+                "source_format": "microns",
+                "neuron_id": self.name,
+                "network_level": "whole_neuron",
+            },
+            network_name=f"{self.name}_whole_neuron",
+            dendrite_type="mixed",
+            soma_point=soma_point,
+        )
+        exported["whole_neuron"] = whole_dir
+
+        for limb in self.limbs:
+            try:
+                limb_graph = self.build_limb_network_graph(limb, snap_threshold=snap_threshold)
+            except Exception as exc:
+                warnings.warn(f"Cannot export standard network for limb {limb.name}: {exc}", stacklevel=2)
+                continue
+            limb_spines: Dict[str, np.ndarray] = {}
+            for branch in limb.branches:
+                if len(branch.spine_points) < int(min_valid_branch_spines):
+                    continue
+                limb_spines.update(branch.spine_points)
+            limb_dir = output_dir / limb.name
+            save_standard_network(
+                limb_graph,
+                limb_spines,
+                limb_dir,
+                metadata={
+                    "source_format": "microns",
+                    "neuron_id": self.name,
+                    "network_level": "limb",
+                    "limb_name": limb.name,
+                },
+                network_name=f"{self.name}_{limb.name}",
+                dendrite_type=limb.dendrite_type,
+                soma_point=soma_point,
+            )
+            exported[limb.name] = limb_dir
+        return exported
+
     def infer_apical_limb_candidate(self) -> Optional[str]:
         """Предлагает кандидат на апикальный limb по грубой геометрической эвристике.
         Выбирает limb с максимальным произведением длины на удаление
@@ -1356,13 +1470,17 @@ class Neuron:
         auto_max_distance_to_edge_quantile: float = 1.0,
         auto_max_distance_to_edge_margin: float = 1.05,
         min_valid_branch_spines: int = 3,
-        bin_size: float = 25.0,
+        bin_size: Any = "auto",
+        max_network_samples: int = 50_000,
+        max_integration_samples: int = 50_000,
         covariates: Sequence[str] = ("intercept", "distance_to_soma", "distance_to_soma_squared"),
         n_r_values: int = 20,
-        r_max: Optional[float] = None,
+        r_max: Optional[Any] = "circumradius",
         n_simulations: int = 99,
         n_jobs: int = 8,
         k_correction: str = "geometric",
+        k_inhomogeneous: bool = True,
+        envelope_type: str = "global_constant_width",
         random_state: Optional[int] = 42,
         save_outputs: bool = True,
         log_projection_diagnostics: bool = True,
@@ -1377,9 +1495,9 @@ class Neuron:
         неоднородную пуассоновскую модель и сетевую функцию Рипли.
 
         Входные данные: параметры построения графа, проекции шипиков,
-        интенсивности, пуассоновской модели, K-функции, число параллельных
-        процессов для Monte Carlo симуляций, параметры сохранения и флаг
-        отображения progress bar.
+        интенсивности, лимиты сэмплирования сети, пуассоновской модели,
+        K-функции, число параллельных процессов для Monte Carlo симуляций,
+        параметры сохранения и флаг отображения progress bar.
         Выходные данные: объект `NeuronNetworkAnalysisResult` с графом,
         projected spines, таблицами анализа, ML-вектором и metadata-вектором.
         """
@@ -1523,30 +1641,84 @@ class Neuron:
                 if fig is not None:
                     print(f"[network projection branch-debug] saved: {save_path}", flush=True)
 
+        intensity_stage_start = perf_counter()
+        if bin_size is None or (
+            isinstance(bin_size, str) and bin_size.lower() in {"auto", "auto_diagnostic_only", "reference"}
+        ):
+            resolved_bin_size = auto_bin_size_for_network(graph, projected_spines)
+            print(
+                f"[network intensity] {self.name}: bin_size=auto -> {resolved_bin_size:.4f} "
+                "(diagnostic binned intensity only)",
+                flush=True,
+            )
+        else:
+            resolved_bin_size = float(bin_size)
         stage_start = perf_counter()
-        binned_intensity = estimate_binned_intensity(graph, projected_spines, bin_size=bin_size)
-        smooth_d, smooth_lambda = estimate_smooth_intensity(graph, projected_spines)
-        intensity_cdf_test = test_intensity_dependence_cdf(graph, projected_spines)
-        intensity_lr_test = test_intensity_dependence(graph, projected_spines)
-        self._log_timing("intensity_analysis", stage_start)
+        binned_intensity = estimate_binned_intensity(
+            graph,
+            projected_spines,
+            bin_size=resolved_bin_size,
+            max_network_samples=max_network_samples,
+        )
+        self._log_timing("intensity_binned", stage_start)
+        stage_start = perf_counter()
+        smooth_d, smooth_lambda = estimate_smooth_intensity(
+            graph,
+            projected_spines,
+            max_network_samples=max_network_samples,
+        )
+        self._log_timing("intensity_smooth", stage_start)
+        stage_start = perf_counter()
+        intensity_cdf_test = test_intensity_dependence_cdf(
+            graph,
+            projected_spines,
+            max_network_samples=max_network_samples,
+        )
+        self._log_timing("intensity_cdf_test", stage_start)
+        stage_start = perf_counter()
+        intensity_lr_test = test_intensity_dependence(
+            graph,
+            projected_spines,
+            max_network_samples=max_network_samples,
+        )
+        self._log_timing("intensity_lr_test", stage_start)
+        self._log_timing("intensity_analysis", intensity_stage_start)
         _advance_progress(network_progress, "intensity_analysis")
 
         poisson_result: Optional[PoissonModelResult] = None
         if len(projected_spines) >= 3:
             try:
                 stage_start = perf_counter()
-                poisson_result = fit_inhomogeneous_poisson(graph, projected_spines, covariates=covariates)
+                poisson_result = fit_inhomogeneous_poisson(
+                    graph,
+                    projected_spines,
+                    covariates=covariates,
+                    max_integration_samples=max_integration_samples,
+                    verbose_timing=True,
+                    timing_label=f"{self.name}:full",
+                )
                 self._log_timing("fit_inhomogeneous_poisson", stage_start)
                 _advance_progress(network_progress, "fit_inhomogeneous_poisson")
             except Exception as exc:
-                warnings.warn(f"Poisson model fitting failed for neuron {self.name}: {exc}", stacklevel=2)
+                warnings.warn(
+                    f"Poisson model fitting failed for neuron {self.name}: "
+                    f"{type(exc).__name__}: {exc!r}",
+                    stacklevel=2,
+                )
                 _advance_progress(network_progress, "fit_inhomogeneous_poisson failed")
         else:
             _advance_progress(network_progress, "fit_inhomogeneous_poisson skipped")
 
-        if r_max is None:
-            r_max = graph.total_length * 0.3
-        r_values = np.linspace(0.0, float(r_max), int(n_r_values) + 1)[1:]
+        r_values, resolved_r_max, r_max_source = resolve_k_r_values(
+            graph,
+            n_r_values=n_r_values,
+            r_max=r_max,
+        )
+        print(
+            f"[network K] {self.name}: r_max={resolved_r_max:.4f} "
+            f"(source={r_max_source}), n_r_values={len(r_values)}",
+            flush=True,
+        )
 
         k_result: Optional[KFunctionResult] = None
         if len(projected_spines) >= 2:
@@ -1560,13 +1732,18 @@ class Neuron:
                     n_jobs=n_jobs,
                     intensity_model=poisson_result,
                     correction=k_correction,
+                    envelope_type=envelope_type,
+                    require_inhomogeneous=k_inhomogeneous,
                     random_state=random_state,
                     timing_label=f"{self.name}:full",
                 )
                 self._log_timing("ripley_k_envelopes", stage_start)
                 _advance_progress(network_progress, "ripley_k_envelopes")
             except Exception as exc:
-                warnings.warn(f"K analysis failed for neuron {self.name}: {exc}", stacklevel=2)
+                warnings.warn(
+                    f"K analysis failed for neuron {self.name}: {type(exc).__name__}: {exc!r}",
+                    stacklevel=2,
+                )
                 _advance_progress(network_progress, "ripley_k_envelopes failed")
         else:
             _advance_progress(network_progress, "ripley_k_envelopes skipped")
@@ -1578,7 +1755,10 @@ class Neuron:
             n_r_values=n_r_values,
             n_simulations=n_simulations,
             n_jobs=n_jobs,
+            max_integration_samples=max_integration_samples,
             k_correction=k_correction,
+            k_inhomogeneous=k_inhomogeneous,
+            envelope_type=envelope_type,
             covariates=covariates,
             random_state=random_state,
         )
@@ -1888,7 +2068,10 @@ class Neuron:
         n_r_values: int,
         n_simulations: int,
         n_jobs: int,
+        max_integration_samples: int,
         k_correction: str,
+        k_inhomogeneous: bool,
+        envelope_type: str,
         covariates: Sequence[str],
         random_state: Optional[int],
     ) -> Dict[str, KFunctionResult]:
@@ -1898,7 +2081,7 @@ class Neuron:
 
         Входные данные: полный граф нейрона, спроецированные шипики, параметры
         K-функции, число параллельных процессов для Monte Carlo симуляций,
-        ковариаты пуассоновской модели и seed.
+        лимит quadrature-сэмплирования, ковариаты пуассоновской модели и seed.
         Выходные данные: словарь `{тип дендрита: KFunctionResult}`.
         """
         results: Dict[str, KFunctionResult] = {}
@@ -1912,8 +2095,16 @@ class Neuron:
             )
             if compartment_graph.total_length <= 1e-12 or len(compartment_spines) < 3:
                 continue
-            r_max = compartment_graph.total_length * 0.3
-            r_values = np.linspace(0.0, float(r_max), int(n_r_values) + 1)[1:]
+            r_values, resolved_r_max, r_max_source = resolve_k_r_values(
+                compartment_graph,
+                n_r_values=n_r_values,
+                r_max="circumradius",
+            )
+            print(
+                f"[network K] {self.name}:{dendrite_type}: r_max={resolved_r_max:.4f} "
+                f"(source={r_max_source}), n_r_values={len(r_values)}",
+                flush=True,
+            )
             compartment_poisson: Optional[PoissonModelResult] = None
             if len(compartment_spines) >= 3:
                 try:
@@ -1921,10 +2112,14 @@ class Neuron:
                         compartment_graph,
                         compartment_spines,
                         covariates=covariates,
+                        max_integration_samples=max_integration_samples,
+                        verbose_timing=True,
+                        timing_label=f"{self.name}:{dendrite_type}",
                     )
                 except Exception as exc:
                     warnings.warn(
-                        f"{dendrite_type} Poisson model fitting failed for neuron {self.name}: {exc}",
+                        f"{dendrite_type} Poisson model fitting failed for neuron {self.name}: "
+                        f"{type(exc).__name__}: {exc!r}",
                         stacklevel=2,
                     )
             try:
@@ -1936,13 +2131,16 @@ class Neuron:
                     n_jobs=n_jobs,
                     intensity_model=compartment_poisson,
                     correction=k_correction,
+                    envelope_type=envelope_type,
+                    require_inhomogeneous=k_inhomogeneous,
                     fit_intensity_if_missing=False,
                     random_state=int(rng.integers(0, np.iinfo(np.int32).max)),
                     timing_label=f"{self.name}:{dendrite_type}",
                 )
             except Exception as exc:
                 warnings.warn(
-                    f"{dendrite_type} K analysis failed for neuron {self.name}: {exc}",
+                    f"{dendrite_type} K analysis failed for neuron {self.name}: "
+                    f"{type(exc).__name__}: {exc!r}",
                     stacklevel=2,
                 )
         return results
@@ -1986,6 +2184,7 @@ class Neuron:
             "n_spines_unassigned": unassigned_count,
             "projection_success_rate": projected_count / valid_spines if valid_spines else np.nan,
             "network_total_length": graph.total_length,
+            "network_circumradius": network_circumradius(graph),
             "network_n_nodes": graph.n_nodes,
             "network_n_edges": graph.n_edges,
             "network_n_branch_nodes": branch_nodes,
@@ -2013,6 +2212,12 @@ class Neuron:
             row["poisson_converged"] = poisson_result.diagnostics.get("converged", np.nan)
         if k_result is not None:
             row["k_method"] = k_result.method
+            row["k_n_simulations"] = k_result.diagnostics.get("n_simulations", np.nan)
+            row["k_envelope_type"] = k_result.diagnostics.get("envelope_type", "")
+            row["k_require_inhomogeneous"] = k_result.diagnostics.get("require_inhomogeneous", np.nan)
+            row["k_r_min"] = k_result.diagnostics.get("r_min", np.nan)
+            row["k_r_max"] = k_result.diagnostics.get("r_max", np.nan)
+            row["k_global_envelope_width"] = k_result.diagnostics.get("global_envelope_width", np.nan)
         return row
 
     def save_network_analysis_result(
