@@ -17,9 +17,7 @@ from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.stats import chi2, ks_2samp
 
-# ---------------------------------------------------------------------------
-# Optional dependencies
-# ---------------------------------------------------------------------------
+
 try:
     import plotly.graph_objects as _go
     from plotly.subplots import make_subplots as _make_subplots
@@ -60,7 +58,7 @@ except ImportError:
     _TRIMESH = False
 
 # ---------------------------------------------------------------------------
-# Public API
+# API
 # ---------------------------------------------------------------------------
 __all__ = [
     # dataclasses
@@ -124,8 +122,6 @@ __all__ = [
 
 
 # ===========================================================================
-# Dataclasses
-# ===========================================================================
 
 @dataclass
 class ProjectedSpine:
@@ -184,8 +180,6 @@ class KFunctionResult:
 
 
 # ===========================================================================
-# DendriticGraph
-# ===========================================================================
 
 class DendriticGraph:
     """Графовое представление дендритной сети.
@@ -212,10 +206,10 @@ class DendriticGraph:
 
     def __getstate__(self) -> Dict[str, Any]:
         """Подготавливает граф к сериализации между процессами.
+        Исключает кэш сэмплированных точек, чтобы не копировать
+        крупные массивы в дочерние процессы.
 
         Входные данные: текущий объект `DendriticGraph`.
-        Действие: исключает кэш сэмплированных точек, чтобы не копировать
-        крупные массивы в дочерние процессы.
         Выходные данные: словарь состояния объекта.
         """
         state = self.__dict__.copy()
@@ -291,9 +285,7 @@ class DendriticGraph:
             rows.append({"source": u, "target": v, "length": data.get("length", 0.0)})
         return pd.DataFrame(rows)
 
-    # ------------------------------------------------------------------
-    # Node/position helpers
-    # ------------------------------------------------------------------
+    # ===========================================================================
 
     def node_position(self, node: int) -> np.ndarray:
         """Возвращает координаты узла графа.
@@ -315,9 +307,7 @@ class DendriticGraph:
             return np.empty((0, 3))
         return np.stack([self.node_position(n) for n in nodes])
 
-    # ------------------------------------------------------------------
-    # Distance helpers
-    # ------------------------------------------------------------------
+    # ===========================================================================
 
     def soma_distances(self, recompute: bool = False) -> Dict[int, float]:
         """Вычисляет расстояния от сомы до всех узлов графа.
@@ -403,8 +393,6 @@ class DendriticGraph:
 
 
 # ===========================================================================
-# Graph building
-# ===========================================================================
 
 def _graph_from_skeleton_segments(
     segments: List[Tuple[np.ndarray, np.ndarray]],
@@ -412,11 +400,11 @@ def _graph_from_skeleton_segments(
     dendrite_type: str = "unknown",
 ) -> DendriticGraph:
     """Строит дендритный граф из списка skeleton-сегментов.
+    Создаёт узлы по координатам концов сегментов, добавляет рёбра с
+    длинами и классифицирует узлы как terminal, branch или intermediate.
 
     Входные данные: список пар трёхмерных точек, идентификатор дендрита и тип
     дендрита.
-    Действие: создаёт узлы по координатам концов сегментов, добавляет рёбра с
-    длинами и классифицирует узлы как terminal, branch или intermediate.
     Выходные данные: объект `DendriticGraph`.
     """
     dg = DendriticGraph()
@@ -582,12 +570,10 @@ def build_dendritic_graph_from_vertices_edges(
     dendrite_type: str = "unknown",
     snap_threshold: float = 2.0,
 ) -> DendriticGraph:
-    """Строит дендритный граф из канонических таблиц vertices/edges.
+    """Строит дендритный граф из таблиц vertices/edges.
 
     Входные данные: таблица/массив вершин, таблица/массив рёбер, id корневой
     вершины или точка сомы, идентификатор и тип дендрита.
-    Действие: создаёт `DendriticGraph` без mesh/skeletonization, сохраняет
-    координаты вершин и длины рёбер в графовой метрике.
     Выходные данные: объект `DendriticGraph`.
     """
     if isinstance(vertices, pd.DataFrame):
@@ -680,11 +666,11 @@ def load_standard_network(
     project_spines: bool = True,
     max_distance_to_edge: float = np.inf,
 ) -> Tuple[DendriticGraph, Dict[str, np.ndarray], Dict[str, Any]]:
-    """Загружает каноническую 3D-сеть из папки.
+    """Загружает 3D-сеть.
+    Строит граф из vertices/edges и читает точки шипиков X.
 
     Входные данные: папка с `vertices.csv`, `edges.csv`, `spines.csv` и
     опциональным `metadata.json`; параметры корня и проекции шипиков.
-    Действие: строит граф из vertices/edges и читает точки шипиков X.
     Выходные данные: `(graph, spine_points, metadata)`.
     """
     network_dir = Path(network_dir)
@@ -761,11 +747,11 @@ def save_standard_network(
     soma_point: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Сохраняет граф и точки шипиков в каноническом формате.
+    Записывает `vertices.csv`, `edges.csv`, `spines.csv`,
+    `matrix.npy` и `metadata.json`.
 
     Входные данные: `DendriticGraph`, точки шипиков или `ProjectedSpine`,
     папка вывода и metadata.
-    Действие: записывает `vertices.csv`, `edges.csv`, `spines.csv`,
-    `matrix.npy` и `metadata.json`.
     Выходные данные: metadata сохранённой сети.
     """
     output_dir = Path(output_dir)
@@ -1223,11 +1209,10 @@ def compute_spine_pairwise_distances(
 
 
 def network_circumradius(graph: DendriticGraph) -> float:
-    """Оценивает circumradius дендритной сети в графовой метрике.
+    """Для каждой связной компоненты оценивает диаметр двумя запусками
+    Dijkstra и возвращает половину максимального диаметра.
 
     Входные данные: дендритный граф с длинами рёбер.
-    Действие: для каждой связной компоненты оценивает диаметр двумя запусками
-    Dijkstra и возвращает половину максимального диаметра.
     Выходные данные: радиус сети в единицах длины графа.
     """
     if graph.G.number_of_edges() == 0:
@@ -1260,8 +1245,6 @@ def resolve_k_r_values(
     """Формирует сетку радиусов для сетевой K-функции.
 
     Входные данные: граф, число радиусов и значение `r_max`.
-    Действие: если `r_max` равно `None`, `"circumradius"` или `"auto"`,
-    использует circumradius сети; иначе использует численное значение.
     Выходные данные: массив радиусов, использованный максимум и источник
     выбора радиуса.
     """
@@ -1389,10 +1372,10 @@ def _adaptive_graph_sample_step(
     max_samples: int = 50_000,
 ) -> float:
     """Подбирает шаг сэмплирования графа с ограничением числа точек.
+    Увеличивает шаг, если заданный шаг создаёт слишком много
+    точек на длинной дендритной сети.
 
     Входные данные: граф, желаемый шаг и максимальное число sample-точек.
-    Действие: увеличивает шаг, если заданный шаг создаёт слишком много
-    точек на длинной дендритной сети.
     Выходные данные: эффективный шаг сэмплирования.
     """
     requested_step = float(max(requested_step, 1e-9))
@@ -1420,12 +1403,12 @@ def auto_bin_size_for_network(
     min_expected_spines_per_bin: float = 3.0,
 ) -> float:
     """Подбирает диагностический bin_size для расстояния от сомы.
+    Выбирает ширину бина по протяжённости distance-to-soma оси,
+    числу шипиков и локальным расстояниям между соседними значениями
+    distance-to-soma.
 
     Входные данные: дендритный граф, спроецированные шипики и ограничения
     на число бинов/ожидаемое число шипиков в бине.
-    Действие: выбирает ширину бина по протяжённости distance-to-soma оси,
-    числу шипиков и локальным расстояниям между соседними значениями
-    distance-to-soma.
     Выходные данные: положительная ширина бина.
     """
     soma_distances = np.asarray(list(graph.soma_distances().values()), dtype=float)
@@ -1844,12 +1827,12 @@ def fit_inhomogeneous_poisson(
     timing_label: str = "poisson",
 ) -> PoissonModelResult:
     """Подгоняет неоднородную пуассоновскую модель интенсивности шипиков.
+    Максимизирует логарифм функции правдоподобия точечного процесса на сети,
+    вычисляет коэффициенты, стандартные ошибки, AIC, BIC и residuals.
 
     Входные данные: дендритный граф, спроецированные шипики и список ковариат.
     Дополнительно принимает шаг и лимит quadrature-сэмплирования сети,
     а также параметры timing-лога.
-    Действие: максимизирует логарифм функции правдоподобия точечного процесса на сети,
-    вычисляет коэффициенты, стандартные ошибки, AIC, BIC и residuals.
     Выходные данные: объект `PoissonModelResult`.
     """
     covariate_names = list(covariates)

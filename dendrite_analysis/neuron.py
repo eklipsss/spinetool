@@ -176,10 +176,10 @@ def _safe_register_dendrite_skeleton(dendrite_mesh: Any, skeleton: Any) -> None:
 
 def _safe_mesh_metrics(mesh: Optional[Any]) -> Dict[str, float]:
     """Вычисляет базовые геометрические метрики mesh-объекта.
+    Оценивает объём, площадь поверхности, размеры bounding box и
+    эквивалентный радиус; при нулевом объёме пробует convex hull.
 
     Входные данные: mesh или `None`.
-    Действие: оценивает объём, площадь поверхности, размеры bounding box и
-    эквивалентный радиус; при нулевом объёме пробует convex hull.
     Выходные данные: словарь числовых mesh-метрик.
     """
     if mesh is None:
@@ -286,10 +286,11 @@ def _skeleton_length(skeleton: Any) -> float:
 
 def _attachment_point_from_spine_mesh(mesh: Any) -> np.ndarray:
     """Определяет точку крепления шипика по его mesh.
+    Пытается найти дырку у основания шипика и возвращает
+    среднюю координату вершин выбранного кольца, 
+    при ошибке возвращает centroid.
 
     Входные данные: mesh шипика в глобальных координатах.
-    Действие: пытается найти дырку у основания шипика и возвращает
-    среднюю координату вершин выбранного кольца; при ошибке возвращает centroid.
     Выходные данные: трёхмерная координата точки крепления.
     """
     vertices = np.asarray(mesh.vertices, dtype=float)
@@ -470,7 +471,6 @@ def _spine_expected_branch_id(spine_id: str) -> Optional[str]:
 
     Входные данные: `spine_id`, обычно вида
     `limb_000/branch_000/spines/spine_000.off`.
-    Действие: находит компоненты `limb_*` и `branch_*`.
     Выходные данные: строка `limb_*/branch_*` или `None`.
     """
     parts = Path(str(spine_id).replace("\\", "/")).parts
@@ -483,10 +483,10 @@ def _spine_expected_branch_id(spine_id: str) -> Optional[str]:
 
 def _edge_dendrite_id(graph: DendriticGraph, u: int, v: int) -> str:
     """Возвращает dendrite_id ребра графа.
+    Сравнивает `dendrite_id` конечных узлов; если они совпадают,
+    возвращает это значение, иначе формирует смешанный id.
 
     Входные данные: граф и id двух концов ребра.
-    Действие: сравнивает `dendrite_id` конечных узлов; если они совпадают,
-    возвращает это значение, иначе формирует смешанный id.
     Выходные данные: строковый идентификатор dendrite/branch.
     """
     u_id = str(graph.G.nodes[u].get("dendrite_id", ""))
@@ -504,8 +504,6 @@ def _project_point_to_segment_local(
     """Проецирует точку на 3D-сегмент.
 
     Входные данные: точка и два конца сегмента.
-    Действие: вычисляет ближайшую точку на сегменте, параметр `t` и
-    евклидово расстояние.
     Выходные данные: `(projected_point, t, distance)`.
     """
     direction = seg_end - seg_start
@@ -526,8 +524,6 @@ def _nearest_edge_on_expected_branch(
     """Ищет ближайшее ребро на ожидаемой branch шипика.
 
     Входные данные: граф, точка шипика и expected branch-id.
-    Действие: фильтрует рёбра по `dendrite_id`, проецирует точку на каждое
-    подходящее ребро и выбирает минимальное расстояние.
     Выходные данные: словарь с ближайшим ребром, точкой проекции и расстоянием.
     """
     best: Dict[str, Any] = {
@@ -569,12 +565,12 @@ def _build_projection_branch_diagnostics(
     unassigned_ids: Sequence[str],
 ) -> pd.DataFrame:
     """Формирует таблицу проверки соответствия шипика и branch проекции.
+    Для каждого шипика извлекает expected branch из пути, определяет
+    branch фактически выбранного ребра и отдельно считает ближайшее расстояние
+    до skeleton ожидаемой branch.
 
     Входные данные: граф, исходные точки шипиков, список спроецированных
     шипиков и список неспроецированных id.
-    Действие: для каждого шипика извлекает expected branch из пути, определяет
-    branch фактически выбранного ребра и отдельно считает ближайшее расстояние
-    до skeleton ожидаемой branch.
     Выходные данные: `DataFrame` с диагностикой проекции.
     """
     projected_by_id = {spine.spine_id: spine for spine in projected_spines}
@@ -635,8 +631,6 @@ def _plot_branch_projection_debug(
     Входные данные: полный граф, объект branch, id шипика, mesh шипика,
     исходная точка крепления, ближайшая точка на skeleton branch, расстояние,
     путь сохранения и флаг отображения.
-    Действие: рисует рёбра skeleton соответствующей branch, mesh шипика,
-    точку крепления, точку проекции и отрезок кратчайшего расстояния.
     Выходные данные: Plotly figure или `None`, если Plotly недоступен.
     """
     try:
@@ -738,10 +732,10 @@ class Soma:
     @classmethod
     def from_microns_folder(cls, neuron_path: Path) -> "Soma":
         """Создаёт объект сомы из папки нейрона MICrONS.
+        Ищет `soma/soma_mesh.off`, загружает mesh и считает базовые
+        mesh-метрики.
 
         Входные данные: путь к папке нейрона.
-        Действие: ищет `soma/soma_mesh.off`, загружает mesh и считает базовые
-        mesh-метрики.
         Выходные данные: объект `Soma`.
         """
         soma_path = neuron_path / "soma"
@@ -760,7 +754,6 @@ class Soma:
         """Возвращает центр mesh сомы.
 
         Входные данные: поле `self.mesh`.
-        Действие: извлекает centroid mesh-объекта.
         Выходные данные: трёхмерная координата centroid или `None`.
         """
         if self.mesh is None:
@@ -796,8 +789,6 @@ class Branch:
 
         Входные данные: путь к папке ветви, имя limb, тип дендрита, паттерн
         файлов шипиков и флаг загрузки точек шипиков.
-        Действие: загружает `branch_mesh.off`, `branch_skeleton.npy`, при
-        необходимости загружает mesh-и шипиков из папки `spines`.
         Выходные данные: объект `Branch`.
         """
         branch = cls(
@@ -821,8 +812,6 @@ class Branch:
         """Возвращает длину ветви.
 
         Входные данные: skeleton ветви или mesh ветви.
-        Действие: считает длину по skeleton; если skeleton недоступен,
-        использует максимальный размер oriented bounding box как fallback.
         Выходные данные: длина ветви или `0.0`.
         """
         length = _skeleton_length(self.skeleton)
@@ -886,8 +875,6 @@ class Limb:
 
         Входные данные: путь к limb, тип дендрита, карта типов branch,
         паттерн файлов шипиков и флаг загрузки точек шипиков.
-        Действие: загружает `limb_mesh.off`, `limb_skeleton.npy` и все
-        дочерние `branch_*`, содержащие папку `spines`.
         Выходные данные: объект `Limb` со списком ветвей.
         """
         branch_type_map = branch_type_map or {}
@@ -1020,7 +1007,6 @@ class Neuron:
         """Возвращает branch-объекты по id `limb_*/branch_*`.
 
         Входные данные: список branch-объектов нейрона.
-        Действие: формирует ключ из имени limb и имени branch.
         Выходные данные: словарь `{branch_id: Branch}`.
         """
         return {f"{branch.limb_name}/{branch.name}": branch for branch in self.branches}
@@ -1030,7 +1016,6 @@ class Neuron:
         """Возвращает точки всех загруженных шипиков без фильтрации ветвей.
 
         Входные данные: `spine_points` всех branch-объектов.
-        Действие: объединяет словари точек шипиков.
         Выходные данные: словарь `{spine_id: attachment_point}`.
         """
         points: Dict[str, np.ndarray] = {}
@@ -1120,8 +1105,6 @@ class Neuron:
         """Строит дендритный граф одного limb.
 
         Входные данные: объект `Limb` и радиус сшивания близких узлов.
-        Действие: строит граф по branch-skeletons выбранного limb; если они
-        недоступны, использует skeleton самого limb.
         Выходные данные: `DendriticGraph` выбранного limb.
         """
         soma_point = self.soma.centroid
@@ -1166,12 +1149,12 @@ class Neuron:
         min_valid_branch_spines: int = 3,
     ) -> Dict[str, Path]:
         """Экспортирует MICrONS-нейрон в канонический формат 3D-сетей.
+        Сохраняет сеть всего нейрона и отдельную сеть каждого limb
+        в формате `vertices.csv`, `edges.csv`, `spines.csv`, `matrix.npy`,
+        `metadata.json`.
 
         Входные данные: директория вывода, радиус сшивания skeleton-узлов и
         минимальное число шипиков на branch.
-        Действие: сохраняет сеть всего нейрона и отдельную сеть каждого limb
-        в формате `vertices.csv`, `edges.csv`, `spines.csv`, `matrix.npy`,
-        `metadata.json`.
         Выходные данные: словарь путей сохранённых сетей.
         """
         output_dir = Path(output_dir) / self.name
