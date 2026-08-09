@@ -2065,18 +2065,21 @@ def _geometric_multiplicity_matrix(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
     dist_matrix: np.ndarray,
+    max_distance: Optional[float] = None,
 ) -> np.ndarray:
     """Строит матрицу геометрических множителей для K-функции на сети.
     Для каждой пары шипиков оценивает число направлений/точек
     сетевой сферы на соответствующем расстоянии.
 
-    Входные данные: граф, список шипиков и матрица сетевых расстояний.
+    Входные данные: граф, список шипиков, матрица сетевых расстояний и
+    опциональный максимальный радиус K-функции.
     Выходные данные: матрица multiplicity той же формы, что и матрица
     расстояний.
     """
     n = len(spines)
     multiplicity = np.ones((n, n), dtype=float)
     np.fill_diagonal(multiplicity, np.inf)
+    max_distance_value = None if max_distance is None else float(max_distance)
 
     for i, spine in enumerate(spines):
         source_distances = _source_node_distances(graph, spine)
@@ -2085,6 +2088,7 @@ def _geometric_multiplicity_matrix(
                 float(d)
                 for d in dist_matrix[i]
                 if np.isfinite(d) and d > 1e-8
+                and (max_distance_value is None or d <= max_distance_value + 1e-8)
             }
         )
         cache = {
@@ -2149,7 +2153,13 @@ def ripley_k_network(
     multiplicity: Optional[np.ndarray] = None
     if use_geometric:
         stage_start = perf_counter()
-        multiplicity = _geometric_multiplicity_matrix(graph, spines, dist_matrix)
+        max_k_distance = float(np.max(r_values)) if len(r_values) else None
+        multiplicity = _geometric_multiplicity_matrix(
+            graph,
+            spines,
+            dist_matrix,
+            max_distance=max_k_distance,
+        )
         diagnostics["geometric_multiplicity_seconds"] = perf_counter() - stage_start
     else:
         diagnostics["geometric_multiplicity_seconds"] = 0.0
