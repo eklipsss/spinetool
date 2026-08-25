@@ -1576,7 +1576,8 @@ def estimate_smooth_intensity(
         frac = counts.astype(float) / len(sample_sd_sorted)
         rho_net = frac * total_len / (2.0 * window) if window > 0 else rho_net
 
-    lambda_hat = np.where(rho_net > 1e-12, kde / rho_net, 0.0)
+    lambda_hat = np.zeros_like(kde, dtype=float)
+    np.divide(kde, rho_net, out=lambda_hat, where=rho_net > 1e-12)
 
     return d_grid, lambda_hat
 
@@ -2061,11 +2062,236 @@ def _network_sphere_multiplicity(
     return int(count)
 
 
+def _graph_edge_geometry_arrays(
+    graph: DendriticGraph,
+) -> Tuple[List[int], np.ndarray, np.ndarray, np.ndarray]:
+    """Подготавливает массивы рёбер для быстрого подсчёта multiplicity."""
+    node_ids = list(graph.G.nodes())
+    node_to_index = {node: index for index, node in enumerate(node_ids)}
+    edge_u_idx: List[int] = []
+    edge_v_idx: List[int] = []
+    edge_lengths: List[float] = []
+    for u, v, edata in graph.G.edges(data=True):
+        edge_u_idx.append(node_to_index[u])
+        edge_v_idx.append(node_to_index[v])
+        edge_lengths.append(float(edata.get("length", 0.0)))
+    return (
+        node_ids,
+        np.asarray(edge_u_idx, dtype=int),
+        np.asarray(edge_v_idx, dtype=int),
+        np.asarray(edge_lengths, dtype=float),
+    )
+
+
+def _source_node_distances_array(
+    graph: DendriticGraph,
+    spine: ProjectedSpine,
+    node_ids: Sequence[int],
+) -> np.ndarray:
+    """Вычисляет расстояния от шипика до узлов в порядке `node_ids`."""
+    source_distances = _source_node_distances(graph, spine)
+    return np.asarray([source_distances.get(node, np.inf) for node in node_ids], dtype=float)
+
+
+def _all_pairs_node_distance_matrix(
+    graph: DendriticGraph,
+    node_ids: Sequence[int],
+    max_entries: int = 10_000_000,
+) -> Tuple[Optional[Dict[int, int]], Optional[np.ndarray]]:
+    """Предрассчитывает shortest-path расстояния между вершинами, если это разумно по памяти."""
+    n_nodes = len(node_ids)
+    if n_nodes <= 0 or n_nodes * n_nodes > int(max_entries):
+        return None, None
+
+    node_to_index = {node: index for index, node in enumerate(node_ids)}
+    distances = np.full((n_nodes, n_nodes), np.inf, dtype=float)
+    for source, lengths in nx.all_pairs_dijkstra_path_length(graph.G, weight="length"):
+        source_index = node_to_index.get(source)
+        if source_index is None:
+            continue
+        distances[source_index, source_index] = 0.0
+        for target, distance in lengths.items():
+            target_index = node_to_index.get(target)
+            if target_index is not None:
+                distances[source_index, target_index] = float(distance)
+    return node_to_index, distances
+
+
+def _source_node_distances_from_matrix(
+    graph: DendriticGraph,
+    spine: ProjectedSpine,
+    node_ids: Sequence[int],
+    node_to_index: Optional[Dict[int, int]],
+    node_distance_matrix: Optional[np.ndarray],
+) -> np.ndarray:
+    """Быстро вычисляет расстояния от шипика до узлов через кэш расстояний между вершинами."""
+    if node_to_index is None or node_distance_matrix is None:
+        return _source_node_distances_array(graph, spine, node_ids)
+
+    u0, v0 = spine.edge_source, spine.edge_target
+    u_index = node_to_index.get(u0)
+    v_index = node_to_index.get(v0)
+    if u_index is None or v_index is None:
+        return _source_node_distances_array(graph, spine, node_ids)
+
+    if graph.G.has_edge(u0, v0):
+        edge_len = float(graph.G[u0][v0].get("length", 0.0))
+    else:
+        edge_len = float(np.linalg.norm(graph.node_position(v0) - graph.node_position(u0)))
+    edge_len = max(edge_len, 0.0)
+    t = float(spine.edge_position)
+    return np.minimum(
+        t * edge_len + node_distance_matrix[u_index],
+        (1.0 - t) * edge_len + node_distance_matrix[v_index],
+    )
+
+
+def _network_sphere_multiplicity_from_arrays(
+    edge_u_idx: np.ndarray,
+    edge_v_idx: np.ndarray,
+    edge_lengths: np.ndarray,
+    source_node_distances: np.ndarray,
+    distance: float,
+    tol: float = 1e-8,
+) -> int:
+    """Векторизованно считает число точек сетевой сферы радиуса `distance`."""
+    if not np.isfinite(distance) or distance <= tol or len(edge_lengths) == 0:
+        return 0
+
+    length = edge_lengths
+    valid_length = length > tol
+    if not np.any(valid_length):
+        return 0
+
+    du = source_node_distances[edge_u_idx]
+    dv = source_node_distances[edge_v_idx]
+    finite_du = np.isfinite(du)
+    finite_dv = np.isfinite(dv)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s_u = (distance - du) / length
+    s_u_clipped = np.clip(s_u, 0.0, 1.0)
+    via_u = du + s_u_clipped * length
+    via_v_from_u = np.where(finite_dv, dv + (1.0 - s_u_clipped) * length, np.inf)
+    valid_u = (
+        valid_length
+        & finite_du
+        & (s_u >= -tol)
+        & (s_u <= 1.0 + tol)
+        & (np.abs(via_u - distance) <= max(tol, tol * distance))
+        & (via_u <= via_v_from_u + tol)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s_v = (dv + length - distance) / length
+    s_v_clipped = np.clip(s_v, 0.0, 1.0)
+    via_u_from_v = np.where(finite_du, du + s_v_clipped * length, np.inf)
+    via_v = dv + (1.0 - s_v_clipped) * length
+    valid_v = (
+        valid_length
+        & finite_dv
+        & (s_v >= -tol)
+        & (s_v <= 1.0 + tol)
+        & (np.abs(via_v - distance) <= max(tol, tol * distance))
+        & (via_v <= via_u_from_v + tol)
+    )
+
+    duplicate = valid_u & valid_v & (np.abs(s_u_clipped - s_v_clipped) <= 1e-7)
+    return int(np.count_nonzero(valid_u) + np.count_nonzero(valid_v) - np.count_nonzero(duplicate))
+
+
+def _geometric_multiplicity_rows(
+    graph: DendriticGraph,
+    spines: List[ProjectedSpine],
+    dist_matrix: np.ndarray,
+    row_indices: Sequence[int],
+    max_distance: Optional[float],
+    node_ids: Sequence[int],
+    node_to_index: Optional[Dict[int, int]],
+    node_distance_matrix: Optional[np.ndarray],
+    edge_u_idx: np.ndarray,
+    edge_v_idx: np.ndarray,
+    edge_lengths: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Считает строки матрицы multiplicity для независимой пачки шипиков."""
+    n = len(spines)
+    rows = np.ones((len(row_indices), n), dtype=float)
+    max_distance_value = None if max_distance is None else float(max_distance)
+
+    for local_index, i in enumerate(row_indices):
+        rows[local_index, i] = np.inf
+        source_distances = _source_node_distances_from_matrix(
+            graph,
+            spines[i],
+            node_ids,
+            node_to_index,
+            node_distance_matrix,
+        )
+        finite_distances = sorted(
+            {
+                float(d)
+                for d in dist_matrix[i]
+                if np.isfinite(d) and d > 1e-8
+                and (max_distance_value is None or d <= max_distance_value + 1e-8)
+            }
+        )
+        cache = {
+            d: max(
+                1,
+                _network_sphere_multiplicity_from_arrays(
+                    edge_u_idx,
+                    edge_v_idx,
+                    edge_lengths,
+                    source_distances,
+                    d,
+                ),
+            )
+            for d in finite_distances
+        }
+        for j in range(n):
+            d = float(dist_matrix[i, j])
+            if np.isfinite(d) and d > 1e-8:
+                rows[local_index, j] = float(cache.get(d, 1))
+
+    return np.asarray(row_indices, dtype=int), rows
+
+
+def _geometric_multiplicity_chunk(args: Tuple[Any, List[ProjectedSpine], np.ndarray, np.ndarray, Optional[float], Sequence[int], Optional[Dict[int, int]], Optional[np.ndarray], np.ndarray, np.ndarray, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """Worker-wrapper для параллельного подсчёта строк multiplicity."""
+    (
+        graph,
+        spines,
+        dist_matrix,
+        row_indices,
+        max_distance,
+        node_ids,
+        node_to_index,
+        node_distance_matrix,
+        edge_u_idx,
+        edge_v_idx,
+        edge_lengths,
+    ) = args
+    return _geometric_multiplicity_rows(
+        graph,
+        spines,
+        dist_matrix,
+        row_indices,
+        max_distance,
+        node_ids,
+        node_to_index,
+        node_distance_matrix,
+        edge_u_idx,
+        edge_v_idx,
+        edge_lengths,
+    )
+
+
 def _geometric_multiplicity_matrix(
     graph: DendriticGraph,
     spines: List[ProjectedSpine],
     dist_matrix: np.ndarray,
     max_distance: Optional[float] = None,
+    n_jobs: int = 1,
 ) -> np.ndarray:
     """Строит матрицу геометрических множителей для K-функции на сети.
     Для каждой пары шипиков оценивает число направлений/точек
@@ -2079,26 +2305,71 @@ def _geometric_multiplicity_matrix(
     n = len(spines)
     multiplicity = np.ones((n, n), dtype=float)
     np.fill_diagonal(multiplicity, np.inf)
-    max_distance_value = None if max_distance is None else float(max_distance)
+    if n == 0:
+        return multiplicity
 
-    for i, spine in enumerate(spines):
-        source_distances = _source_node_distances(graph, spine)
-        finite_distances = sorted(
-            {
-                float(d)
-                for d in dist_matrix[i]
-                if np.isfinite(d) and d > 1e-8
-                and (max_distance_value is None or d <= max_distance_value + 1e-8)
-            }
+    node_ids, edge_u_idx, edge_v_idx, edge_lengths = _graph_edge_geometry_arrays(graph)
+    node_to_index, node_distance_matrix = _all_pairs_node_distance_matrix(graph, node_ids)
+    n_jobs_effective = _resolve_n_jobs(n_jobs, n)
+    row_indices = np.arange(n, dtype=int)
+
+    if n_jobs_effective <= 1:
+        _, rows = _geometric_multiplicity_rows(
+            graph,
+            spines,
+            dist_matrix,
+            row_indices,
+            max_distance,
+            node_ids,
+            node_to_index,
+            node_distance_matrix,
+            edge_u_idx,
+            edge_v_idx,
+            edge_lengths,
         )
-        cache = {
-            d: max(1, _network_sphere_multiplicity(graph, source_distances, d))
-            for d in finite_distances
-        }
-        for j in range(n):
-            d = float(dist_matrix[i, j])
-            if np.isfinite(d) and d > 1e-8:
-                multiplicity[i, j] = float(cache.get(d, 1))
+        multiplicity[row_indices] = rows
+        return multiplicity
+
+    chunks = [chunk for chunk in np.array_split(row_indices, n_jobs_effective) if len(chunk) > 0]
+    worker_args = [
+        (
+            graph,
+            spines,
+            dist_matrix,
+            chunk,
+            max_distance,
+            node_ids,
+            node_to_index,
+            node_distance_matrix,
+            edge_u_idx,
+            edge_v_idx,
+            edge_lengths,
+        )
+        for chunk in chunks
+    ]
+    try:
+        with ProcessPoolExecutor(max_workers=n_jobs_effective) as executor:
+            for indices, rows in executor.map(_geometric_multiplicity_chunk, worker_args):
+                multiplicity[indices] = rows
+    except Exception as exc:
+        warnings.warn(
+            f"Parallel geometric multiplicity failed ({exc}); falling back to sequential execution.",
+            stacklevel=2,
+        )
+        _, rows = _geometric_multiplicity_rows(
+            graph,
+            spines,
+            dist_matrix,
+            row_indices,
+            max_distance,
+            node_ids,
+            node_to_index,
+            node_distance_matrix,
+            edge_u_idx,
+            edge_v_idx,
+            edge_lengths,
+        )
+        multiplicity[row_indices] = rows
 
     return multiplicity
 
@@ -2110,13 +2381,15 @@ def ripley_k_network(
     intensity: Optional[np.ndarray] = None,
     dist_matrix: Optional[np.ndarray] = None,
     correction: str = "geometric",
+    n_jobs: int = 1,
 ) -> KFunctionResult:
     """Вычисляет сетевую K-функцию Рипли для шипиков на дендритном графе.
     Считает число пар шипиков в пределах каждого радиуса с
     homogeneous или inhomogeneous нормировкой и геометрической поправкой сети.
 
     Входные данные: граф, спроецированные шипики, радиусы `r_values`,
-    опциональная интенсивность, матрица расстояний и тип поправки.
+    опциональная интенсивность, матрица расстояний, тип поправки и число
+    процессов для геометрической поправки.
     Выходные данные: объект `KFunctionResult` с наблюдаемой и ожидаемой
     K-кривой.
     """
@@ -2159,6 +2432,7 @@ def ripley_k_network(
             spines,
             dist_matrix,
             max_distance=max_k_distance,
+            n_jobs=n_jobs,
         )
         diagnostics["geometric_multiplicity_seconds"] = perf_counter() - stage_start
     else:
@@ -2220,6 +2494,7 @@ def ripley_k_network(
             "n_spines": int(n),
             "n_r_values": int(len(r_values)),
             "correction": correction,
+            "geometric_multiplicity_n_jobs": int(_resolve_n_jobs(n_jobs, n)) if use_geometric else 1,
             "total_seconds": perf_counter() - total_start,
         },
     )
@@ -2438,6 +2713,7 @@ def _simulate_k_envelope_chunk(args: Tuple[Any, int, np.ndarray, str, np.ndarray
             intensity=sim_intensity,
             dist_matrix=sim_dist_mat,
             correction=correction,
+            n_jobs=1,
         )
         timing["simulation_k_function_seconds"] += perf_counter() - stage_start
         timing["simulation_geometric_multiplicity_seconds"] += float(
@@ -2487,7 +2763,8 @@ def compute_simulation_envelopes(
     use_geometric = correction.lower() in {"geometric", "reference", "kl", "k_l"}
     envelope_type_normalized = str(envelope_type).lower()
     n_simulations = int(max(0, n_simulations))
-    n_jobs_effective = _resolve_n_jobs(n_jobs, max(1, n_simulations))
+    observed_n_jobs_effective = _resolve_n_jobs(n_jobs, n)
+    simulation_n_jobs_effective = _resolve_n_jobs(n_jobs, max(1, n_simulations))
 
     if n < 2:
         k_exp = r_values.copy() if use_geometric else 2.0 * r_values
@@ -2501,7 +2778,8 @@ def compute_simulation_envelopes(
             method="inhomogeneous",
             interpretation="Too few spines for simulation envelopes.",
             diagnostics={
-                "n_jobs": int(n_jobs_effective),
+                "n_jobs": int(simulation_n_jobs_effective),
+                "observed_n_jobs": int(observed_n_jobs_effective),
                 "n_simulations": int(n_simulations),
                 "envelope_type": envelope_type_normalized,
                 "require_inhomogeneous": bool(require_inhomogeneous),
@@ -2545,6 +2823,7 @@ def compute_simulation_envelopes(
         intensity=obs_intensity,
         dist_matrix=obs_dist,
         correction=correction,
+        n_jobs=observed_n_jobs_effective,
     )
     observed_k_seconds = perf_counter() - stage_start
     observed_geometric_seconds = float(k_obs_result.diagnostics.get("geometric_multiplicity_seconds", 0.0))
@@ -2565,7 +2844,8 @@ def compute_simulation_envelopes(
             method=k_obs_result.method,
             interpretation="K function computed without Monte Carlo simulations.",
             diagnostics={
-                "n_jobs": int(n_jobs_effective),
+                "n_jobs": int(simulation_n_jobs_effective),
+                "observed_n_jobs": int(observed_n_jobs_effective),
                 "n_simulations": int(n_simulations),
                 "envelope_type": envelope_type_normalized,
                 "require_inhomogeneous": bool(require_inhomogeneous),
@@ -2592,7 +2872,7 @@ def compute_simulation_envelopes(
 
     seed_chunks = [
         chunk
-        for chunk in np.array_split(seeds, n_jobs_effective)
+        for chunk in np.array_split(seeds, simulation_n_jobs_effective)
         if len(chunk) > 0
     ]
     worker_args = [
@@ -2610,7 +2890,7 @@ def compute_simulation_envelopes(
     ]
 
     chunk_results: List[Tuple[np.ndarray, Dict[str, float], int]] = []
-    if n_jobs_effective == 1:
+    if simulation_n_jobs_effective == 1:
         iter_range: Any = worker_args
         if _TQDM:
             iter_range = _tqdm(iter_range, desc=f"{timing_label} simulations", leave=False)
@@ -2618,7 +2898,7 @@ def compute_simulation_envelopes(
             chunk_results.append(_simulate_k_envelope_chunk(args))
     else:
         try:
-            with ProcessPoolExecutor(max_workers=n_jobs_effective) as executor:
+            with ProcessPoolExecutor(max_workers=simulation_n_jobs_effective) as executor:
                 mapped: Any = executor.map(_simulate_k_envelope_chunk, worker_args)
                 if _TQDM:
                     mapped = _tqdm(
@@ -2634,7 +2914,7 @@ def compute_simulation_envelopes(
                 f"Parallel K simulations failed ({exc}); falling back to sequential execution.",
                 stacklevel=2,
             )
-            n_jobs_effective = 1
+            simulation_n_jobs_effective = 1
             chunk_results = [_simulate_k_envelope_chunk(args) for args in worker_args]
 
     if chunk_results:
@@ -2651,7 +2931,7 @@ def compute_simulation_envelopes(
     simulation_seconds = perf_counter() - simulation_start
     simulation_timing = _sum_timing_dicts([result[1] for result in chunk_results])
     if verbose_timing:
-        _print_k_timing(timing_label, f"simulations_total(n={n_simulations}, jobs={n_jobs_effective})", simulation_seconds)
+        _print_k_timing(timing_label, f"simulations_total(n={n_simulations}, jobs={simulation_n_jobs_effective})", simulation_seconds)
         for key in (
             "simulate_poisson_seconds",
             "simulation_pairwise_distance_seconds",
@@ -2721,7 +3001,8 @@ def compute_simulation_envelopes(
         method=k_obs_result.method,
         interpretation=interp,
         diagnostics={
-            "n_jobs": int(n_jobs_effective),
+            "n_jobs": int(simulation_n_jobs_effective),
+            "observed_n_jobs": int(observed_n_jobs_effective),
             "n_simulations": int(n_simulations),
             "n_chunks": int(len(seed_chunks)),
             "envelope_type": envelope_type_normalized,
