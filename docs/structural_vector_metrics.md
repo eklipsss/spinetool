@@ -4,7 +4,11 @@
 
 `dendrite_structural_organization_vectors.csv` — одна строка соответствует одному дендритному фрагменту, то есть объекту `Dendrite` / `DendriteBranch`.
 
-`neuron_structural_network_vectors.csv` — одна строка соответствует одному нейрону, то есть объекту `Neuron`.
+`neuron_structural_network_vectors.csv` — core ML-вектор: одна строка соответствует одному нейрону, то есть объекту `Neuron`.
+
+`neuron_structural_network_metadata.csv` — QC/metadata-поля сетевого анализа нейрона.
+
+`neuron_structural_network_fit_quality.csv` — признаки качества подгонки статистических моделей сетевого анализа нейрона.
 
 Для MICrONS-данных эти два уровня можно запускать независимо или вместе. `Neuron.run_full_analysis(mode="network")` строит только сетевой вектор нейрона, `mode="branches"` строит только векторы отдельных branch-фрагментов через `DendriteBranch`, а `mode="both"` выполняет оба анализа на одних и тех же уже загруженных мешах, скелетах и точках крепления шипиков.
 
@@ -335,7 +339,7 @@ CV_{\mathrm{isolated}}=
 \frac{n_{\mathrm{terminal\ nodes}}}{|L|}.
 \]
 
-Абсолютные `network_n_branch_nodes` и `network_n_terminal_nodes` сохраняются в `neuron_metadata.csv`, а в ML-вектор включаются нормированные версии.
+Абсолютные `network_n_branch_nodes` и `network_n_terminal_nodes` входят в core ML-вектор как базовые структурные признаки и также сохраняются в `neuron_structural_network_metadata.csv` для QC-контекста.
 
 ### Этап 2 — линейная плотность шипиков
 
@@ -370,7 +374,7 @@ CV_{\mathrm{isolated}}=
 
 - `basal_terminal_node_linear_density` — линейная плотность терминальных узлов на базальной части сети.
 
-Абсолютные количества апикальных и базальных лимбов/branch-фрагментов сохраняются в `neuron_metadata.csv`. В ML-вектор включаются плотности, поскольку они менее привязаны к размеру реконструкции и информативнее описывают организацию шипиков и топологии внутри типов дендритов.
+Абсолютные количества апикальных и базальных лимбов/branch-фрагментов сохраняются в `neuron_structural_network_metadata.csv`. В ML-вектор включаются плотности, поскольку они менее привязаны к размеру реконструкции и информативнее описывают организацию шипиков и топологии внутри типов дендритов.
 
 ### Этап 4 — метрики сомы
 
@@ -384,15 +388,23 @@ Bounding box сомы (`soma_bbox_x`, `soma_bbox_y`, `soma_bbox_z`) не сох�
 
 - `intensity_cdf_statistic` — статистика CDF/KS-теста, сравнивающего распределение расстояний до сомы у шипиков с распределением расстояний до сомы у равномерно выбранных точек дендритной сети.
 
-- `intensity_cdf_p_value` — \(p\)-значение CDF/KS-теста. Малое значение указывает, что интенсивность шипиков зависит от расстояния до сомы.
+- `intensity_lr_statistic_normalized` — likelihood-ratio statistic для сравнения постоянной пуассоновской интенсивности и модели с линейной зависимостью от расстояния до сомы, делённая на число спроецированных шипиков. Нормированная версия используется в ML-векторе, поскольку сырой LR-statistic зависит от размера выборки.
 
-- `intensity_lr_statistic` — likelihood-ratio statistic для сравнения постоянной пуассоновской интенсивности и модели с линейной зависимостью от расстояния до сомы.
-
-- `intensity_lr_p_value` — \(p\)-значение likelihood-ratio теста.
+`intensity_cdf_p_value`, сырой `intensity_lr_statistic` и `intensity_lr_p_value` сохраняются в `neuron_structural_network_metadata.csv` как статистические/QC-поля, но не входят в core ML-вектор.
 
 ### Этап 6 — неоднородная пуассоновская модель интенсивности
 
 Эти поля появляются, если модель удалось подогнать.
+
+В core ML-вектор входят только коэффициенты intensity-модели, интерпретируемые как описание пространственного профиля шипиков. Коэффициенты расстояния сохраняются на нормированной оси \(d_\mathrm{norm}=d/d_{\max}\):
+
+- `poisson_coef_intercept` — intercept log-intensity модели.
+
+- `poisson_coef_distance_to_soma_norm` — коэффициент при нормированном расстоянии до сомы.
+
+- `poisson_coef_distance_to_soma_norm_squared` — коэффициент при квадрате нормированного расстояния до сомы.
+
+Качество fit-а сохраняется отдельно в `neuron_structural_network_fit_quality.csv`:
 
 - `poisson_log_likelihood` — лог-правдоподобие подогнанной неоднородной пуассоновской модели:
 
@@ -417,29 +429,33 @@ AIC=-2\ell+2k,
 BIC=-2\ell+k\log n.
 \]
 
-- `poisson_coef_<covariate>` — коэффициент \(\theta\) при соответствующей ковариате в модели
+- `poisson_log_likelihood_per_spine`, `poisson_aic_per_spine`, `poisson_bic_per_spine` — те же величины, нормированные на число спроецированных шипиков.
 
-\[
-\lambda(u)=\exp(\theta^\top z(u)).
-\]
-
-В стандартной конфигурации появляются поля `poisson_coef_intercept`, `poisson_coef_distance_to_soma`, `poisson_coef_distance_to_soma_squared`.
+- `poisson_raw_coef_<covariate>` — коэффициент \(\theta\) при исходной ковариате в модели \(\lambda(u)=\exp(\theta^\top z(u))\).
 
 - `poisson_se_<covariate>` — стандартная ошибка коэффициента при соответствующей ковариате.
 
-Флаг сходимости оптимизации `poisson_converged` сохраняется в `neuron_metadata.csv` как диагностическая информация, но не входит в ML-вектор.
+Флаг сходимости оптимизации `poisson_converged` сохраняется в `neuron_structural_network_metadata.csv` как диагностическая информация.
 
 ### Этап 7 — сетевая функция Рипли \(K_L\)
 
 Эти поля появляются, если удалось выполнить K-анализ.
-
-- `k_p_value` — \(p\)-значение Monte Carlo проверки того, насколько сильно наблюдаемая K-кривая отклоняется от K-кривой, ожидаемой при выбранной null-модели.
 
 - `k_mean_deviation` — среднее отклонение наблюдаемой K-кривой от ожидаемой:
 
 \[
 \operatorname{mean}_r\left(K_{\mathrm{obs}}(r)-K_{\mathrm{exp}}(r)\right).
 \]
+
+- `k_auc_deviation` — площадь между наблюдаемой и ожидаемой K-кривой со знаком:
+
+\[
+\int \left(K_{\mathrm{obs}}(r)-K_{\mathrm{exp}}(r)\right)\,dr.
+\]
+
+- `k_auc_positive_deviation` — площадь положительной части отклонения, суммарно описывающая кластеризацию по всем радиусам.
+
+- `k_auc_negative_deviation` — площадь отрицательной части отклонения, суммарно описывающая регулярность по всем радиусам.
 
 - `k_max_positive_deviation` — максимальное положительное отклонение \(K_{\mathrm{obs}}(r)-K_{\mathrm{exp}}(r)\). Большое положительное значение соответствует кластеризации на некотором масштабе.
 
@@ -457,17 +473,17 @@ BIC=-2\ell+k\log n.
 \max_r |K_{\mathrm{obs}}(r)-K_{\mathrm{exp}}(r)|.
 \]
 
-- `k_r_at_max_positive_deviation` — значение радиуса \(r\), на котором достигается максимальное положительное отклонение.
+- `k_r_at_max_positive_deviation_norm` — нормированное значение радиуса \(r/r_{\max}\), на котором достигается максимальное положительное отклонение.
 
-- `k_r_at_max_negative_deviation` — значение радиуса \(r\), на котором достигается максимальное отрицательное отклонение.
+- `k_r_at_max_negative_deviation_norm` — нормированное значение радиуса \(r/r_{\max}\), на котором достигается максимальное отрицательное отклонение.
 
-- `k_r_at_max_abs_deviation` — значение радиуса \(r\), на котором достигается максимальное абсолютное отклонение.
+- `k_r_at_max_abs_deviation_norm` — нормированное значение радиуса \(r/r_{\max}\), на котором достигается максимальное абсолютное отклонение.
 
 Для апикальной и базальной частей дополнительно создаются аналогичные поля с префиксами `apical_k_*` и `basal_k_*`, если в соответствующей части есть как минимум три спроецированных шипика и ненулевая длина сети:
 
-- `<type>_k_p_value` — \(p\)-значение Monte Carlo проверки отклонения K-кривой соответствующей части сети от K-кривой, ожидаемой при выбранной null-модели.
-
 - `<type>_k_mean_deviation` — среднее отклонение \(K_{\mathrm{obs}}(r)-K_{\mathrm{exp}}(r)\) внутри соответствующей части.
+
+- `<type>_k_auc_deviation`, `<type>_k_auc_positive_deviation`, `<type>_k_auc_negative_deviation` — интегральные summaries отклонения K-кривой внутри соответствующей части.
 
 - `<type>_k_max_positive_deviation` — максимальное положительное отклонение, то есть strongest clustering summary для соответствующей части.
 
@@ -475,19 +491,31 @@ BIC=-2\ell+k\log n.
 
 - `<type>_k_max_abs_deviation` — максимальное абсолютное отклонение.
 
-- `<type>_k_r_at_max_positive_deviation` — радиус, на котором достигается максимальное положительное отклонение.
+- `<type>_k_r_at_max_positive_deviation_norm` — нормированный радиус, на котором достигается максимальное положительное отклонение.
 
-- `<type>_k_r_at_max_negative_deviation` — радиус, на котором достигается максимальное отрицательное отклонение.
+- `<type>_k_r_at_max_negative_deviation_norm` — нормированный радиус, на котором достигается максимальное отрицательное отклонение.
 
-- `<type>_k_r_at_max_abs_deviation` — радиус, на котором достигается максимальное абсолютное отклонение.
+- `<type>_k_r_at_max_abs_deviation_norm` — нормированный радиус, на котором достигается максимальное абсолютное отклонение.
 
 Здесь `<type>` принимает значения `apical` или `basal`. Эти признаки описывают пространственную организацию шипиков отдельно на апикальной и базальной частях без выполнения полноценного replicated point pattern comparison между группами.
 
-Метод расчёта K-функции `k_method` сохраняется в `neuron_metadata.csv`. Массивы `k_observed_values`, `k_expected_values` и `k_r_values` не включаются ни в ML-вектор, ни в metadata-таблицу: полная K-кривая сохраняется отдельно в файлах `ripley_k_network.csv`, `ripley_k_network_apical.csv` и `ripley_k_network_basal.csv` для каждого нейрона, если соответствующий анализ был выполнен.
+`k_p_value`, `<type>_k_p_value`, метод расчёта K-функции и параметры envelope сохраняются в `neuron_structural_network_metadata.csv`. Массивы `k_observed_values`, `k_expected_values` и `k_r_values` не включаются ни в ML-вектор, ни в metadata-таблицу: полная K-кривая сохраняется отдельно в файлах `neuron_structural_network_ripley_k_network.csv`, `neuron_structural_network_ripley_k_network_apical.csv` и `neuron_structural_network_ripley_k_network_basal.csv` для каждого нейрона, если соответствующий анализ был выполнен.
+
+Для optional-блоков в core ML-вектор добавляются missing-mask признаки:
+
+- `has_poisson_model` — удалось ли подогнать неоднородную пуассоновскую модель.
+
+- `has_intensity_cdf_test`, `has_intensity_lr_test` — были ли получены результаты соответствующих тестов интенсивности.
+
+- `has_k` — был ли выполнен K-анализ для всей сети.
+
+- `has_apical_network`, `has_basal_network` — есть ли ненулевая длина соответствующего compartment.
+
+- `has_apical_k`, `has_basal_k` — был ли выполнен K-анализ соответствующего compartment.
 
 ## Metadata-таблица анализа всей сети нейрона
 
-Файл `neuron_metadata.csv` сохраняется рядом с `neuron_structural_network_vectors.csv` и содержит технические, размерные и диагностические поля, которые полезны для контроля качества, но не используются как основные ML-признаки.
+Файл `neuron_structural_network_metadata.csv` сохраняется рядом с `neuron_structural_network_vectors.csv` и содержит технические, размерные и диагностические поля, которые полезны для контроля качества, но не используются как основные ML-признаки. Качество подгонки пуассоновской модели сохраняется отдельно в `neuron_structural_network_fit_quality.csv`.
 
 - `neuron_id` — идентификатор нейрона.
 
@@ -547,4 +575,6 @@ BIC=-2\ell+k\log n.
 
 - `poisson_converged` — диагностический флаг успешной сходимости неоднородной пуассоновской модели.
 
-- `k_method` — метод расчёта сетевой K-функции.
+- `k_p_value`, `apical_k_p_value`, `basal_k_p_value` — Monte Carlo p-value K-анализа.
+
+- `k_method`, `apical_k_method`, `basal_k_method` — метод расчёта сетевой K-функции.

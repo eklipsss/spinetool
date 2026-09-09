@@ -2022,7 +2022,7 @@ def _network_sphere_multiplicity(
     if not np.isfinite(distance) or distance <= tol:
         return 0
 
-    count = 0
+    seen_points = set()
     for u, v, edata in graph.G.edges(data=True):
         length = float(edata.get("length", 0.0))
         if length <= tol:
@@ -2057,9 +2057,16 @@ def _network_sphere_multiplicity(
         for s in candidates:
             if not any(abs(s - seen) <= 1e-7 for seen in unique_candidates):
                 unique_candidates.append(s)
-        count += len(unique_candidates)
+        for s in unique_candidates:
+            if s <= 1e-7:
+                key = ("node", u)
+            elif s >= 1.0 - 1e-7:
+                key = ("node", v)
+            else:
+                key = ("edge", min(u, v), max(u, v), round(float(s), 7))
+            seen_points.add(key)
 
-    return int(count)
+    return int(len(seen_points))
 
 
 def _graph_edge_geometry_arrays(
@@ -2196,8 +2203,20 @@ def _network_sphere_multiplicity_from_arrays(
         & (via_v <= via_u_from_v + tol)
     )
 
-    duplicate = valid_u & valid_v & (np.abs(s_u_clipped - s_v_clipped) <= 1e-7)
-    return int(np.count_nonzero(valid_u) + np.count_nonzero(valid_v) - np.count_nonzero(duplicate))
+    candidate_edges = np.concatenate([np.flatnonzero(valid_u), np.flatnonzero(valid_v)])
+    candidate_s = np.concatenate([s_u_clipped[valid_u], s_v_clipped[valid_v]])
+    seen_points = set()
+    for edge_index, edge_position in zip(candidate_edges, candidate_s):
+        if edge_position <= 1e-7:
+            key = ("node", int(edge_u_idx[edge_index]))
+        elif edge_position >= 1.0 - 1e-7:
+            key = ("node", int(edge_v_idx[edge_index]))
+        else:
+            u_idx = int(edge_u_idx[edge_index])
+            v_idx = int(edge_v_idx[edge_index])
+            key = ("edge", min(u_idx, v_idx), max(u_idx, v_idx), round(float(edge_position), 7))
+        seen_points.add(key)
+    return int(len(seen_points))
 
 
 def _geometric_multiplicity_rows(

@@ -934,6 +934,7 @@ class NeuronNetworkAnalysisResult:
     compartment_k_results: Dict[str, KFunctionResult]
     metrics_vector: Dict[str, Any]
     metadata_vector: Dict[str, Any]
+    fit_quality_vector: Dict[str, Any]
 
 
 @dataclass
@@ -1764,8 +1765,15 @@ class Neuron:
             graph=graph,
             projected_count=len(projected_spines),
             unassigned_count=len(unassigned_ids),
+            intensity_cdf_test=intensity_cdf_test,
+            intensity_lr_test=intensity_lr_test,
             poisson_result=poisson_result,
             k_result=k_result,
+            compartment_k_results=compartment_k_results,
+        )
+        fit_quality_vector = self.build_structural_network_fit_quality_vector(
+            projected_count=len(projected_spines),
+            poisson_result=poisson_result,
         )
         self._log_timing("build_network_vectors", stage_start)
         _advance_progress(network_progress, "build_network_vectors")
@@ -1811,6 +1819,7 @@ class Neuron:
             compartment_k_results=compartment_k_results,
             metrics_vector=metrics_vector,
             metadata_vector=metadata_vector,
+            fit_quality_vector=fit_quality_vector,
         )
 
         if save_outputs:
@@ -1850,6 +1859,18 @@ class Neuron:
 
         row: Dict[str, Any] = {
             "neuron_id": self.name,
+            "has_intensity_cdf_test": int(bool(intensity_cdf_test)),
+            "has_intensity_lr_test": int(bool(intensity_lr_test)),
+            "has_poisson_model": int(poisson_result is not None),
+            "has_k": int(k_result is not None),
+            "has_apical_network": int(type_metrics["apical_length"] > 1e-12),
+            "has_basal_network": int(type_metrics["basal_length"] > 1e-12),
+            "has_apical_k": int(compartment_k_results is not None and "apical" in compartment_k_results),
+            "has_basal_k": int(compartment_k_results is not None and "basal" in compartment_k_results),
+            "network_total_length": total_length,
+            "network_circumradius": network_circumradius(graph),
+            "network_n_branch_nodes": branch_nodes,
+            "network_n_terminal_nodes": terminal_nodes,
             "network_branch_node_linear_density": branch_nodes / total_length if has_length else np.nan,
             "network_terminal_node_linear_density": terminal_nodes / total_length if has_length else np.nan,
             "network_spine_linear_density": projected_count / total_length if has_length else np.nan,
@@ -1862,32 +1883,59 @@ class Neuron:
             "soma_volume": self.soma.metrics.get("volume", np.nan),
             "soma_surface_area": self.soma.metrics.get("surface_area", np.nan),
             "intensity_cdf_statistic": intensity_cdf_test.get("statistic", np.nan),
-            "intensity_cdf_p_value": intensity_cdf_test.get("p_value", np.nan),
-            "intensity_lr_statistic": intensity_lr_test.get("lr_statistic", np.nan),
-            "intensity_lr_p_value": intensity_lr_test.get("p_value", np.nan),
+            "intensity_lr_statistic_normalized": (
+                intensity_lr_test.get("lr_statistic", np.nan) / projected_count
+                if projected_count > 0
+                else np.nan
+            ),
+            "poisson_coef_intercept": np.nan,
+            "poisson_coef_distance_to_soma_norm": np.nan,
+            "poisson_coef_distance_to_soma_norm_squared": np.nan,
         }
 
         if poisson_result is not None:
-            row.update(
-                {
-                    "poisson_log_likelihood": poisson_result.log_likelihood,
-                    "poisson_aic": poisson_result.aic,
-                    "poisson_bic": poisson_result.bic,
-                }
-            )
-            for name, coef, se in zip(
-                poisson_result.covariate_names,
-                poisson_result.coefficients,
-                poisson_result.standard_errors,
-            ):
-                row[f"poisson_coef_{name}"] = float(coef)
-                row[f"poisson_se_{name}"] = float(se)
+            self._add_normalized_poisson_coefficients_to_row(row, graph, poisson_result)
 
         if k_result is not None:
             self._add_k_summary_to_row(row, "k", k_result)
+        else:
+            self._add_missing_k_summary_to_row(row, "k")
         for compartment, compartment_k_result in (compartment_k_results or {}).items():
             self._add_k_summary_to_row(row, f"{compartment}_k", compartment_k_result)
+        for compartment in ("apical", "basal"):
+            if not compartment_k_results or compartment not in compartment_k_results:
+                self._add_missing_k_summary_to_row(row, f"{compartment}_k")
         return row
+
+    @staticmethod
+    def _add_normalized_poisson_coefficients_to_row(
+        row: Dict[str, Any],
+        graph: DendriticGraph,
+        poisson_result: PoissonModelResult,
+    ) -> None:
+        """Добавляет коэффициенты log-quadratic intensity на нормированной оси.
+
+        Входные данные: строка признаков, граф и результат пуассоновской
+        модели, обученной на расстоянии до сомы в исходных единицах.
+        Выходные данные: обновлённая строка с коэффициентами по
+        `d_norm = d / max_distance_to_soma`.
+        """
+        coefficients = {
+            name: float(value)
+            for name, value in zip(poisson_result.covariate_names, poisson_result.coefficients)
+        }
+        soma_distances = graph.soma_distances()
+        max_distance = max((float(value) for value in soma_distances.values()), default=np.nan)
+        if not np.isfinite(max_distance) or max_distance <= 1e-12:
+            max_distance = 1.0
+
+        row["poisson_coef_intercept"] = coefficients.get("intercept", np.nan)
+        if "distance_to_soma" in coefficients:
+            row["poisson_coef_distance_to_soma_norm"] = coefficients["distance_to_soma"] * max_distance
+        if "distance_to_soma_squared" in coefficients:
+            row["poisson_coef_distance_to_soma_norm_squared"] = (
+                coefficients["distance_to_soma_squared"] * max_distance * max_distance
+            )
 
     @staticmethod
     def _add_k_summary_to_row(row: Dict[str, Any], prefix: str, k_result: KFunctionResult) -> None:
@@ -1900,24 +1948,58 @@ class Neuron:
         max_pos_idx = int(np.argmax(deviation)) if len(deviation) else 0
         max_neg_idx = int(np.argmin(deviation)) if len(deviation) else 0
         max_abs_idx = int(np.argmax(np.abs(deviation))) if len(deviation) else 0
+        r_values = np.asarray(k_result.r_values, dtype=float)
+        r_max = float(np.max(r_values)) if len(r_values) else np.nan
+
+        def normalized_radius(index: int) -> float:
+            if not len(r_values) or not np.isfinite(r_max) or r_max <= 1e-12:
+                return np.nan
+            return float(r_values[index] / r_max)
+
+        positive_deviation = np.maximum(deviation, 0.0) if len(deviation) else deviation
+        negative_deviation = np.minimum(deviation, 0.0) if len(deviation) else deviation
         row.update(
             {
-                f"{prefix}_p_value": k_result.p_value,
                 f"{prefix}_mean_deviation": float(np.mean(deviation)) if len(deviation) else np.nan,
+                f"{prefix}_auc_deviation": (
+                    float(np.trapz(deviation, r_values)) if len(deviation) > 1 else np.nan
+                ),
+                f"{prefix}_auc_positive_deviation": (
+                    float(np.trapz(positive_deviation, r_values)) if len(deviation) > 1 else np.nan
+                ),
+                f"{prefix}_auc_negative_deviation": (
+                    float(np.trapz(negative_deviation, r_values)) if len(deviation) > 1 else np.nan
+                ),
                 f"{prefix}_max_positive_deviation": float(np.max(deviation)) if len(deviation) else np.nan,
                 f"{prefix}_max_negative_deviation": float(np.min(deviation)) if len(deviation) else np.nan,
                 f"{prefix}_max_abs_deviation": float(np.max(np.abs(deviation))) if len(deviation) else np.nan,
-                f"{prefix}_r_at_max_positive_deviation": (
-                    float(k_result.r_values[max_pos_idx]) if len(deviation) else np.nan
-                ),
-                f"{prefix}_r_at_max_negative_deviation": (
-                    float(k_result.r_values[max_neg_idx]) if len(deviation) else np.nan
-                ),
-                f"{prefix}_r_at_max_abs_deviation": (
-                    float(k_result.r_values[max_abs_idx]) if len(deviation) else np.nan
-                ),
+                f"{prefix}_r_at_max_positive_deviation_norm": normalized_radius(max_pos_idx),
+                f"{prefix}_r_at_max_negative_deviation_norm": normalized_radius(max_neg_idx),
+                f"{prefix}_r_at_max_abs_deviation_norm": normalized_radius(max_abs_idx),
             }
         )
+
+    @staticmethod
+    def _add_missing_k_summary_to_row(row: Dict[str, Any], prefix: str) -> None:
+        """Добавляет NaN-заглушки для optional K-признаков.
+
+        Входные данные: строка признаков и префикс K-анализа.
+        Выходные данные: строка с фиксированным набором колонок даже при
+        отсутствии соответствующего анализа.
+        """
+        for suffix in (
+            "mean_deviation",
+            "auc_deviation",
+            "auc_positive_deviation",
+            "auc_negative_deviation",
+            "max_positive_deviation",
+            "max_negative_deviation",
+            "max_abs_deviation",
+            "r_at_max_positive_deviation_norm",
+            "r_at_max_negative_deviation_norm",
+            "r_at_max_abs_deviation_norm",
+        ):
+            row[f"{prefix}_{suffix}"] = np.nan
 
     @staticmethod
     def _normalized_dendrite_type(value: Any) -> str:
@@ -2133,8 +2215,11 @@ class Neuron:
         graph: DendriticGraph,
         projected_count: int,
         unassigned_count: int,
+        intensity_cdf_test: Dict[str, Any],
+        intensity_lr_test: Dict[str, Any],
         poisson_result: Optional[PoissonModelResult],
         k_result: Optional[KFunctionResult],
+        compartment_k_results: Optional[Dict[str, KFunctionResult]] = None,
     ) -> Dict[str, Any]:
         """Формирует metadata-вектор технических и абсолютных характеристик нейрона.
         Собирает счётчики, абсолютные длины, характеристики
@@ -2190,17 +2275,79 @@ class Neuron:
             "branch_spine_count_mean": float(branch_spine_counts.mean()) if len(branch_spine_counts) else np.nan,
             "branch_spine_count_median": float(np.median(branch_spine_counts)) if len(branch_spine_counts) else np.nan,
             "branch_spine_count_std": float(branch_spine_counts.std(ddof=1)) if len(branch_spine_counts) > 1 else 0.0,
+            "intensity_cdf_statistic": intensity_cdf_test.get("statistic", np.nan),
+            "intensity_cdf_p_value": intensity_cdf_test.get("p_value", np.nan),
+            "intensity_lr_statistic": intensity_lr_test.get("lr_statistic", np.nan),
+            "intensity_lr_p_value": intensity_lr_test.get("p_value", np.nan),
         }
         if poisson_result is not None:
             row["poisson_converged"] = poisson_result.diagnostics.get("converged", np.nan)
         if k_result is not None:
-            row["k_method"] = k_result.method
-            row["k_n_simulations"] = k_result.diagnostics.get("n_simulations", np.nan)
-            row["k_envelope_type"] = k_result.diagnostics.get("envelope_type", "")
-            row["k_require_inhomogeneous"] = k_result.diagnostics.get("require_inhomogeneous", np.nan)
-            row["k_r_min"] = k_result.diagnostics.get("r_min", np.nan)
-            row["k_r_max"] = k_result.diagnostics.get("r_max", np.nan)
-            row["k_global_envelope_width"] = k_result.diagnostics.get("global_envelope_width", np.nan)
+            self._add_k_diagnostics_to_row(row, "k", k_result)
+        for compartment, compartment_k_result in (compartment_k_results or {}).items():
+            self._add_k_diagnostics_to_row(row, f"{compartment}_k", compartment_k_result)
+        return row
+
+    @staticmethod
+    def _add_k_diagnostics_to_row(row: Dict[str, Any], prefix: str, k_result: KFunctionResult) -> None:
+        """Добавляет диагностические параметры K-анализа в metadata-вектор.
+
+        Входные данные: строка metadata, префикс и результат K-функции.
+        Выходные данные: строка metadata с p-value, методом и параметрами
+        Monte Carlo envelope.
+        """
+        row[f"{prefix}_p_value"] = k_result.p_value
+        row[f"{prefix}_method"] = k_result.method
+        row[f"{prefix}_n_simulations"] = k_result.diagnostics.get("n_simulations", np.nan)
+        row[f"{prefix}_envelope_type"] = k_result.diagnostics.get("envelope_type", "")
+        row[f"{prefix}_require_inhomogeneous"] = k_result.diagnostics.get("require_inhomogeneous", np.nan)
+        row[f"{prefix}_r_min"] = k_result.diagnostics.get("r_min", np.nan)
+        row[f"{prefix}_r_max"] = k_result.diagnostics.get("r_max", np.nan)
+        row[f"{prefix}_global_envelope_width"] = k_result.diagnostics.get("global_envelope_width", np.nan)
+
+    def build_structural_network_fit_quality_vector(
+        self,
+        projected_count: int,
+        poisson_result: Optional[PoissonModelResult],
+    ) -> Dict[str, Any]:
+        """Формирует отдельный вектор качества подгонки пуассоновской модели.
+
+        Входные данные: число спроецированных шипиков и результат
+        inhomogeneous Poisson fit.
+        Выходные данные: словарь fit-quality признаков, не входящих в core
+        ML-вектор.
+        """
+        row: Dict[str, Any] = {
+            "neuron_id": self.name,
+            "has_poisson_model": int(poisson_result is not None),
+            "poisson_log_likelihood": np.nan,
+            "poisson_log_likelihood_per_spine": np.nan,
+            "poisson_aic": np.nan,
+            "poisson_aic_per_spine": np.nan,
+            "poisson_bic": np.nan,
+            "poisson_bic_per_spine": np.nan,
+        }
+        if poisson_result is None:
+            return row
+
+        denominator = projected_count if projected_count > 0 else np.nan
+        row.update(
+            {
+                "poisson_log_likelihood": poisson_result.log_likelihood,
+                "poisson_log_likelihood_per_spine": poisson_result.log_likelihood / denominator,
+                "poisson_aic": poisson_result.aic,
+                "poisson_aic_per_spine": poisson_result.aic / denominator,
+                "poisson_bic": poisson_result.bic,
+                "poisson_bic_per_spine": poisson_result.bic / denominator,
+            }
+        )
+        for name, coef, se in zip(
+            poisson_result.covariate_names,
+            poisson_result.coefficients,
+            poisson_result.standard_errors,
+        ):
+            row[f"poisson_raw_coef_{name}"] = float(coef)
+            row[f"poisson_se_{name}"] = float(se)
         return row
 
     def save_network_analysis_result(
@@ -2208,7 +2355,8 @@ class Neuron:
         result: NeuronNetworkAnalysisResult,
         output_dir: str | Path,
         summary_filename: str = "neuron_structural_network_vectors.csv",
-        metadata_filename: str = "neuron_metadata.csv",
+        metadata_filename: str = "neuron_structural_network_metadata.csv",
+        fit_quality_filename: str = "neuron_structural_network_fit_quality.csv",
     ) -> None:
         """Сохраняет результаты сетевого анализа нейрона.
         Сохраняет per-neuron таблицы, K-кривые, общий ML-вектор и
@@ -2223,39 +2371,52 @@ class Neuron:
         neuron_dir = output_dir / self.name
         neuron_dir.mkdir(parents=True, exist_ok=True)
 
-        result.binned_intensity.to_csv(neuron_dir / "binned_intensity.csv", index=False)
-        projected_spines_dataframe(result.projected_spines).to_csv(neuron_dir / "projected_spines.csv", index=False)
-        result.projection_branch_diagnostics.to_csv(neuron_dir / "projection_branch_diagnostics.csv", index=False)
-        pd.DataFrame([result.intensity_cdf_test]).to_csv(neuron_dir / "intensity_cdf_test.csv", index=False)
-        pd.DataFrame([result.intensity_lr_test]).to_csv(neuron_dir / "intensity_lr_test.csv", index=False)
+        result.binned_intensity.to_csv(neuron_dir / "neuron_structural_network_binned_intensity.csv", index=False)
+        projected_spines_dataframe(result.projected_spines).to_csv(
+            neuron_dir / "neuron_structural_network_projected_spines.csv",
+            index=False,
+        )
+        result.projection_branch_diagnostics.to_csv(
+            neuron_dir / "neuron_structural_network_projection_branch_diagnostics.csv",
+            index=False,
+        )
+        pd.DataFrame([result.intensity_cdf_test]).to_csv(
+            neuron_dir / "neuron_structural_network_intensity_cdf_test.csv",
+            index=False,
+        )
+        pd.DataFrame([result.intensity_lr_test]).to_csv(
+            neuron_dir / "neuron_structural_network_intensity_lr_test.csv",
+            index=False,
+        )
         if result.k_result is not None:
-            result.k_result.to_dataframe().to_csv(neuron_dir / "ripley_k_network.csv", index=False)
+            result.k_result.to_dataframe().to_csv(
+                neuron_dir / "neuron_structural_network_ripley_k_network.csv",
+                index=False,
+            )
         for compartment, k_result in result.compartment_k_results.items():
-            k_result.to_dataframe().to_csv(neuron_dir / f"ripley_k_network_{compartment}.csv", index=False)
+            k_result.to_dataframe().to_csv(
+                neuron_dir / f"neuron_structural_network_ripley_k_network_{compartment}.csv",
+                index=False,
+            )
 
-        summary_path = output_dir / summary_filename
-        new_row = pd.DataFrame([result.metrics_vector])
-        if summary_path.exists():
-            old = pd.read_csv(summary_path)
+        self._upsert_neuron_output_row(output_dir / summary_filename, result.metrics_vector)
+        self._upsert_neuron_output_row(output_dir / metadata_filename, result.metadata_vector)
+        self._upsert_neuron_output_row(output_dir / fit_quality_filename, result.fit_quality_vector)
+
+    def _upsert_neuron_output_row(self, output_path: Path, row: Dict[str, Any]) -> None:
+        """Добавляет или заменяет строку текущего нейрона в общей CSV-таблице.
+
+        Входные данные: путь к CSV и строка данных с `neuron_id`.
+        Выходные данные: CSV-файл с одной актуальной строкой на нейрон.
+        """
+        new_row = pd.DataFrame([row])
+        if output_path.exists():
+            old = pd.read_csv(output_path)
             old = old[old["neuron_id"] != self.name] if "neuron_id" in old.columns else old
             combined = pd.concat([old, new_row], ignore_index=True, sort=False)
         else:
             combined = new_row
-        combined.to_csv(summary_path, index=False)
-
-        metadata_path = output_dir / metadata_filename
-        new_metadata_row = pd.DataFrame([result.metadata_vector])
-        if metadata_path.exists():
-            old_metadata = pd.read_csv(metadata_path)
-            old_metadata = (
-                old_metadata[old_metadata["neuron_id"] != self.name]
-                if "neuron_id" in old_metadata.columns
-                else old_metadata
-            )
-            combined_metadata = pd.concat([old_metadata, new_metadata_row], ignore_index=True, sort=False)
-        else:
-            combined_metadata = new_metadata_row
-        combined_metadata.to_csv(metadata_path, index=False)
+        combined.to_csv(output_path, index=False)
 
 
 def load_microns_neurons(
