@@ -1547,7 +1547,10 @@ def estimate_smooth_intensity(
     h = max(bandwidth, 1e-6)
 
     d_min = 0.0
-    d_max = float(spine_dists.max()) + 3.0 * h
+    soma_distances = np.asarray(list(graph.soma_distances().values()), dtype=float)
+    finite_soma_distances = soma_distances[np.isfinite(soma_distances)]
+    graph_d_max = float(finite_soma_distances.max()) if finite_soma_distances.size else float(spine_dists.max())
+    d_max = graph_d_max
     if max_eval_points > 0 and d_max / max(eval_step, 1e-9) > max_eval_points:
         eval_step = d_max / float(max_eval_points)
     d_grid = np.arange(d_min, d_max, eval_step)
@@ -1577,7 +1580,7 @@ def estimate_smooth_intensity(
         rho_net = frac * total_len / (2.0 * window) if window > 0 else rho_net
 
     lambda_hat = np.zeros_like(kde, dtype=float)
-    np.divide(kde, rho_net, out=lambda_hat, where=rho_net > 1e-12)
+    np.divide(n * kde, rho_net, out=lambda_hat, where=rho_net > 1e-12)
 
     return d_grid, lambda_hat
 
