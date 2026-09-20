@@ -458,9 +458,17 @@ def repair_mesh(
     # ------------------------------------------------------------------
     if fill_holes:
         was_watertight = tm.is_watertight
+        n_removed_after_fill = 0
         trimesh.repair.fill_holes(tm)
         if not was_watertight and not tm.is_watertight:
             _fill_holes_fan(tm)
+        if remove_degenerate and len(tm.faces) > 0:
+            mask = tm.area_faces > 1e-12
+            n_removed_after_fill = int(np.sum(~mask))
+            if n_removed_after_fill > 0:
+                tm.update_faces(mask)
+                tm.remove_unreferenced_vertices()
+                tm._cache.clear()
         if verbose:
             if not was_watertight and tm.is_watertight:
                 print("  [4/5] Holes filled — mesh is now watertight.")
@@ -468,6 +476,8 @@ def repair_mesh(
                 print("  [4/5] Hole filling attempted; mesh is still not watertight.")
             else:
                 print("  [4/5] Mesh was already watertight — no holes to fill.")
+            if n_removed_after_fill > 0:
+                print(f"        Removed {n_removed_after_fill} degenerate face(s) created during hole filling.")
     elif verbose:
         print("  [4/5] Hole filling skipped.")
 
