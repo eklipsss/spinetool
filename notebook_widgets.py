@@ -12,20 +12,20 @@ from sklearn.decomposition import PCA
 from CGAL.CGAL_Polyhedron_3 import Polyhedron_3
 from typing import List, Tuple, Dict, Set, Iterable, Callable, Optional
 
-from spine_analysis.clusterization.hierarchial_clusterizer import HierarchicalSpineClusterizer
-from spine_analysis.mesh.utils import MeshDataset, LineSet, preprocess_meshes, _mesh_to_v_f, polylines_to_line_set, \
+from src.spine_analysis.clusterization.hierarchial_clusterizer import HierarchicalSpineClusterizer
+from src.spine_analysis.mesh.utils import MeshDataset, LineSet, preprocess_meshes, _mesh_to_v_f, polylines_to_line_set, \
     rotate, write_off
-from spine_analysis.mesh.vizualization import _add_line_set_to_viewer, _add_mesh_to_viewer_as_wireframe
-from spine_analysis.shape_metric import OldChordDistributionSpineMetric, HistogramSpineMetric, FloatSpineMetric, \
+from src.spine_analysis.mesh.vizualization import _add_line_set_to_viewer, _add_mesh_to_viewer_as_wireframe
+from src.spine_analysis.shape_metric import OldChordDistributionSpineMetric, HistogramSpineMetric, FloatSpineMetric, \
     SpineMetric, JunctionCenterSpineMetric
-from spine_analysis.shape_metric.junction_metric import (
+from src.spine_analysis.shape_metric.junction_metric import (
     select_trimesh_junction_boundary_loop,
     trimesh_boundary_edge_loops,
 )
-from spine_analysis.shape_metric.io_metric import SpineMetricDataset
-from spine_analysis.shape_metric.utils import calculate_metrics, _get_junction_triangles, get_facet_norm, \
+from src.spine_analysis.shape_metric.io_metric import SpineMetricDataset
+from src.spine_analysis.shape_metric.utils import calculate_metrics, _get_junction_triangles, get_facet_norm, \
     get_rotation_matrix, get_attachment_center, register_attachment_center, register_dendrite_skeleton
-from spine_analysis.spine.grouping import SpineGrouping
+from src.spine_analysis.spine.grouping import SpineGrouping
 from spine_segmentation import point_2_list, list_2_point, hash_point, \
     Segmentation, segmentation_by_distance, local_threshold_3d,\
     spines_to_segmentation, correct_segmentation, get_spine_meshes, apply_scale
@@ -33,13 +33,13 @@ import meshplot as mp
 from IPython.display import display
 from scipy.ndimage import measurements
 from scipy.ndimage.measurements import label
-from spine_analysis.clusterization import SpineClusterizer, KMeansSpineClusterizer, DBSCANSpineClusterizer, \
+from src.spine_analysis.clusterization import SpineClusterizer, KMeansSpineClusterizer, DBSCANSpineClusterizer, \
     KmeansKernelSpineClusterizer
 from pathlib import Path
 import os
 from sklearn.linear_model import LinearRegression
 from functools import cmp_to_key
-from spine_analysis.clusterization.utils import ks_test
+from src.spine_analysis.clusterization.utils import ks_test
 from CGAL.CGAL_Polygon_mesh_processing import Polylines, face_area
 from CGAL.CGAL_Surface_mesh_skeletonization import surface_mesh_skeletonization
 from scipy.spatial.distance import euclidean
@@ -141,7 +141,7 @@ class SpineMeshDataset:
         print("##### ORIENT DEBUG START #####", flush=True)
         attachment_center = None
         try:
-            from spine_analysis.shape_metric.utils import get_attachment_center
+            from src.spine_analysis.shape_metric.utils import get_attachment_center
             attachment_center = get_attachment_center(mesh)
         except Exception:
             attachment_center = None

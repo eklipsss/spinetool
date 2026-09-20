@@ -3,12 +3,12 @@ from typing import List, Any
 
 import matplotlib.pyplot as plt
 
-from spine_analysis.clusterization import SpineClusterizer
-from spine_analysis.clusterization.dbscan_clusterizer import DBSCANSpineClusterizer
-from spine_analysis.clusterization.kmeans_clusterizer import KMeansSpineClusterizer
-from spine_analysis.clusterization.loaded_clusterizer import ManualSpineClusterizer
-from spine_analysis.mesh.utils import load_spine_meshes
-from spine_analysis.shape_metric.io_metric import SpineMetricDataset
+from src.spine_analysis.clusterization import SpineClusterizer
+from src.spine_analysis.clusterization.dbscan_clusterizer import DBSCANSpineClusterizer
+from src.spine_analysis.clusterization.kmeans_clusterizer import KMeansSpineClusterizer
+from src.spine_analysis.clusterization.loaded_clusterizer import ManualSpineClusterizer
+from src.spine_analysis.mesh.utils import load_spine_meshes
+from src.spine_analysis.shape_metric.io_metric import SpineMetricDataset
 import numpy as np
 from scipy.special import kl_div
 from notebook_widgets import create_dir

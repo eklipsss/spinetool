@@ -1,0 +1,1335 @@
+from dataclasses import dataclass
+from pathlib import Path
+from time import perf_counter
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import trimesh
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from scipy.sparse import coo_matrix, csr_matrix, diags, lil_matrix
+from scipy.sparse.csgraph import dijkstra
+from scipy.sparse.linalg import spsolve
+from scipy.spatial import cKDTree
+
+from CGAL.CGAL_Polygon_mesh_processing import Polylines, does_self_intersect
+from CGAL.CGAL_Surface_mesh_skeletonization import surface_mesh_skeletonization
+from src.spine_analysis.mesh.utils import _mesh_to_v_f
+
+try:
+    import plotly.graph_objects as _go
+    from plotly.subplots import make_subplots as _make_subplots
+    _PLOTLY_AVAILABLE = True
+except ImportError:
+    _PLOTLY_AVAILABLE = False
+
+try:
+    from tqdm.auto import tqdm as _tqdm
+    _TQDM_AVAILABLE = True
+except ImportError:
+    _TQDM_AVAILABLE = False
+
+
+@dataclass
+class DistanceMatrixResult:
+    method: str
+    distance_matrix: np.ndarray
+    elapsed_seconds: float
+    mesh: Optional[trimesh.Trimesh] = None
+    projected_points: Optional[np.ndarray] = None
+    point_vertex_indices: Optional[np.ndarray] = None
+    paths: Optional[Dict[Tuple[int, int], np.ndarray]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    predecessors: Optional[np.ndarray] = None
+    heat_fields: Optional[Dict[int, np.ndarray]] = None
+
+
+def _as_points(points: Sequence[Sequence[float]]) -> np.ndarray:
+    """Проверяет и преобразует список точек в числовой массив.
+
+    Входные данные: последовательность трёхмерных координат.
+    Выходные данные: массив точек формы `(n, 3)`.
+    """
+    points_array = np.asarray(points, dtype=float)
+    if points_array.ndim != 2 or points_array.shape[1] != 3:
+        raise ValueError("points must be an array with shape (n, 3)")
+    return points_array
+
+
+def polyhedron_to_trimesh(mesh: Any) -> trimesh.Trimesh:
+    """Преобразует mesh в формат `trimesh.Trimesh`.
+
+    Входные данные: объект `trimesh.Trimesh` или CGAL `Polyhedron_3`.
+    Выходные данные: объект `trimesh.Trimesh`.
+    """
+    if isinstance(mesh, trimesh.Trimesh):
+        return mesh.copy()
+    vertices, faces = _mesh_to_v_f(mesh)
+    return trimesh.Trimesh(vertices=vertices, faces=faces.astype(np.int64), process=False)
+
+
+def _nearest_vertex_indices(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
+    """Находит ближайшие вершины mesh для набора точек.
+    Строит KD-tree по вершинам mesh и выполняет nearest-neighbor
+    query для каждой точки.
+
+    Входные данные: mesh и массив точек формы `(n, 3)`.
+    Выходные данные: массив индексов ближайших вершин.
+    """
+    tree = cKDTree(mesh.vertices)
+    _, indices = tree.query(points)
+    return indices.astype(int)
+
+
+def _mesh_edge_graph(mesh: trimesh.Trimesh) -> csr_matrix:
+    """Строит взвешенный граф рёбер mesh.
+    Извлекает уникальные рёбра треугольников и назначает каждому
+    ребру вес, равный евклидовой длине между вершинами.
+
+    Входные данные: треугольный mesh.
+    Выходные данные: sparse adjacency matrix графа рёбер mesh.
+    """
+    faces = np.asarray(mesh.faces, dtype=int)
+    if len(faces) == 0:
+        raise ValueError("mesh has no faces")
+
+    edges = np.vstack((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
+    edges = np.sort(edges, axis=1)
+    edges = np.unique(edges, axis=0)
+
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    weights = np.linalg.norm(vertices[edges[:, 0]] - vertices[edges[:, 1]], axis=1)
+    row = np.concatenate((edges[:, 0], edges[:, 1]))
+    col = np.concatenate((edges[:, 1], edges[:, 0]))
+    data = np.concatenate((weights, weights))
+    return csr_matrix((data, (row, col)), shape=(len(vertices), len(vertices)))
+
+
+def _reconstruct_path(predecessors: np.ndarray, source: int, target: int) -> np.ndarray:
+    """Восстанавливает путь между двумя вершинами после Dijkstra.
+
+    Входные данные: массив, индекс источника и индекс цели.
+    Выходные данные: массив индексов вершин пути; пустой массив, если путь не
+    найден.
+    """
+    if source == target:
+        return np.array([source], dtype=int)
+
+    path = [target]
+    current = target
+    guard = 0
+    while current != source and guard <= len(predecessors):
+        current = int(predecessors[current])
+        if current < 0:
+            return np.array([], dtype=int)
+        path.append(current)
+        guard += 1
+    return np.array(path[::-1], dtype=int)
+
+
+def _default_pair(distance_matrix: np.ndarray) -> Tuple[int, int]:
+    if distance_matrix.shape[0] < 2:
+        return 0, 0
+    finite = np.where(np.isfinite(distance_matrix), distance_matrix, -np.inf)
+    np.fill_diagonal(finite, -np.inf)
+    pair = np.unravel_index(np.argmax(finite), finite.shape)
+    return int(pair[0]), int(pair[1])
+
+
+def _min_pair(distance_matrix: np.ndarray) -> Tuple[int, int]:
+    if distance_matrix.shape[0] < 2:
+        return 0, 0
+    m = np.where(np.isfinite(distance_matrix) & (distance_matrix > 0), distance_matrix, np.inf)
+    np.fill_diagonal(m, np.inf)
+    if not np.isfinite(m).any():
+        return 0, 1
+    pair = np.unravel_index(np.argmin(m), m.shape)
+    return int(pair[0]), int(pair[1])
+
+
+def _shortest_paths_on_mesh(
+    mesh: trimesh.Trimesh,
+    points: np.ndarray,
+    method: str,
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> DistanceMatrixResult:
+    """Вычисляет кратчайшие пути между точками по рёбрам mesh.
+    Проецирует точки на ближайшие вершины mesh, запускает Dijkstra
+    по графу рёбер и извлекает матрицу расстояний между выбранными вершинами.
+
+    Входные данные: mesh, точки анализа, имя метода и опциональная пара точек
+    для восстановления пути.
+    Выходные данные: `DistanceMatrixResult` с матрицей расстояний,
+    проекциями точек и диагностическим путём.
+    """
+    start = perf_counter()
+    projected_vertex_indices = _nearest_vertex_indices(mesh, points)
+    graph = _mesh_edge_graph(mesh)
+
+    distances, predecessors = dijkstra(
+        graph,
+        directed=False,
+        indices=projected_vertex_indices,
+        return_predecessors=True,
+    )
+    distance_matrix = distances[:, projected_vertex_indices]
+
+    if pair_for_path is None:
+        pair_for_path = _default_pair(distance_matrix)
+
+    paths: Dict[Tuple[int, int], np.ndarray] = {}
+    if len(points) >= 2:
+        i, j = pair_for_path
+        path_vertices = _reconstruct_path(
+            predecessors[i], projected_vertex_indices[i], projected_vertex_indices[j]
+        )
+        if len(path_vertices) > 0:
+            paths[(i, j)] = np.asarray(mesh.vertices[path_vertices], dtype=float)
+
+    return DistanceMatrixResult(
+        method=method,
+        distance_matrix=distance_matrix,
+        elapsed_seconds=perf_counter() - start,
+        mesh=mesh,
+        projected_points=np.asarray(mesh.vertices[projected_vertex_indices], dtype=float),
+        point_vertex_indices=projected_vertex_indices,
+        paths=paths,
+        predecessors=predecessors,
+        metadata={"pair_for_path": pair_for_path},
+    )
+
+
+def calculate_mesh_graph_distance_matrix(
+    dendrite_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> DistanceMatrixResult:
+    """Вычисляет `mesh_graph`-расстояния между точками на mesh.
+    Аппроксимирует геодезическое расстояние кратчайшим путём по
+    исходным рёбрам mesh.
+
+    Входные данные: mesh дендрита, точки крепления шипиков и опциональная пара
+    точек для визуализации пути.
+    Выходные данные: `DistanceMatrixResult` с квадратной матрицей расстояний.
+    """
+    mesh = polyhedron_to_trimesh(dendrite_mesh)
+    points = _as_points(attachment_points)
+    return _shortest_paths_on_mesh(mesh, points, "mesh_graph", pair_for_path)
+
+
+def calculate_skeleton_graph_distance_matrix(
+    dendrite_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    skeleton: Optional[Any] = None,
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> DistanceMatrixResult:
+    """Вычисляет расстояния между шипиками через skeleton дендрита.
+    Точки крепления проецируются на ближайшие рёбра skeleton-графа.
+    Итоговое расстояние между двумя шипиками равно сумме расстояния от первой
+    точки до skeleton, кратчайшего пути между проекциями по skeleton и
+    расстояния от skeleton до второй точки.
+
+    Входные данные: mesh дендрита, точки крепления шипиков, опциональный
+    skeleton-объект и опциональная пара точек для диагностического пути.
+    Выходные данные: `DistanceMatrixResult` с матрицей skeleton-расстояний.
+    """
+    start = perf_counter()
+    points = _as_points(attachment_points)
+    if skeleton is None:
+        try:
+            from src.spine_analysis.shape_metric.utils import get_dendrite_skeleton
+
+            skeleton = get_dendrite_skeleton(dendrite_mesh)
+        except Exception:
+            skeleton = None
+    if skeleton is None:
+        raise ValueError(
+            "skeleton_graph distance requires a registered/provided dendrite skeleton. "
+            "For MICrONS branches this is usually branch_skeleton.npy."
+        )
+
+    from dendrite_analysis.network import (
+        build_dendritic_graph_from_skeleton,
+        compute_spine_pairwise_distances,
+        project_spines_to_graph,
+    )
+
+    graph = build_dendritic_graph_from_skeleton(skeleton, dendrite_id="dendrite")
+    if graph.soma_node is None and graph.G.number_of_nodes() > 0:
+        graph.soma_node = next(iter(graph.G.nodes()))
+    spine_points = {str(index): point for index, point in enumerate(points)}
+    projected_spines, unassigned_ids = project_spines_to_graph(
+        graph,
+        spine_points,
+        max_distance_to_edge=np.inf,
+        use_k_nearest_edges=max(1, graph.G.number_of_edges()),
+        allow_unassigned=True,
+    )
+    if unassigned_ids:
+        raise ValueError(
+            "Cannot project all attachment points to skeleton. "
+            f"Unassigned point ids: {unassigned_ids[:10]}"
+        )
+
+    projected_by_index = {
+        int(spine.spine_id): spine
+        for spine in projected_spines
+    }
+    ordered_projected = [projected_by_index[index] for index in range(len(points))]
+    skeleton_distances = compute_spine_pairwise_distances(graph, ordered_projected)
+    offset = np.asarray([spine.distance_to_edge for spine in ordered_projected], dtype=float)
+    distance_matrix = skeleton_distances + offset[:, None] + offset[None, :]
+    np.fill_diagonal(distance_matrix, 0.0)
+
+    paths: Dict[Tuple[int, int], np.ndarray] = {}
+    if pair_for_path is not None and len(points) >= 2:
+        i, j = pair_for_path
+        if 0 <= i < len(points) and 0 <= j < len(points):
+            paths[(i, j)] = np.vstack(
+                [
+                    ordered_projected[i].original_point,
+                    ordered_projected[i].projected_point,
+                    ordered_projected[j].projected_point,
+                    ordered_projected[j].original_point,
+                ]
+            )
+
+    return DistanceMatrixResult(
+        method="skeleton_graph",
+        distance_matrix=np.asarray(distance_matrix, dtype=float),
+        elapsed_seconds=perf_counter() - start,
+        mesh=None,
+        projected_points=np.asarray([spine.projected_point for spine in ordered_projected], dtype=float),
+        point_vertex_indices=None,
+        paths=paths,
+        metadata={
+            "skeleton_graph": graph,
+            "projection_distances": offset,
+            "pair_for_path": pair_for_path,
+        },
+    )
+
+
+def _point_to_array(point: Any) -> np.ndarray:
+    return np.array([point.x(), point.y(), point.z()], dtype=float)
+
+
+def _skeleton_segments(dendrite_mesh: Any) -> List[Tuple[np.ndarray, np.ndarray]]:
+    if not bool(dendrite_mesh.is_closed()):
+        raise RuntimeError(
+            "surface_mesh_skeletonization requires a closed (watertight) mesh; "
+            "the input mesh has open boundaries."
+        )
+    if bool(does_self_intersect(dendrite_mesh)):
+        raise RuntimeError(
+            "surface_mesh_skeletonization requires a non-self-intersecting mesh; "
+            "the input mesh has self-intersecting faces."
+        )
+
+    skeleton_polylines = Polylines()
+    correspondence_polylines = Polylines()
+    surface_mesh_skeletonization(dendrite_mesh, skeleton_polylines, correspondence_polylines)
+
+    segments: List[Tuple[np.ndarray, np.ndarray]] = []
+    for polyline in skeleton_polylines:
+        for i in range(len(polyline) - 1):
+            segments.append((_point_to_array(polyline[i]), _point_to_array(polyline[i + 1])))
+    return segments
+
+
+def _pca_centerline(mesh: trimesh.Trimesh, samples: int = 32) -> np.ndarray:
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    if len(vertices) == 0:
+        return np.zeros((0, 3), dtype=float)
+    center = vertices.mean(axis=0)
+    _, _, vh = np.linalg.svd(vertices - center, full_matrices=False)
+    axis = vh[0]
+    positions = (vertices - center) @ axis
+    line_values = np.linspace(positions.min(), positions.max(), samples)
+    return center + line_values[:, None] * axis[None, :]
+
+
+def _graph_diameter_centerline(mesh: trimesh.Trimesh) -> np.ndarray:
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    if len(vertices) < 2:
+        return vertices.copy()
+
+    graph = _mesh_edge_graph(mesh)
+    if graph.shape[0] < 2 or graph.nnz == 0:
+        return _pca_centerline(mesh)
+
+    seed = int(np.argmax(np.linalg.norm(vertices - vertices.mean(axis=0), axis=1)))
+    distances = dijkstra(graph, directed=False, indices=seed)
+    finite = np.isfinite(distances)
+    if not np.any(finite):
+        return _pca_centerline(mesh)
+    endpoint_a = int(np.argmax(np.where(finite, distances, -np.inf)))
+
+    distances, predecessors = dijkstra(
+        graph,
+        directed=False,
+        indices=endpoint_a,
+        return_predecessors=True,
+    )
+    finite = np.isfinite(distances)
+    if not np.any(finite):
+        return _pca_centerline(mesh)
+    endpoint_b = int(np.argmax(np.where(finite, distances, -np.inf)))
+
+    path_ids = _reconstruct_path(predecessors, endpoint_a, endpoint_b)
+    if len(path_ids) < 2:
+        return _pca_centerline(mesh)
+    return vertices[np.asarray(path_ids, dtype=int)]
+
+
+def _fallback_centerline(mesh: trimesh.Trimesh, samples: int = 32) -> np.ndarray:
+    try:
+        centerline = _graph_diameter_centerline(mesh)
+        if len(centerline) >= 2:
+            return centerline
+    except Exception:
+        pass
+    return _pca_centerline(mesh, samples=samples)
+
+
+def centerline_length_from_mesh(mesh: Any) -> float:
+    """Оценивает длину центральной линии mesh.
+
+    Входные данные: mesh дендрита.
+    Выходные данные: численная оценка длины центральной линии.
+    """
+    tm = polyhedron_to_trimesh(mesh)
+    centerline = _fallback_centerline(tm)
+    if len(centerline) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(centerline, axis=0), axis=1).sum())
+
+
+def _ordered_centerline_from_segments(
+    segments: List[Tuple[np.ndarray, np.ndarray]],
+    fallback_mesh: trimesh.Trimesh,
+) -> np.ndarray:
+    if not segments:
+        return _fallback_centerline(fallback_mesh)
+
+    point_ids: Dict[Tuple[float, float, float], int] = {}
+    points: List[np.ndarray] = []
+    adjacency: Dict[int, List[Tuple[int, float]]] = {}
+
+    def get_id(point: np.ndarray) -> int:
+        key = tuple(np.round(point, 8).tolist())
+        if key not in point_ids:
+            point_ids[key] = len(points)
+            points.append(point)
+            adjacency[point_ids[key]] = []
+        return point_ids[key]
+
+    for start, end in segments:
+        start_id = get_id(start)
+        end_id = get_id(end)
+        weight = float(np.linalg.norm(start - end))
+        adjacency[start_id].append((end_id, weight))
+        adjacency[end_id].append((start_id, weight))
+
+    graph = csr_matrix(
+        (
+            [w for i, neighbours in adjacency.items() for _, w in neighbours],
+            (
+                [i for i, neighbours in adjacency.items() for _ in neighbours],
+                [j for neighbours in adjacency.values() for j, _ in neighbours],
+            ),
+        ),
+        shape=(len(points), len(points)),
+    )
+
+    endpoints = [idx for idx, neighbours in adjacency.items() if len(neighbours) == 1]
+    candidates = endpoints if len(endpoints) >= 2 else list(range(len(points)))
+    dist, pred = dijkstra(graph, directed=False, indices=candidates, return_predecessors=True)
+
+    best = np.unravel_index(np.nanargmax(np.where(np.isfinite(dist), dist, -np.inf)), dist.shape)
+    source = candidates[int(best[0])]
+    target = int(best[1])
+    path_ids = _reconstruct_path(pred[int(best[0])], source, target)
+    if len(path_ids) < 2:
+        return _fallback_centerline(fallback_mesh)
+
+    return np.asarray([points[idx] for idx in path_ids], dtype=float)
+
+
+def _smooth_centerline(centerline: np.ndarray, iterations: int = 2) -> np.ndarray:
+    smoothed = np.asarray(centerline, dtype=float).copy()
+    if len(smoothed) < 3:
+        return smoothed
+    for _ in range(iterations):
+        next_line = smoothed.copy()
+        next_line[1:-1] = (smoothed[:-2] + smoothed[1:-1] + smoothed[2:]) / 3.0
+        smoothed = next_line
+    return smoothed
+
+
+def _estimate_radius(mesh: trimesh.Trimesh, centerline: np.ndarray) -> float:
+    tree = cKDTree(centerline)
+    distances, _ = tree.query(mesh.vertices)
+    radius = float(np.percentile(distances, 50))
+    if not np.isfinite(radius) or radius <= 0:
+        radius = float(np.mean(mesh.extents) / 10.0)
+    return radius
+
+
+def build_stem_surface_mesh(
+    centerline: np.ndarray,
+    radius: float,
+    sections: int = 32,
+) -> trimesh.Trimesh:
+    """Строит трубчатый mesh ствола по центральной линии.
+    Сглаживает центральную линию и создаёт последовательные кольца
+    вершин, соединённые треугольниками.
+
+    Входные данные: массив точек центральной линии, радиус трубки и число
+    секций окружности.
+    Выходные данные: объект `trimesh.Trimesh`.
+    """
+    centerline = _smooth_centerline(centerline)
+    if len(centerline) < 2:
+        raise ValueError("centerline must contain at least two points")
+
+    tangents = np.zeros_like(centerline)
+    tangents[0] = centerline[1] - centerline[0]
+    tangents[-1] = centerline[-1] - centerline[-2]
+    if len(centerline) > 2:
+        tangents[1:-1] = centerline[2:] - centerline[:-2]
+    tangents /= np.linalg.norm(tangents, axis=1)[:, None]
+
+    first_axis = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(first_axis, tangents[0])) > 0.9:
+        first_axis = np.array([0.0, 1.0, 0.0])
+    normal = np.cross(tangents[0], first_axis)
+    normal /= np.linalg.norm(normal)
+
+    vertices = []
+    previous_normal = normal
+    angles = np.linspace(0, 2 * np.pi, sections, endpoint=False)
+    for center, tangent in zip(centerline, tangents):
+        normal = previous_normal - np.dot(previous_normal, tangent) * tangent
+        if np.linalg.norm(normal) <= 1e-12:
+            normal = np.cross(tangent, first_axis)
+        normal /= np.linalg.norm(normal)
+        binormal = np.cross(tangent, normal)
+        binormal /= np.linalg.norm(binormal)
+        previous_normal = normal
+
+        for angle in angles:
+            vertices.append(center + radius * (np.cos(angle) * normal + np.sin(angle) * binormal))
+
+    faces = []
+    for ring_idx in range(len(centerline) - 1):
+        ring_start = ring_idx * sections
+        next_ring_start = (ring_idx + 1) * sections
+        for section_idx in range(sections):
+            a = ring_start + section_idx
+            b = ring_start + (section_idx + 1) % sections
+            c = next_ring_start + section_idx
+            d = next_ring_start + (section_idx + 1) % sections
+            faces.append((a, c, b))
+            faces.append((b, c, d))
+
+    return trimesh.Trimesh(vertices=np.asarray(vertices), faces=np.asarray(faces), process=False)
+
+
+def calculate_stem_graph_distance_matrix(
+    dendrite_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    radius: Optional[float] = None,
+    centerline: Optional[np.ndarray] = None,
+    sections: int = 32,
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> DistanceMatrixResult:
+    start = perf_counter()
+    original_mesh = polyhedron_to_trimesh(dendrite_mesh)
+    points = _as_points(attachment_points)
+
+    if centerline is None:
+        try:
+            centerline = _ordered_centerline_from_segments(_skeleton_segments(dendrite_mesh), original_mesh)
+        except Exception:
+            centerline = _fallback_centerline(original_mesh)
+    centerline = _smooth_centerline(np.asarray(centerline, dtype=float))
+
+    if radius is None:
+        radius = _estimate_radius(original_mesh, centerline)
+
+    stem_mesh = build_stem_surface_mesh(centerline, radius, sections=sections)
+    result = _shortest_paths_on_mesh(stem_mesh, points, "stem_graph", pair_for_path)
+    result.elapsed_seconds += perf_counter() - start - result.elapsed_seconds
+    result.metadata = {
+        **(result.metadata or {}),
+        "radius": radius,
+        "sections": sections,
+        "centerline": centerline,
+    }
+    return result
+
+
+def _cotangent(a: np.ndarray, b: np.ndarray) -> float:
+    denom = np.linalg.norm(np.cross(a, b))
+    if denom <= 1e-12:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+def _cotangent_laplacian_and_mass(mesh: trimesh.Trimesh) -> Tuple[csr_matrix, csr_matrix]:
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=int)
+    n_vertices = len(vertices)
+
+    rows: List[int] = []
+    cols: List[int] = []
+    data: List[float] = []
+    mass = np.zeros(n_vertices, dtype=float)
+
+    for i, j, k in faces:
+        vi, vj, vk = vertices[i], vertices[j], vertices[k]
+        area = np.linalg.norm(np.cross(vj - vi, vk - vi)) / 2.0
+        if area <= 1e-12:
+            continue
+        mass[[i, j, k]] += area / 3.0
+
+        cot_i = _cotangent(vj - vi, vk - vi)
+        cot_j = _cotangent(vi - vj, vk - vj)
+        cot_k = _cotangent(vi - vk, vj - vk)
+        for a, b, cot in ((j, k, cot_i), (i, k, cot_j), (i, j, cot_k)):
+            weight = 0.5 * cot
+            rows.extend([a, b, a, b])
+            cols.extend([b, a, a, b])
+            data.extend([-weight, -weight, weight, weight])
+
+    laplacian = coo_matrix((data, (rows, cols)), shape=(n_vertices, n_vertices)).tocsr()
+    mass[mass <= 0] = np.mean(mass[mass > 0]) if np.any(mass > 0) else 1.0
+    return laplacian, diags(mass).tocsr()
+
+
+def _heat_distance_from_source(
+    mesh: trimesh.Trimesh,
+    source_vertex: int,
+    laplacian: csr_matrix,
+    mass: csr_matrix,
+    t: float,
+) -> np.ndarray:
+    n_vertices = len(mesh.vertices)
+    delta = np.zeros(n_vertices, dtype=float)
+    delta[source_vertex] = 1.0
+
+    heat = spsolve((mass + t * laplacian).tocsc(), delta)
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=int)
+
+    face_vectors = np.zeros((len(faces), 3), dtype=float)
+    for face_index, (i, j, k) in enumerate(faces):
+        vi, vj, vk = vertices[i], vertices[j], vertices[k]
+        normal = np.cross(vj - vi, vk - vi)
+        double_area = np.linalg.norm(normal)
+        if double_area <= 1e-12:
+            continue
+        grad_i = np.cross(normal, vk - vj) / double_area
+        grad_j = np.cross(normal, vi - vk) / double_area
+        grad_k = np.cross(normal, vj - vi) / double_area
+        grad_heat = heat[i] * grad_i + heat[j] * grad_j + heat[k] * grad_k
+        norm = np.linalg.norm(grad_heat)
+        if norm > 1e-12:
+            face_vectors[face_index] = -grad_heat / norm
+
+    divergence = np.zeros(n_vertices, dtype=float)
+    for face_index, (i, j, k) in enumerate(faces):
+        vi, vj, vk = vertices[i], vertices[j], vertices[k]
+        vector = face_vectors[face_index]
+        cot_i = _cotangent(vj - vi, vk - vi)
+        cot_j = _cotangent(vi - vj, vk - vj)
+        cot_k = _cotangent(vi - vk, vj - vk)
+
+        divergence[i] += 0.5 * (cot_k * np.dot(vj - vi, vector) + cot_j * np.dot(vk - vi, vector))
+        divergence[j] += 0.5 * (cot_k * np.dot(vi - vj, vector) + cot_i * np.dot(vk - vj, vector))
+        divergence[k] += 0.5 * (cot_j * np.dot(vi - vk, vector) + cot_i * np.dot(vj - vk, vector))
+
+    keep = np.ones(n_vertices, dtype=bool)
+    keep[source_vertex] = False
+    phi = np.zeros(n_vertices, dtype=float)
+    phi[keep] = spsolve(laplacian[keep][:, keep].tocsc(), divergence[keep])
+    phi -= np.nanmin(phi)
+    if phi[source_vertex] != 0:
+        phi -= phi[source_vertex]
+    phi = np.abs(phi)
+    phi[source_vertex] = 0.0
+    return phi
+
+
+def _adjacency_from_mesh(mesh: trimesh.Trimesh) -> List[np.ndarray]:
+    graph = _mesh_edge_graph(mesh).tocsr()
+    return [graph.indices[graph.indptr[i]:graph.indptr[i + 1]] for i in range(graph.shape[0])]
+
+
+def _heat_descent_path(
+    mesh: trimesh.Trimesh,
+    phi: np.ndarray,
+    source_vertex: int,
+    target_vertex: int,
+) -> np.ndarray:
+    adjacency = _adjacency_from_mesh(mesh)
+    path = [target_vertex]
+    current = target_vertex
+    visited = {target_vertex}
+    for _ in range(len(mesh.vertices)):
+        if current == source_vertex:
+            break
+        neighbours = adjacency[current]
+        if len(neighbours) == 0:
+            break
+        next_vertex = int(neighbours[np.argmin(phi[neighbours])])
+        if next_vertex in visited or phi[next_vertex] > phi[current]:
+            return np.empty((0, 3), dtype=float)
+        path.append(next_vertex)
+        visited.add(next_vertex)
+        current = next_vertex
+    if path[-1] != source_vertex:
+        return np.empty((0, 3), dtype=float)
+    return np.asarray(mesh.vertices[path[::-1]], dtype=float)
+
+
+def calculate_heat_distance_matrix(
+    dendrite_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> DistanceMatrixResult:
+    """Heat Method geodesic approximation on the original dendrite mesh."""
+    start = perf_counter()
+    mesh = polyhedron_to_trimesh(dendrite_mesh)
+    points = _as_points(attachment_points)
+    projected_vertex_indices = _nearest_vertex_indices(mesh, points)
+
+    laplacian, mass = _cotangent_laplacian_and_mass(mesh)
+    edge_lengths = _mesh_edge_graph(mesh).data
+    mean_edge = float(np.mean(edge_lengths)) if len(edge_lengths) else 1.0
+    t = mean_edge ** 2
+
+    distance_matrix = np.zeros((len(points), len(points)), dtype=float)
+    heat_fields: Dict[int, np.ndarray] = {}
+    for i, source_vertex in enumerate(projected_vertex_indices):
+        phi = _heat_distance_from_source(mesh, int(source_vertex), laplacian, mass, t)
+        heat_fields[i] = phi
+        distance_matrix[i, :] = phi[projected_vertex_indices]
+    distance_matrix = (distance_matrix + distance_matrix.T) / 2.0
+    np.fill_diagonal(distance_matrix, 0.0)
+
+    if pair_for_path is None:
+        pair_for_path = _default_pair(distance_matrix)
+
+    paths: Dict[Tuple[int, int], np.ndarray] = {}
+    if len(points) >= 2:
+        i, j = pair_for_path
+        path = _heat_descent_path(
+            mesh,
+            heat_fields[i],
+            int(projected_vertex_indices[i]),
+            int(projected_vertex_indices[j]),
+        )
+        if len(path) == 0:
+            graph_result = _shortest_paths_on_mesh(mesh, points, "mesh_graph", pair_for_path)
+            path = next(iter((graph_result.paths or {}).values()), np.empty((0, 3)))
+        if len(path) > 0:
+            paths[(i, j)] = path
+
+    return DistanceMatrixResult(
+        method="heat",
+        distance_matrix=distance_matrix,
+        elapsed_seconds=perf_counter() - start,
+        mesh=mesh,
+        projected_points=np.asarray(mesh.vertices[projected_vertex_indices], dtype=float),
+        point_vertex_indices=projected_vertex_indices,
+        paths=paths,
+        heat_fields=heat_fields,
+        metadata={"pair_for_path": pair_for_path, "t": t},
+    )
+
+
+def _recompute_path_for_result(
+    result: DistanceMatrixResult,
+    pair: Tuple[int, int],
+) -> Optional[np.ndarray]:
+    i, j = pair
+    if result.method == "skeleton_graph":
+        return (result.paths or {}).get(pair)
+    if result.method in ("mesh_graph", "stem_graph"):
+        if (
+            result.predecessors is not None
+            and result.point_vertex_indices is not None
+            and result.mesh is not None
+        ):
+            path_vertices = _reconstruct_path(
+                result.predecessors[i],
+                int(result.point_vertex_indices[i]),
+                int(result.point_vertex_indices[j]),
+            )
+            if len(path_vertices) > 0:
+                return np.asarray(result.mesh.vertices[path_vertices], dtype=float)
+    elif result.method == "heat":
+        if (
+            result.heat_fields is not None
+            and result.point_vertex_indices is not None
+            and result.mesh is not None
+        ):
+            phi = result.heat_fields.get(i)
+            if phi is not None:
+                path = _heat_descent_path(
+                    result.mesh,
+                    phi,
+                    int(result.point_vertex_indices[i]),
+                    int(result.point_vertex_indices[j]),
+                )
+                if len(path) > 0:
+                    return path
+    return None
+
+
+def select_shared_pair(
+    results: Dict[str, DistanceMatrixResult],
+    preferred_methods: Sequence[str] = ("mesh_graph", "stem_graph", "heat"),
+) -> Tuple[int, int]:
+    """Pick a single representative point pair from the best available method."""
+    for method in preferred_methods:
+        if method in results:
+            return _default_pair(results[method].distance_matrix)
+    if results:
+        return _default_pair(next(iter(results.values())).distance_matrix)
+    return (0, 1)
+
+
+def calculate_spine_distance_matrices(
+    dendrite_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    methods: Iterable[str] = ("mesh_graph",),
+    radius: Optional[float] = None,
+    centerline: Optional[np.ndarray] = None,
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> Dict[str, DistanceMatrixResult]:
+    """Вычисляет матрицы расстояний между шипиками выбранными методами.
+
+    Входные данные: mesh дендрита, точки крепления шипиков, список методов,
+    радиус, centerline и пара для пути.
+    Выходные данные: словарь `{method_name: DistanceMatrixResult}`.
+    """
+    results: Dict[str, DistanceMatrixResult] = {}
+    points = _as_points(attachment_points)
+
+    methods_list = list(methods)
+    if _TQDM_AVAILABLE:
+        methods_iter: Any = _tqdm(methods_list, desc="distance methods", unit="method", leave=False)
+    else:
+        methods_iter = methods_list
+
+    for method in methods_iter:
+        if method == "stem_graph":
+            results[method] = calculate_stem_graph_distance_matrix(
+                dendrite_mesh, points, radius=radius, centerline=centerline, pair_for_path=pair_for_path
+            )
+        elif method == "mesh_graph":
+            results[method] = calculate_mesh_graph_distance_matrix(dendrite_mesh, points, pair_for_path)
+        elif method == "skeleton_graph":
+            results[method] = calculate_skeleton_graph_distance_matrix(dendrite_mesh, points, pair_for_path=pair_for_path)
+        elif method in {"heat", "heat_method"}:
+            results["heat"] = calculate_heat_distance_matrix(dendrite_mesh, points, pair_for_path)
+        else:
+            raise ValueError(f"Unknown distance method: {method}")
+    return results
+
+
+def _plot_mesh(ax, mesh: trimesh.Trimesh, color: str = "#9aa3ad", alpha: float = 0.2) -> None:
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=int)
+    collection = Poly3DCollection(vertices[faces], alpha=alpha, linewidths=0.15)
+    collection.set_facecolor(color)
+    collection.set_edgecolor("#6b7280")
+    ax.add_collection3d(collection)
+
+
+def _set_axes_equal(ax, points: np.ndarray) -> None:
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+    center = (mins + maxs) / 2.0
+    radius = float(np.max(maxs - mins) / 2.0)
+    if radius <= 0:
+        radius = 1.0
+    ax.set_xlim(center[0] - radius, center[0] + radius)
+    ax.set_ylim(center[1] - radius, center[1] + radius)
+    ax.set_zlim(center[2] - radius, center[2] + radius)
+
+
+def visualize_distance_result(
+    original_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    result: DistanceMatrixResult,
+    min_pair: Optional[Tuple[int, int]] = None,
+    max_pair: Optional[Tuple[int, int]] = None,
+    save_path: Optional[str] = None,
+) -> plt.Figure:
+    """Строит статичную 3D-визуализацию результата расчёта расстояний.
+
+    Входные данные: исходный mesh, точки крепления, результат расстояний,
+    опциональные пары min/max и путь сохранения.
+    Выходные данные: объект Matplotlib figure.
+    """
+    original = polyhedron_to_trimesh(original_mesh)
+    points = _as_points(attachment_points)
+
+    if min_pair is None:
+        min_pair = _min_pair(result.distance_matrix)
+    if max_pair is None:
+        max_pair = _default_pair(result.distance_matrix)
+
+    method_mesh = result.mesh if result.mesh is not None else original
+    projected = result.projected_points if result.projected_points is not None else points
+
+    min_dist = result.distance_matrix[min_pair[0], min_pair[1]] if result.distance_matrix.size else np.nan
+    max_dist = result.distance_matrix[max_pair[0], max_pair[1]] if result.distance_matrix.size else np.nan
+
+    fig = plt.figure(figsize=(21, 6))
+    ax_mesh = fig.add_subplot(1, 3, 1, projection="3d")
+    ax_min  = fig.add_subplot(1, 3, 2, projection="3d")
+    ax_max  = fig.add_subplot(1, 3, 3, projection="3d")
+
+    # Panel 1 — plain dendrite mesh
+    _plot_mesh(ax_mesh, original, alpha=0.22)
+    ax_mesh.set_title("Dendrite mesh")
+    _set_axes_equal(ax_mesh, original.vertices)
+
+    # Panel 2 — minimum distance pair (green)
+    _plot_mesh(ax_min, method_mesh, alpha=0.18)
+    ax_min.scatter(projected[:, 0], projected[:, 1], projected[:, 2], c="#1f77b4", s=24)
+    ax_min.scatter(
+        projected[list(min_pair), 0], projected[list(min_pair), 1], projected[list(min_pair), 2],
+        c="#2ca02c", s=65,
+    )
+    min_path = (result.paths or {}).get(tuple(min_pair))
+    if min_path is not None and len(min_path) > 0:
+        ax_min.plot(min_path[:, 0], min_path[:, 1], min_path[:, 2], color="#2ca02c", linewidth=2.5)
+    ax_min.set_title(f"{result.method} — min d={min_dist:.3f}")
+    _set_axes_equal(ax_min, np.vstack((method_mesh.vertices, projected)))
+
+    # Panel 3 — maximum distance pair (red)
+    _plot_mesh(ax_max, method_mesh, alpha=0.18)
+    ax_max.scatter(projected[:, 0], projected[:, 1], projected[:, 2], c="#1f77b4", s=24)
+    ax_max.scatter(
+        projected[list(max_pair), 0], projected[list(max_pair), 1], projected[list(max_pair), 2],
+        c="#d62728", s=65,
+    )
+    max_path = (result.paths or {}).get(tuple(max_pair))
+    if max_path is not None and len(max_path) > 0:
+        ax_max.plot(max_path[:, 0], max_path[:, 1], max_path[:, 2], color="#d62728", linewidth=2.5)
+    ax_max.set_title(f"{result.method} — max d={max_dist:.3f}, t={result.elapsed_seconds:.3f}s")
+    _set_axes_equal(ax_max, np.vstack((method_mesh.vertices, projected)))
+
+    for ax in (ax_mesh, ax_min, ax_max):
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_zlabel("z")
+
+    fig.tight_layout()
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=200)
+    return fig
+
+
+def visualize_distance_result_3d(
+    original_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    result: DistanceMatrixResult,
+    min_pair: Optional[Tuple[int, int]] = None,
+    max_pair: Optional[Tuple[int, int]] = None,
+    save_path: Optional[str] = None,
+) -> Optional[Any]:
+    """Строит интерактивную 3D-визуализацию результата расстояний.
+
+    Входные данные: исходный mesh, точки крепления, результат расстояний,
+    опциональные пары min/max и путь сохранения HTML.
+    Выходные данные: объект Plotly figure или `None`.
+    """
+    if not _PLOTLY_AVAILABLE:
+        return None
+
+    original = polyhedron_to_trimesh(original_mesh)
+    points = _as_points(attachment_points)
+
+    if min_pair is None:
+        min_pair = _min_pair(result.distance_matrix)
+    if max_pair is None:
+        max_pair = _default_pair(result.distance_matrix)
+
+    method_mesh = result.mesh if result.mesh is not None else original
+    projected = result.projected_points if result.projected_points is not None else points
+    min_dist = result.distance_matrix[min_pair[0], min_pair[1]] if result.distance_matrix.size else float("nan")
+    max_dist = result.distance_matrix[max_pair[0], max_pair[1]] if result.distance_matrix.size else float("nan")
+
+    fig = _make_subplots(
+        rows=1,
+        cols=3,
+        specs=[[{"type": "scene"}, {"type": "scene"}, {"type": "scene"}]],
+        subplot_titles=(
+            "Dendrite mesh",
+            f"{result.method} — min d={min_dist:.3f}",
+            f"{result.method} — max d={max_dist:.3f}, t={result.elapsed_seconds:.3f}s",
+        ),
+    )
+
+    def _add_mesh(mesh: trimesh.Trimesh, col: int, color: str = "lightgray") -> None:
+        v = np.asarray(mesh.vertices, dtype=float)
+        f = np.asarray(mesh.faces, dtype=int)
+        fig.add_trace(
+            _go.Mesh3d(
+                x=v[:, 0], y=v[:, 1], z=v[:, 2],
+                i=f[:, 0], j=f[:, 1], k=f[:, 2],
+                opacity=0.25, color=color, showscale=False,
+                hoverinfo="skip", name="mesh",
+            ),
+            row=1, col=col,
+        )
+
+    # Col 1 — plain dendrite mesh
+    _add_mesh(original, col=1)
+
+    # Col 2 — minimum distance pair (green)
+    _add_mesh(method_mesh, col=2, color="lightsteelblue")
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[:, 0], y=projected[:, 1], z=projected[:, 2],
+            mode="markers", marker=dict(size=4, color="steelblue"),
+            showlegend=False,
+        ),
+        row=1, col=2,
+    )
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[list(min_pair), 0], y=projected[list(min_pair), 1], z=projected[list(min_pair), 2],
+            mode="markers", marker=dict(size=10, color="green"),
+            showlegend=False,
+        ),
+        row=1, col=2,
+    )
+    min_path = (result.paths or {}).get(tuple(min_pair))
+    if min_path is not None and len(min_path) > 0:
+        fig.add_trace(
+            _go.Scatter3d(
+                x=min_path[:, 0], y=min_path[:, 1], z=min_path[:, 2],
+                mode="lines", line=dict(color="green", width=6),
+                showlegend=False,
+            ),
+            row=1, col=2,
+        )
+
+    # Col 3 — maximum distance pair (red)
+    _add_mesh(method_mesh, col=3, color="lightsteelblue")
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[:, 0], y=projected[:, 1], z=projected[:, 2],
+            mode="markers", marker=dict(size=4, color="steelblue"),
+            showlegend=False,
+        ),
+        row=1, col=3,
+    )
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[list(max_pair), 0], y=projected[list(max_pair), 1], z=projected[list(max_pair), 2],
+            mode="markers", marker=dict(size=10, color="crimson"),
+            showlegend=False,
+        ),
+        row=1, col=3,
+    )
+    max_path = (result.paths or {}).get(tuple(max_pair))
+    if max_path is not None and len(max_path) > 0:
+        fig.add_trace(
+            _go.Scatter3d(
+                x=max_path[:, 0], y=max_path[:, 1], z=max_path[:, 2],
+                mode="lines", line=dict(color="crimson", width=6),
+                showlegend=False,
+            ),
+            row=1, col=3,
+        )
+
+    fig.update_layout(
+        title=f"{result.method} — min d={min_dist:.4f}  |  max d={max_dist:.4f}  |  t={result.elapsed_seconds:.3f}s",
+        height=620,
+        margin=dict(l=0, r=0, b=0, t=70),
+    )
+
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+
+    return fig
+
+
+def visualize_spine_pair_mesh_graph_distance_3d(
+    dendrite_mesh: Any,
+    spine_meshes: Dict[str, Any],
+    attachment_points: Sequence[Sequence[float]],
+    result: DistanceMatrixResult,
+    pair: Optional[Tuple[int, int]] = None,
+    spine_names: Optional[Sequence[str]] = None,
+    save_path: Optional[str] = None,
+    title: Optional[str] = None,
+) -> Optional[Any]:
+    """Визуализирует mesh_graph-путь между парой шипиков.
+
+    Входные данные: mesh дендрита, mesh-и шипиков, точки крепления, результат
+    расстояний, пара индексов, имена шипиков, путь сохранения и заголовок.
+    Выходные данные: объект Plotly figure или `None`.
+    """
+    if not _PLOTLY_AVAILABLE:
+        return None
+
+    points = _as_points(attachment_points)
+    if len(points) < 2:
+        return None
+
+    if pair is None:
+        pair = _default_pair(result.distance_matrix)
+    i, j = pair
+    if i == j or i >= len(points) or j >= len(points):
+        return None
+
+    path = (result.paths or {}).get(tuple(pair))
+    if path is None or len(path) == 0:
+        path = _recompute_path_for_result(result, pair)
+    if path is not None:
+        path = np.asarray(path, dtype=float)
+
+    dendrite = polyhedron_to_trimesh(dendrite_mesh)
+    projected = result.projected_points if result.projected_points is not None else points
+    distance = result.distance_matrix[i, j] if result.distance_matrix.size else float("nan")
+
+    fig = _go.Figure()
+
+    def _add_mesh(mesh: Any, name: str, color: str, opacity: float) -> np.ndarray:
+        tm = polyhedron_to_trimesh(mesh)
+        vertices = np.asarray(tm.vertices, dtype=float)
+        faces = np.asarray(tm.faces, dtype=int)
+        fig.add_trace(
+            _go.Mesh3d(
+                x=vertices[:, 0],
+                y=vertices[:, 1],
+                z=vertices[:, 2],
+                i=faces[:, 0],
+                j=faces[:, 1],
+                k=faces[:, 2],
+                color=color,
+                opacity=opacity,
+                name=name,
+                showscale=False,
+                hoverinfo="skip",
+            )
+        )
+        return vertices
+
+    all_points = [_add_mesh(dendrite, "dendrite / branch_mesh", "#bdbdbd", 0.22)]
+
+    names = list(spine_names) if spine_names is not None else list(spine_meshes.keys())
+    selected_names = []
+    for index in pair:
+        if index < len(names):
+            selected_names.append(names[index])
+
+    spine_colors = ["#1f77b4", "#ff7f0e"]
+    for color, spine_name in zip(spine_colors, selected_names):
+        spine_mesh = spine_meshes.get(spine_name)
+        if spine_mesh is None:
+            continue
+        all_points.append(_add_mesh(spine_mesh, f"spine: {Path(spine_name).name}", color, 0.72))
+
+    fig.add_trace(
+        _go.Scatter3d(
+            x=projected[:, 0],
+            y=projected[:, 1],
+            z=projected[:, 2],
+            mode="markers",
+            marker={"size": 3, "color": "#6baed6", "opacity": 0.5},
+            name="all attachment points projected to mesh",
+            hoverinfo="skip",
+        )
+    )
+
+    selected_projected = projected[[i, j]]
+    selected_original = points[[i, j]]
+    point_labels = [
+        f"{i}: {Path(selected_names[0]).name if len(selected_names) > 0 else 'spine'}",
+        f"{j}: {Path(selected_names[1]).name if len(selected_names) > 1 else 'spine'}",
+    ]
+
+    fig.add_trace(
+        _go.Scatter3d(
+            x=selected_projected[:, 0],
+            y=selected_projected[:, 1],
+            z=selected_projected[:, 2],
+            mode="markers+text",
+            marker={"size": 8, "color": "#d62728"},
+            text=point_labels,
+            textposition="top center",
+            name="selected attachment points on dendrite mesh",
+        )
+    )
+
+    if not np.allclose(selected_original, selected_projected, equal_nan=True):
+        fig.add_trace(
+            _go.Scatter3d(
+                x=selected_original[:, 0],
+                y=selected_original[:, 1],
+                z=selected_original[:, 2],
+                mode="markers",
+                marker={"size": 5, "color": "#9467bd"},
+                name="original attachment points",
+            )
+        )
+
+    if path is not None and len(path) > 0:
+        fig.add_trace(
+            _go.Scatter3d(
+                x=path[:, 0],
+                y=path[:, 1],
+                z=path[:, 2],
+                mode="lines",
+                line={"color": "#d62728", "width": 8},
+                name=f"mesh_graph shortest path, d={distance:.3f}",
+            )
+        )
+        all_points.append(path)
+
+    all_points.extend([selected_projected, selected_original])
+    all_points_array = np.vstack([
+        np.asarray(points_array, dtype=float)
+        for points_array in all_points
+        if points_array is not None and len(points_array) > 0
+    ])
+    finite_points = all_points_array[np.isfinite(all_points_array).all(axis=1)]
+    if len(finite_points) == 0:
+        finite_points = np.zeros((1, 3), dtype=float)
+    mins = finite_points.min(axis=0)
+    maxs = finite_points.max(axis=0)
+    center = (mins + maxs) / 2.0
+    radius = float(np.max(maxs - mins) / 2.0)
+    if not np.isfinite(radius) or radius <= 0:
+        radius = 1.0
+
+    if title is None:
+        title = "mesh_graph distance between the farthest spine pair"
+
+    fig.update_layout(
+        title=f"{title}<br>pair=({i}, {j}), distance={distance:.4f}",
+        scene={
+            "xaxis": {"range": [center[0] - radius, center[0] + radius], "title": "X"},
+            "yaxis": {"range": [center[1] - radius, center[1] + radius], "title": "Y"},
+            "zaxis": {"range": [center[2] - radius, center[2] + radius], "title": "Z"},
+            "aspectmode": "cube",
+        },
+        height=720,
+        margin={"l": 0, "r": 0, "b": 0, "t": 90},
+        legend={"itemsizing": "constant"},
+    )
+
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+
+    return fig
+
+
+def summarize_distance_results(results: Dict[str, DistanceMatrixResult]) -> pd.DataFrame:
+    """Формирует summary-таблицу для методов расстояний.
+
+    Входные данные: словарь результатов расстояний.
+    Выходные данные: `pandas.DataFrame`, отсортированный по времени расчёта.
+    """
+    rows = []
+    for method, result in results.items():
+        matrix = result.distance_matrix
+        upper = matrix[np.triu_indices_from(matrix, k=1)] if matrix.size else np.array([])
+        rows.append(
+            {
+                "method": method,
+                "elapsed_seconds": result.elapsed_seconds,
+                "n_points": matrix.shape[0],
+                "mean_distance": float(np.mean(upper)) if len(upper) else np.nan,
+                "median_distance": float(np.median(upper)) if len(upper) else np.nan,
+                "max_distance": float(np.max(upper)) if len(upper) else np.nan,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("elapsed_seconds")
+
+
+def save_distance_method_comparison(
+    dendrite_mesh: Any,
+    attachment_points: Sequence[Sequence[float]],
+    output_dir: str = "output_dendrite_distance_comparison",
+    methods: Iterable[str] = ("mesh_graph",),
+    radius: Optional[float] = None,
+    centerline: Optional[np.ndarray] = None,
+    pair_for_path: Optional[Tuple[int, int]] = None,
+) -> Dict[str, DistanceMatrixResult]:
+    """Считает и сохраняет сравнение методов расстояний.
+
+    Входные данные: mesh дендрита, точки крепления, директория вывода, методы,
+    радиус, centerline и пара для пути.
+    Выходные данные: словарь результатов расстояний.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    results = calculate_spine_distance_matrices(
+        dendrite_mesh=dendrite_mesh,
+        attachment_points=attachment_points,
+        methods=methods,
+        radius=radius,
+        centerline=centerline,
+        pair_for_path=pair_for_path,
+    )
+
+    # Compute per-result min and max pairs and their paths
+    for result in results.values():
+        min_p = _min_pair(result.distance_matrix)
+        max_p = _default_pair(result.distance_matrix)
+        min_path = _recompute_path_for_result(result, min_p)
+        max_path = _recompute_path_for_result(result, max_p)
+        result.paths = {}
+        if min_path is not None:
+            result.paths[min_p] = min_path
+        if max_path is not None:
+            result.paths[max_p] = max_path
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata["min_pair"] = min_p
+        result.metadata["max_pair"] = max_p
+
+    summary = summarize_distance_results(results)
+    summary.to_csv(output_path / "distance_methods_summary.csv", index=False)
+
+    original = polyhedron_to_trimesh(dendrite_mesh)
+    for method, result in results.items():
+        np.savetxt(output_path / f"{method}_distance_matrix.csv", result.distance_matrix, delimiter=",")
+        min_p = (result.metadata or {}).get("min_pair")
+        max_p = (result.metadata or {}).get("max_pair")
+        visualize_distance_result(
+            original,
+            attachment_points,
+            result,
+            min_pair=min_p,
+            max_pair=max_p,
+            save_path=str(output_path / f"{method}_visualization.png"),
+        )
+        visualize_distance_result_3d(
+            original,
+            attachment_points,
+            result,
+            min_pair=min_p,
+            max_pair=max_p,
+            save_path=str(output_path / f"{method}_visualization_3d.html"),
+        )
+        plt.close("all")
+
+    return results
