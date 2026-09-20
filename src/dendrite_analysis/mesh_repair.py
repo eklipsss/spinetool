@@ -304,9 +304,36 @@ def _fill_holes_fan(tm: "trimesh.Trimesh") -> None:
 
     for loop in loops:
         pts = tm.vertices[loop]
-        centroid = pts.mean(axis=0).tolist()
+        centroid = pts.mean(axis=0)
+        centered = pts - centroid
+        scale = float(np.linalg.norm(np.ptp(pts, axis=0)))
+        eps = max(scale * 1e-4, 1e-9)
+
+        normal = np.zeros(3, dtype=float)
+        for k in range(len(pts)):
+            normal += np.cross(pts[k] - centroid, pts[(k + 1) % len(pts)] - centroid)
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm <= 1e-12 and len(pts) >= 3:
+            try:
+                _, _, vh = np.linalg.svd(centered, full_matrices=False)
+                normal = np.asarray(vh[-1], dtype=float)
+                normal_norm = float(np.linalg.norm(normal))
+            except Exception:
+                normal_norm = 0.0
+        if normal_norm > 0:
+            normal = normal / normal_norm
+
+        trial_centroid = centroid.copy()
+        if normal_norm > 0:
+            min_area = min(
+                float(np.linalg.norm(np.cross(pts[(k + 1) % len(pts)] - pts[k], trial_centroid - pts[k])) * 0.5)
+                for k in range(len(pts))
+            )
+            if min_area <= 1e-12:
+                trial_centroid = centroid + normal * eps
+
         cid = len(new_verts)
-        new_verts.append(centroid)
+        new_verts.append(trial_centroid.tolist())
         n = len(loop)
         for k in range(n):
             new_faces.append([loop[k], loop[(k + 1) % n], cid])
@@ -315,6 +342,25 @@ def _fill_holes_fan(tm: "trimesh.Trimesh") -> None:
     tm.faces = np.array(new_faces, dtype=int)
     tm._cache.clear()
     trimesh.repair.fix_normals(tm, multibody=True)
+
+
+def _boundary_edge_count(tm: "trimesh.Trimesh") -> int:
+    if len(tm.faces) == 0:
+        return 0
+    _, counts = np.unique(tm.edges_sorted, axis=0, return_counts=True)
+    return int(np.sum(counts == 1))
+
+
+def _remove_degenerate_faces(tm: "trimesh.Trimesh", area_tol: float = 1e-12) -> int:
+    if len(tm.faces) == 0:
+        return 0
+    mask = tm.area_faces > area_tol
+    n_removed = int(np.sum(~mask))
+    if n_removed > 0:
+        tm.update_faces(mask)
+        tm.remove_unreferenced_vertices()
+        tm._cache.clear()
+    return n_removed
 
 
 def _split_nonmanifold_vertices(tm: "trimesh.Trimesh") -> int:
@@ -431,11 +477,8 @@ def repair_mesh(
     # Step 2: Remove degenerate faces
     # ------------------------------------------------------------------
     if remove_degenerate and len(tm.faces) > 0:
-        mask = tm.area_faces > 1e-12
-        n_removed = int(np.sum(~mask))
+        n_removed = _remove_degenerate_faces(tm)
         if n_removed > 0:
-            tm.update_faces(mask)
-            tm.remove_unreferenced_vertices()
             if verbose:
                 print(f"  [2/5] Removed {n_removed} degenerate faces.")
         elif verbose:
@@ -459,21 +502,33 @@ def repair_mesh(
     if fill_holes:
         was_watertight = tm.is_watertight
         n_removed_after_fill = 0
-        trimesh.repair.fill_holes(tm)
-        if not was_watertight and not tm.is_watertight:
-            _fill_holes_fan(tm)
-        if remove_degenerate and len(tm.faces) > 0:
-            mask = tm.area_faces > 1e-12
-            n_removed_after_fill = int(np.sum(~mask))
-            if n_removed_after_fill > 0:
-                tm.update_faces(mask)
-                tm.remove_unreferenced_vertices()
-                tm._cache.clear()
+        max_hole_fill_passes = 5
+        boundary_before = _boundary_edge_count(tm)
+        boundary_after = boundary_before
+        for _ in range(max_hole_fill_passes):
+            previous_boundary = _boundary_edge_count(tm)
+            trimesh.repair.fill_holes(tm)
+            if not tm.is_watertight:
+                _fill_holes_fan(tm)
+            if remove_degenerate:
+                n_removed_after_fill += _remove_degenerate_faces(tm)
+            if not tm.is_watertight:
+                _fill_holes_fan(tm)
+                if remove_degenerate:
+                    n_removed_after_fill += _remove_degenerate_faces(tm)
+            boundary_after = _boundary_edge_count(tm)
+            if tm.is_watertight:
+                break
+            if boundary_after == previous_boundary:
+                break
         if verbose:
             if not was_watertight and tm.is_watertight:
                 print("  [4/5] Holes filled — mesh is now watertight.")
             elif not was_watertight:
-                print("  [4/5] Hole filling attempted; mesh is still not watertight.")
+                print(
+                    "  [4/5] Hole filling attempted; mesh is still not watertight "
+                    f"({boundary_before} -> {boundary_after} boundary edges)."
+                )
             else:
                 print("  [4/5] Mesh was already watertight — no holes to fill.")
             if n_removed_after_fill > 0:
