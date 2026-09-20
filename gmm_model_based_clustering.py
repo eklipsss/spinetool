@@ -21,7 +21,7 @@ import json
 
 try:
     import umap
-except ImportError:  # pragma: no cover - optional runtime dependency
+except ImportError: 
     umap = None
 
 
