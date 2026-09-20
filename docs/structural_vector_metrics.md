@@ -396,7 +396,7 @@ Bounding box сомы (`soma_bbox_x`, `soma_bbox_y`, `soma_bbox_z`) не сох�
 
 Эти поля появляются, если модель удалось подогнать.
 
-В core ML-вектор входят только коэффициенты intensity-модели, интерпретируемые как описание пространственного профиля шипиков. Коэффициенты расстояния сохраняются на нормированной оси \(d_\mathrm{norm}=d/d_{\max}\):
+В core ML-вектор входят только коэффициенты intensity-модели, интерпретируемые как описание пространственного профиля шипиков, и нормированные на число шипиков показатели качества fit-а. Коэффициенты расстояния сохраняются на нормированной оси \(d_\mathrm{norm}=d/d_{\max}\):
 
 - `poisson_coef_intercept` — intercept log-intensity модели.
 
@@ -404,7 +404,9 @@ Bounding box сомы (`soma_bbox_x`, `soma_bbox_y`, `soma_bbox_z`) не сох�
 
 - `poisson_coef_distance_to_soma_norm_squared` — коэффициент при квадрате нормированного расстояния до сомы.
 
-Качество fit-а сохраняется отдельно в `neuron_structural_network_fit_quality.csv`:
+- `poisson_log_likelihood_per_spine`, `poisson_aic_per_spine`, `poisson_bic_per_spine` — log-likelihood, AIC и BIC, нормированные на число спроецированных шипиков. Эти поля включены в ML-вектор, поскольку они более сопоставимы между нейронами разного размера, чем сырые значения.
+
+Расширенная диагностика fit-а сохраняется отдельно в `neuron_structural_network_fit_quality.csv`:
 
 - `poisson_log_likelihood` — лог-правдоподобие подогнанной неоднородной пуассоновской модели:
 
@@ -429,7 +431,7 @@ AIC=-2\ell+2k,
 BIC=-2\ell+k\log n.
 \]
 
-- `poisson_log_likelihood_per_spine`, `poisson_aic_per_spine`, `poisson_bic_per_spine` — те же величины, нормированные на число спроецированных шипиков.
+- `poisson_log_likelihood_per_spine`, `poisson_aic_per_spine`, `poisson_bic_per_spine` — те же величины, нормированные на число спроецированных шипиков; дублируются здесь для полной fit-quality таблицы.
 
 - `poisson_raw_coef_<covariate>` — коэффициент \(\theta\) при исходной ковариате в модели \(\lambda(u)=\exp(\theta^\top z(u))\).
 

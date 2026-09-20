@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
-from scipy.stats import chi2, ks_2samp
+from scipy.stats import chi2, kstest
 
 
 try:
@@ -1710,26 +1710,60 @@ def test_intensity_dependence_cdf(
             "interpretation": "Insufficient data.",
         }
 
-    sample_step = _adaptive_graph_sample_step(
-        graph,
-        requested_step=sample_step,
-        max_samples=max_network_samples,
-    )
-    _, sample_sd = graph.sample_points_on_graph(step=sample_step)
     spine_sd = np.array([s.distance_to_soma for s in spines], dtype=float)
     spine_sd = spine_sd[np.isfinite(spine_sd)]
-    sample_sd = sample_sd[np.isfinite(sample_sd)]
 
-    if len(spine_sd) < 2 or len(sample_sd) < 2:
+    if len(spine_sd) < 2 or graph.total_length <= 1e-12:
         return {
             "statistic": np.nan,
             "p_value": np.nan,
             "n_spines": int(len(spine_sd)),
-            "n_network_samples": int(len(sample_sd)),
+            "n_network_samples": 0,
+            "method": "one_sample_ks_network_cdf",
             "interpretation": "Insufficient data for CDF test.",
         }
 
-    result = ks_2samp(spine_sd, sample_sd, alternative="two-sided", mode="auto")
+    soma_distances = graph.soma_distances()
+    edge_data: List[Tuple[float, float, float]] = []
+    for u, v, data in graph.G.edges(data=True):
+        length = float(data.get("length", 0.0))
+        if length <= 1e-12:
+            continue
+        du = float(soma_distances.get(u, np.inf))
+        dv = float(soma_distances.get(v, np.inf))
+        if np.isfinite(du) and np.isfinite(dv):
+            edge_data.append((du, dv, length))
+
+    if not edge_data:
+        return {
+            "statistic": np.nan,
+            "p_value": np.nan,
+            "n_spines": int(len(spine_sd)),
+            "n_network_samples": 0,
+            "method": "one_sample_ks_network_cdf",
+            "interpretation": "Insufficient data for CDF test.",
+        }
+
+    edge_starts = np.asarray([item[0] for item in edge_data], dtype=float)
+    edge_ends = np.asarray([item[1] for item in edge_data], dtype=float)
+    edge_lengths = np.asarray([item[2] for item in edge_data], dtype=float)
+    total_len = float(edge_lengths.sum())
+
+    def network_covariate_cdf(values: Union[float, np.ndarray]) -> np.ndarray:
+        values_array = np.asarray(values, dtype=float)
+        flat = values_array.reshape(-1)
+        cdf_values = np.empty_like(flat, dtype=float)
+        for index, distance in enumerate(flat):
+            left_len = np.clip(distance - edge_starts, 0.0, edge_lengths)
+            right_len = np.clip(distance - edge_ends, 0.0, edge_lengths)
+            left_end = left_len
+            right_start = edge_lengths - right_len
+            overlap = np.maximum(0.0, left_end - right_start)
+            covered = left_len + right_len - overlap
+            cdf_values[index] = float(np.clip(covered.sum() / total_len, 0.0, 1.0))
+        return cdf_values.reshape(values_array.shape)
+
+    result = kstest(spine_sd, network_covariate_cdf, alternative="two-sided", method="auto")
     p_value = float(result.pvalue)
     statistic = float(result.statistic)
     if p_value < 0.05:
@@ -1747,7 +1781,8 @@ def test_intensity_dependence_cdf(
         "statistic": statistic,
         "p_value": p_value,
         "n_spines": int(len(spine_sd)),
-        "n_network_samples": int(len(sample_sd)),
+        "n_network_samples": None,
+        "method": "one_sample_ks_network_cdf",
         "interpretation": interp,
     }
 

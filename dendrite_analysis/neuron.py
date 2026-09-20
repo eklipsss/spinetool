@@ -1891,10 +1891,21 @@ class Neuron:
             "poisson_coef_intercept": np.nan,
             "poisson_coef_distance_to_soma_norm": np.nan,
             "poisson_coef_distance_to_soma_norm_squared": np.nan,
+            "poisson_log_likelihood_per_spine": np.nan,
+            "poisson_aic_per_spine": np.nan,
+            "poisson_bic_per_spine": np.nan,
         }
 
         if poisson_result is not None:
             self._add_normalized_poisson_coefficients_to_row(row, graph, poisson_result)
+            denominator = projected_count if projected_count > 0 else np.nan
+            row.update(
+                {
+                    "poisson_log_likelihood_per_spine": poisson_result.log_likelihood / denominator,
+                    "poisson_aic_per_spine": poisson_result.aic / denominator,
+                    "poisson_bic_per_spine": poisson_result.bic / denominator,
+                }
+            )
 
         if k_result is not None:
             self._add_k_summary_to_row(row, "k", k_result)
