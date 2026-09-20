@@ -147,3 +147,4 @@ test/
 /Human_age40_basal_OFF
 /Human_age85_apical_OFF
 /Human_age85_basal_OFF
+*.npy
