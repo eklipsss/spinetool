@@ -13,8 +13,8 @@ from CGAL.CGAL_Polyhedron_3 import Polyhedron_3, Polyhedron_3_Halfedge_handle, \
 from CGAL.CGAL_Polygon_mesh_processing import Polylines, \
     remove_connected_components, keep_connected_components, area
 import json
-from scipy.ndimage.filters import median_filter
-from tifffile import imsave, imread
+from scipy.ndimage import median_filter
+from tifffile import imwrite, imread
 
 
 Correspondence = Dict[str, Point_3]
@@ -35,7 +35,7 @@ def load_tif(filename: str) -> np.ndarray:
 
 
 def save_tif(filename: str, image: np.ndarray) -> None:
-    imsave(filename, np.moveaxis(image, -1, 0))
+    imwrite(filename, np.moveaxis(image, -1, 0))
 
 
 def local_threshold_3d(image: np.ndarray, base_threshold: int = 127,

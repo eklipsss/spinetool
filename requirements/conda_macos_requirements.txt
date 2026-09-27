@@ -1,0 +1,71 @@
+# Conda environment for spinetool on macOS (Apple Silicon / arm64).
+#
+# Create the environment:
+#   cd requirements
+#   conda create -n neuron-model -c conda-forge --file conda_macos_requirements.txt
+#
+# icosphere is used by src/spine_analysis but is not published on conda-forge;
+# install it afterwards from PyPI:
+#   conda activate neuron-model
+#   python -m pip install -r pip_macos_requirements.txt
+#
+# CGAL Python bindings are not installed via conda: unzip a macOS arm64,
+# Python 3.10 build of CGAL into ./CGAL next to src/ (see CGAL/BUILD_INFO.txt
+# and README.md "Build CGAL for other platforms").
+python=3.10
+pip
+
+# --- core scientific stack ---
+numpy
+scipy
+pandas
+networkx
+pyyaml
+tqdm
+
+# --- geometry / mesh processing ---
+trimesh
+rtree
+shapely
+pyvista
+meshplot
+pythreejs
+
+# --- tabular / columnar IO (manifest.parquet, processing_state tables) ---
+pyarrow
+
+# --- image processing (confocal surface repair, dendrite/spine segmentation) ---
+scikit-image
+mahotas
+opencv
+tifffile
+
+# --- ML / stats / clustering ---
+scikit-learn
+umap-learn
+lightgbm
+numba
+esda
+libpysal
+python-louvain
+
+# --- plotting / reporting ---
+matplotlib
+seaborn
+plotly
+markdown
+
+# --- misc ---
+tabulate
+pytest
+tblib
+
+# --- Jupyter ---
+notebook
+ipykernel
+ipython
+ipywidgets
+jupyter_client
+jupyter_core
+nbconvert
+nbformat

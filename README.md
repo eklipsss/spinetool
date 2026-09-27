@@ -13,15 +13,22 @@ Dendritic spine analysis tool for dendritic spine image segmentation, dendritic 
 4. Open Anaconda
 5. Execute
 ```cmd
-cd PATH_TO_CODE
-conda create --name spine-analysis -c conda-forge --file requirements_win.txt -y python=3.8
+cd PATH_TO_CODE\requirements
+conda create --name neuron-model -c conda-forge --file conda_win_requirements.txt
+conda install --name neuron-model -c conda-forge --file conda_win_requirements_geo.txt
+conda activate neuron-model
+python -m pip install -r pip_win_requirements.txt
 ```
+(`esda`/`libpysal` are installed as a separate step on purpose - solving them
+together with the rest of the list in one `conda create` can crash conda's
+solver; see the comments in `conda_win_requirements.txt`.)
 
 For macOS use:
 ```bash
-conda create --name spine-analysis -c conda-forge --file requirements_ios.txt -y python=3.8
-conda activate spine-analysis
-python -m pip install -r requirements_ios_pip.txt
+cd PATH_TO_CODE/requirements
+conda create --name neuron-model -c conda-forge --file conda_macos_requirements.txt
+conda activate neuron-model
+python -m pip install -r pip_macos_requirements.txt
 ```
 
 ## Run
@@ -29,7 +36,7 @@ python -m pip install -r requirements_ios_pip.txt
 2. Execute
 ```cmd
 cd PATH_TO_CODE
-conda activate spine-analysis
+conda activate neuron-model
 jupyter notebook
 ```
 
@@ -55,8 +62,8 @@ in [tutorial](https://gist.github.com/BJTerry/e561b956d963a2fe4c4623fb06f49266)
 1. download zip https://github.com/pv6/cgal-swig-bindings and unpack
 2. install cgal and swing libraries via terminal (brew manager for macos, apt or dnf for linux)
 3. cd cgal-swig-bindings-main
-4. conda activate spine-analysis
-5. cmake -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++ -DCGAL_DIR=/usr/local/opt/cgal -DBUILD_PYTHON=ON -DBUILD_JAVA=OFF -DPYTHON_LIBRARIES=~/miniconda3/envs/spine-analysis/bin/python - here specify path to cgal lib and python in your virtual env 
+4. conda activate neuron-model
+5. cmake -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++ -DCGAL_DIR=/usr/local/opt/cgal -DBUILD_PYTHON=ON -DBUILD_JAVA=OFF -DPYTHON_LIBRARIES=~/miniconda3/envs/neuron-model/bin/python - here specify path to cgal lib and python in your virtual env 
 6. make -j 4
 7. cp -r build-python/CGAL (...path)/dendritic-spine-shape-analysis/CGAL
 

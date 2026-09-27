@@ -1,0 +1,11 @@
+# esda + libpysal, installed as a second step after conda_win_requirements.txt.
+#
+# Solving these together with the full package list in one `conda create` has
+# been observed to crash conda's solver on win-64/python 3.8 with
+# "Assertion failed: (!p2 && d > 0), function solver_addrule, file rules.c"
+# after ~20 minutes (each half solves fine on its own in well under a
+# minute - this is a solver limitation, not a real dependency conflict).
+# Installing them into the already-solved environment avoids the crash:
+#   conda install -n neuron-model -c conda-forge --file conda_win_requirements_geo.txt
+esda
+libpysal

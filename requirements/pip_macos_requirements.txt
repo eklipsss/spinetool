@@ -1,0 +1,5 @@
+# Packages not published on conda-forge; install with pip inside the
+# conda_macos_requirements.txt environment:
+#   conda activate neuron-model
+#   python -m pip install -r pip_macos_requirements.txt
+icosphere

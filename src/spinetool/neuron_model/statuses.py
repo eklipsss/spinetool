@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+
+STATUS_PENDING = "pending"
+STATUS_PROCESSING = "processing"
+STATUS_SUCCESS = "success"
+STATUS_FAILED = "failed"
+STATUS_SKIPPED = "skipped"
+STATUS_NEEDS_REVIEW = "needs_review"
+
+DETECT_VALID = "valid"
+DETECT_INVALID = "invalid"
+
+MERGE_STATUS_SUCCESS = "success"
+MERGE_STATUS_NOT_APPLICABLE = "not_applicable"
+MERGE_STATUS_MISSING_MAPPING = "missing_merge_mapping"
+
+ALL_PROCESSING_STATUSES = {
+    STATUS_PENDING,
+    STATUS_PROCESSING,
+    STATUS_SUCCESS,
+    STATUS_FAILED,
+    STATUS_SKIPPED,
+    STATUS_NEEDS_REVIEW,
+}
+
