@@ -17,7 +17,6 @@ from .metadata import (
     load_metadata_tables,
     merge_metadata_status,
 )
-from .morphology import build_spine_morphology_table, write_spine_morphology_table
 from .schemas import SPINES_INFO_COLUMNS
 from .spine_geometry import load_trimesh
 from .spine_preprocessing import (

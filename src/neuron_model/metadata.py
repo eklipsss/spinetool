@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -32,8 +33,23 @@ PREFIX_RE = re.compile(r"^(?P<neuron>.+)_limb_(?P<limb>\d+)_branch_(?P<branch>\d
 
 
 def load_metadata_tables(metadata_root: Path) -> Dict[str, Any]:
-    minnie_root = Path(metadata_root) / "minnie65"
-    h01_root = Path(metadata_root) / "h01"
+    metadata_root = Path(metadata_root)
+    if not metadata_root.exists():
+        # A relative default (SpinePreprocessingConfig.metadata_root =
+        # Path("datasets")) resolves against the process's CWD, which in a
+        # notebook is often the notebook's own directory, not the repo root -
+        # this then silently resolves to a nonexistent path and every
+        # species/cell_type/compartment lookup below quietly returns None
+        # (visible only as merge_metadata_status="partial_missing_...").
+        # Pass metadata_root explicitly (e.g. REPO_ROOT / "datasets") to avoid this.
+        warnings.warn(
+            f"metadata_root does not exist: {metadata_root} - species/cell_type/"
+            "compartment will resolve to null for every spine. Pass an explicit, "
+            "absolute metadata_root instead of relying on the CWD-relative default.",
+            stacklevel=2,
+        )
+    minnie_root = metadata_root / "minnie65"
+    h01_root = metadata_root / "h01"
     metadata: Dict[str, Any] = {
         "merge_mapping": {},
         "cell_types": {},

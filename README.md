@@ -14,14 +14,35 @@ Dendritic spine analysis tool for dendritic spine image segmentation, dendritic 
 5. Execute
 ```cmd
 cd PATH_TO_CODE\requirements
-conda create --name neuron-model -c conda-forge --file conda_win_requirements.txt
+conda create --name neuron-model -c conda-forge python=3.10 pip -y
+conda clean --all -y
+conda activate neuron-model
+conda install -c conda-forge libglib glib m2w64-toolchain -y
+conda install --name neuron-model -c conda-forge --file conda_win_requirements.txt
 conda install --name neuron-model -c conda-forge --file conda_win_requirements_geo.txt
 conda activate neuron-model
 python -m pip install -r pip_win_requirements.txt
 ```
-(`esda`/`libpysal` are installed as a separate step on purpose - solving them
-together with the rest of the list in one `conda create` can crash conda's
-solver; see the comments in `conda_win_requirements.txt`.)
+Notes on this order:
+- `esda`/`libpysal` are installed as a separate step on purpose - solving them
+  together with the rest of the list in one `conda create` can crash conda's
+  solver; see the comments in `conda_win_requirements.txt`.
+- Create the environment with just `python=3.10 pip` first, *then* install
+  `conda_win_requirements.txt` into it with a separate `conda install` -
+  installing the full list directly via `conda create --file
+  conda_win_requirements.txt` can fail after solving and downloading
+  everything (i.e. after a very long wait) with a `LinkError` on
+  `gdk-pixbuf`'s post-link script (`post-link script did not complete`,
+  return code `3221225781` / `STATUS_DLL_NOT_FOUND`) - a known,
+  machine-dependent conda-forge issue on Windows, not specific to this
+  project's dependency list.
+- `conda clean --all -y` clears the package cache so a stale/partially
+  downloaded package from a previous failed attempt isn't reused.
+- Installing `libglib`/`glib`/`m2w64-toolchain` into the (still mostly empty)
+  environment *before* the big `conda_win_requirements.txt` install avoids
+  the `gdk-pixbuf` post-link failure above - it needs a Windows/MinGW runtime
+  that isn't otherwise pulled in early enough when everything installs in one
+  shot.
 
 For macOS use:
 ```bash

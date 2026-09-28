@@ -23,6 +23,7 @@ import functools
 import hashlib
 import importlib.util
 import json
+import math
 import sqlite3
 import sys
 import time
@@ -53,6 +54,7 @@ from .spine_geometry import (
     orient_spines_w_holes,
     require_trimesh,
     sample_polyline_by_arclength,
+    self_intersection_check,
 )
 from .spine_sampling import (
     SAMPLE_TYPE_CODES,
@@ -80,6 +82,8 @@ STAGE_ORIENT = "orient"
 STAGE_QC = "mesh_qc"
 STAGE_POINTCLOUD = "pointcloud"
 STAGE_SDF = "sdf"
+STAGE_MORPHOMETRICS = "morphometrics"
+STAGE_METADATA = "metadata"
 STAGE_MANIFEST = "manifest"
 
 QUALITY_VALID = "valid"
@@ -91,8 +95,8 @@ DEFAULT_CONFIG_PATH = Path("data/processed/config/spine_preprocessing.yaml")
 @functools.lru_cache(maxsize=1)
 def _mesh_repair_module():
     """Load mesh_repair.py without importing dendrite_analysis.__init__."""
-    module_name = "_spinetool_dendrite_mesh_repair"
-    module_path = Path(__file__).resolve().parents[2] / "dendrite_analysis" / "mesh_repair.py"
+    module_name = "_neuron_model_dendrite_mesh_repair"
+    module_path = Path(__file__).resolve().parents[1] / "dendrite_analysis" / "mesh_repair.py"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load mesh repair module from {module_path}")
@@ -158,7 +162,13 @@ class SpinePreprocessingConfig:
     degenerate_area_tol: float = 1e-12
     max_degenerate_faces: int = 0
     check_self_intersections: bool = True
-    allow_needs_review: bool = False
+    # True by default: a needs_review mesh (e.g. self_intersections - a
+    # small, localized geometric defect, often already present in the raw
+    # segmented mesh - see docs/neuron-model/s-module-preprocessing.md 3.8.4)
+    # is not excluded from pointcloud/SDF/morphometrics/train_eligible by
+    # default; it is still flagged for manual review. Set False for a
+    # stricter run that keeps only geometrically pristine (`valid`) meshes.
+    allow_needs_review: bool = True
 
     # stage 6: point clouds
     pointcloud_sizes: Tuple[int, ...] = (2048, 4096, 8192)
@@ -256,6 +266,8 @@ STAGE_PARAMS: Dict[str, Tuple[str, ...]] = {
         "sdf_interior_probe",
         "allow_needs_review",
     ),
+    STAGE_MORPHOMETRICS: ("allow_needs_review",),
+    STAGE_METADATA: ("metadata_root",),
     STAGE_MANIFEST: ("allow_needs_review", "metadata_root"),
 }
 
@@ -1217,15 +1229,16 @@ def _face_edge_lengths(mesh: Any) -> np.ndarray:
 
 
 def _qc_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
-    def load() -> Tuple[Any, Any, Dict[str, Any], Dict[str, Any]]:
+    def load() -> Tuple[Any, Any, Any, Dict[str, Any], Dict[str, Any]]:
         return (
             load_trimesh(local_sealed_mesh_path(record, cfg), process=False),
             load_trimesh(sealed_mesh_path(record, cfg), process=False),
+            load_trimesh(record.source_path, process=False),
             _read_json(transform_json_path(record, cfg)),
             _read_json(attachment_json_path(record, cfg)),
         )
 
-    local, sealed, transform, attachment = timer.run("load meshes", load)
+    local, sealed, original, transform, attachment = timer.run("load meshes", load)
     report = timer.run(
         "basic checks",
         lambda: mesh_geometry_report(
@@ -1233,6 +1246,30 @@ def _qc_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTi
             degenerate_area_tol=cfg.degenerate_area_tol,
             check_self_intersections=cfg.check_self_intersections,
         ),
+    )
+
+    def original_self_intersections() -> Dict[str, Any]:
+        # On the raw, unsealed mesh (open boundary - not watertight, so most
+        # of mesh_geometry_report()'s other checks don't apply). Some
+        # self-intersections predate any of our processing (e.g. raw
+        # segmentation artifacts); this lets that be told apart from ones
+        # introduced by hole-filling. Purely diagnostic - does not affect
+        # geometry_valid/quality_status, which are about local_sealed_mesh.
+        has_si, n_si, method = self_intersection_check(original)
+        return {
+            "original_has_self_intersections": has_si,
+            "original_n_self_intersecting_pairs": n_si,
+            "original_self_intersection_method": method,
+        }
+
+    original_si = (
+        timer.run("original mesh self-intersections", original_self_intersections)
+        if cfg.check_self_intersections
+        else {
+            "original_has_self_intersections": None,
+            "original_n_self_intersecting_pairs": None,
+            "original_self_intersection_method": "skipped",
+        }
     )
 
     def invariance() -> Dict[str, Any]:
@@ -1319,6 +1356,7 @@ def _qc_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTi
         **record.identity,
         "local_sealed_mesh_path": str(local_sealed_mesh_path(record, cfg)),
         **report,
+        **original_si,
         **inv,
         **hard_checks,
         "transform_tolerance": cfg.transform_tolerance,
@@ -1441,6 +1479,169 @@ def _sdf_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepT
 
 
 # ---------------------------------------------------------------------------
+# Stage 8: morphometrics (src.spine_analysis.shape_metric, on local_sealed_mesh)
+# ---------------------------------------------------------------------------
+
+
+def _metric_value(metric: Any) -> Any:
+    value = metric.value
+    if isinstance(value, np.ndarray):
+        return value.astype(float).tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return value
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except Exception:
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _morphometrics_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
+    from src.spine_analysis.mesh.utils import v_f_to_mesh_isolated
+    from src.spine_analysis.shape_metric.float_metric import (
+        ConvexHullRatioSpineMetric,
+        ConvexHullVolumeSpineMetric,
+        VolumeSpineMetric,
+    )
+    from src.spine_analysis.shape_metric.histogram_metric import OldChordDistributionSpineMetric
+    from src.spine_analysis.shape_metric.junction_metric import (
+        AverageDistanceSpineMetric,
+        CVDSpineMetric,
+        LengthAreaRatioSpineMetric,
+        LengthSpineMetric,
+        LengthVolumeRatioSpineMetric,
+        OpenAngleSpineMetric,
+    )
+    from src.spine_analysis.shape_metric.utils import register_attachment_center
+
+    def load() -> Tuple[Any, Dict[str, Any]]:
+        mesh = load_trimesh(local_sealed_mesh_path(record, cfg), process=False)
+        attachment = _read_json(attachment_json_path(record, cfg))
+        return mesh, attachment
+
+    mesh, attachment = timer.run("load mesh", load)
+
+    def compute_scalar_metrics() -> Dict[str, Any]:
+        poly = v_f_to_mesh_isolated(np.asarray(mesh.vertices, dtype=float), np.asarray(mesh.faces, dtype=int))
+        # orient_spines_w_holes() centers the local frame on the attachment
+        # loop centroid, so that point is the origin here - the junction/
+        # attachment-center helpers in src.spine_analysis need it registered
+        # per mesh object (keyed by id()), not the original global point.
+        #
+        # This point is all these particular metrics actually use of the
+        # attachment region: OpenAngle/CVD/AverageDistance/Length(Ratio)
+        # only measure distances from `attachment_center` to every vertex
+        # (src/spine_analysis/shape_metric/junction_metric.py -
+        # JunctionSpineMetric._calculate uses _junction_center, i.e. exactly
+        # this registered point, for _surface_vectors; _calculate_junction_center
+        # returns the registered point directly rather than recomputing it).
+        # None of them touch `_junction_triangles` (the library's own,
+        # cruder "nearest face + 1-ring" attachment-region guess) - only
+        # AreaSpineMetric does, which is why "Area" is computed separately
+        # below from our own stage-1 attachment_cap_area instead of calling
+        # AreaSpineMetric: on real spines the library's own 1-ring re-guess
+        # of the attachment patch differed from our precise
+        # attachment_cap_face_indices by 40-130% in area.
+        register_attachment_center(poly, np.zeros(3, dtype=float))
+        return {
+            "OpenAngle": _metric_value(OpenAngleSpineMetric(poly)),
+            "CVD": _metric_value(CVDSpineMetric(poly)),
+            "AverageDistance": _metric_value(AverageDistanceSpineMetric(poly)),
+            "LengthVolumeRatio": _metric_value(LengthVolumeRatioSpineMetric(poly)),
+            "LengthAreaRatio": _metric_value(LengthAreaRatioSpineMetric(poly)),
+            "Length": _metric_value(LengthSpineMetric(poly)),
+            "Volume": _metric_value(VolumeSpineMetric(poly)),
+            "ConvexHullVolume": _metric_value(ConvexHullVolumeSpineMetric(poly)),
+            "ConvexHullRatio": _metric_value(ConvexHullRatioSpineMetric(poly)),
+        }
+
+    def compute_chord_distribution() -> Any:
+        # Separate step/timing: OldChordDistributionSpineMetric sptrays 3000
+        # random rays per mesh (its own fresh, unseeded random.Random()) and
+        # is by far the slowest of these metrics.
+        poly = v_f_to_mesh_isolated(np.asarray(mesh.vertices, dtype=float), np.asarray(mesh.faces, dtype=int))
+        register_attachment_center(poly, np.zeros(3, dtype=float))
+        return _metric_value(OldChordDistributionSpineMetric(poly))
+
+    values = timer.run("compute scalar metrics", compute_scalar_metrics)
+    # NOTE: OldChordDistributionSpineMetric samples its chords with an
+    # unseeded `random.Random()` inside src/spine_analysis (not modified per
+    # project convention) - this value is therefore not reproducible between
+    # runs, even for the same mesh. Stored as a best-effort snapshot; see
+    # docs/neuron-model/s-module-preprocessing.md 3.8.
+    values["OldChordDistribution"] = timer.run("compute OldChordDistribution", compute_chord_distribution)
+    values["JunctionArea"] = _safe_float(attachment.get("attachment_loop_area"))
+    # "Area" = total surface minus the attachment region - computed from our
+    # own stage-1 attachment_cap_face_indices/attachment_cap_area (exact),
+    # not AreaSpineMetric's own re-derived attachment-region guess (see the
+    # comment above compute_scalar_metrics). Area is rotation/translation
+    # invariant, so the cap area stored in attachment_region_<mesh>.json
+    # (computed on the global sealed mesh in stage 1) applies unchanged here.
+    values["Area"] = _safe_float(mesh.area - attachment.get("attachment_cap_area", 0.0))
+
+    payload = {
+        **record.identity,
+        "local_sealed_mesh_path": str(local_sealed_mesh_path(record, cfg)),
+        **values,
+        "algorithm_version": ALGORITHM_VERSION,
+    }
+    timer.run("save", lambda: _write_json_atomic(morphometrics_json_path(record, cfg), payload))
+
+    row = dict(values)
+    row["status"] = STATUS_SUCCESS
+    row["morphometrics_path"] = str(morphometrics_json_path(record, cfg))
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Stage 9: metadata (species/health/cell_type/cell_type_binary/compartment)
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=8)
+def _load_metadata_tables_cached(metadata_root: str) -> Dict[str, Any]:
+    from .metadata import load_metadata_tables
+
+    return load_metadata_tables(Path(metadata_root))
+
+
+def _metadata_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
+    from .metadata import dataset_metadata, merge_metadata_status, merged_branch_id
+
+    metadata_tables = timer.run(
+        "load metadata tables", lambda: _load_metadata_tables_cached(str(cfg.metadata_root))
+    )
+
+    def compute() -> Dict[str, Any]:
+        merged_id = merged_branch_id(record, metadata_tables)
+        return {
+            **record.identity,
+            "original_branch_id": record.branch_id,
+            "merged_branch_id": merged_id,
+            **dataset_metadata(record, metadata_tables),
+            "merge_metadata_status": merge_metadata_status(record, metadata_tables),
+            "source_path": str(record.source_path),
+            "physical_unit": cfg.physical_unit,
+            "preprocessing_version": cfg.preprocessing_version,
+            "algorithm_version": ALGORITHM_VERSION,
+        }
+
+    payload = timer.run("compute", compute)
+    timer.run("save", lambda: _write_json_atomic(metadata_json_path(record, cfg), payload))
+
+    row = dict(payload)
+    row["status"] = STATUS_SUCCESS
+    row["metadata_path"] = str(metadata_json_path(record, cfg))
+    return row
+
+
+# ---------------------------------------------------------------------------
 # Stage registry
 # ---------------------------------------------------------------------------
 
@@ -1459,7 +1660,7 @@ STAGES: Dict[str, StageSpec] = {
         sealed_mesh_path, local_sealed_mesh_path, _orient_eligibility,
     ),
     STAGE_QC: StageSpec(
-        STAGE_QC, "qc", "mesh_quality.parquet", _qc_worker, 4,
+        STAGE_QC, "qc", "mesh_quality.parquet", _qc_worker, 5,
         local_sealed_mesh_path, quality_json_path, _qc_eligibility,
     ),
     STAGE_POINTCLOUD: StageSpec(
@@ -1469,6 +1670,14 @@ STAGES: Dict[str, StageSpec] = {
     STAGE_SDF: StageSpec(
         STAGE_SDF, "sdf", "sdf_samples.parquet", _sdf_worker, 4,
         local_sealed_mesh_path, sdf_samples_path, _training_eligibility,
+    ),
+    STAGE_MORPHOMETRICS: StageSpec(
+        STAGE_MORPHOMETRICS, "morphometrics", "morphometrics.parquet", _morphometrics_worker, 3,
+        local_sealed_mesh_path, morphometrics_json_path, _training_eligibility,
+    ),
+    STAGE_METADATA: StageSpec(
+        STAGE_METADATA, "metadata", "metadata.parquet", _metadata_worker, 2,
+        lambda r, c: r.source_path, metadata_json_path,
     ),
 }
 
@@ -1499,22 +1708,30 @@ def run_sdf_stage(config: SpinePreprocessingConfig, records: Optional[Sequence[S
     return run_stage(STAGE_SDF, config, records)
 
 
+def run_morphometrics_stage(
+    config: SpinePreprocessingConfig, records: Optional[Sequence[SpineRecord]] = None
+) -> pd.DataFrame:
+    return run_stage(STAGE_MORPHOMETRICS, config, records)
+
+
+def run_metadata_stage(config: SpinePreprocessingConfig, records: Optional[Sequence[SpineRecord]] = None) -> pd.DataFrame:
+    return run_stage(STAGE_METADATA, config, records)
+
+
 # ---------------------------------------------------------------------------
 # Stage 4 (logical branch merge) + metadata.json + manifest.parquet
 # ---------------------------------------------------------------------------
 
 
 def run_manifest_stage(config: SpinePreprocessingConfig, records: Optional[Sequence[SpineRecord]] = None) -> pd.DataFrame:
-    """Attach merged_branch_id and metadata to every spine and write manifest.parquet.
+    """Aggregate every other stage's results (incl. metadata, morphometrics) into manifest.parquet.
 
-    The single-child merge itself was computed beforehand
-    (``datasets/*/merged_branches``); here it is applied logically only.
+    Stages 8 (morphometrics) and 9 (metadata) run independently, same as
+    1-7; this only reads their output tables, it does not recompute
+    anything itself (unlike earlier versions of this function).
     """
-    from .metadata import dataset_metadata, load_metadata_tables, merge_metadata_status, merged_branch_id
-
     cfg = config.normalized()
     records = list(discover_spines(cfg) if records is None else records)
-    metadata = load_metadata_tables(cfg.metadata_root)
     full_hash = config_hash(cfg)
     all_rows: List[Dict[str, Any]] = []
 
@@ -1532,6 +1749,8 @@ def run_manifest_stage(config: SpinePreprocessingConfig, records: Optional[Seque
                 ("quality", "mesh_quality.parquet"),
                 ("pointcloud", "pointclouds.parquet"),
                 ("sdf", "sdf_samples.parquet"),
+                ("morphometrics", "morphometrics.parquet"),
+                ("metadata", "metadata.parquet"),
             )
         }
         manifest_path = root / "manifest.parquet"
@@ -1540,23 +1759,6 @@ def run_manifest_stage(config: SpinePreprocessingConfig, records: Optional[Seque
         for record in group:
             def get(table: str, column: str) -> Any:
                 return tables[table].get(record.key, {}).get(column)
-
-            merged_id = merged_branch_id(record, metadata)
-            meta = {
-                **record.identity,
-                "original_branch_id": record.branch_id,
-                "merged_branch_id": merged_id,
-                **dataset_metadata(record, metadata),
-                "merge_metadata_status": merge_metadata_status(record, metadata),
-                "source_path": str(record.source_path),
-                "branch_skeleton_path": str(record.branch_skeleton_path),
-                "spine_dir": str(spine_output_dir(record, cfg)),
-                "physical_unit": cfg.physical_unit,
-                "preprocessing_version": cfg.preprocessing_version,
-            }
-            spine_dir = spine_output_dir(record, cfg)
-            if spine_dir.exists():
-                _write_json_atomic(metadata_json_path(record, cfg), meta)
 
             quality_status = get("quality", "status")
             allowed_quality = {QUALITY_VALID, STATUS_NEEDS_REVIEW} if cfg.allow_needs_review else {QUALITY_VALID}
@@ -1567,7 +1769,7 @@ def run_manifest_stage(config: SpinePreprocessingConfig, records: Optional[Seque
                 "limb_id": record.limb_id,
                 "branch_id": record.branch_id,
                 "original_branch_id": record.branch_id,
-                "merged_branch_id": merged_id,
+                "merged_branch_id": get("metadata", "merged_branch_id"),
                 "spine_id": record.spine_id,
                 "status": get("false_spine", "status"),
                 "seal_status": get("seal", "status"),
@@ -1576,17 +1778,20 @@ def run_manifest_stage(config: SpinePreprocessingConfig, records: Optional[Seque
                 "quality_status": quality_status,
                 "geometry_valid": get("quality", "geometry_valid"),
                 "sdf_valid": get("sdf", "sdf_valid"),
+                "morphometrics_status": get("morphometrics", "status"),
+                "metadata_status": get("metadata", "status"),
+                "merge_metadata_status": get("metadata", "merge_metadata_status"),
                 "train_eligible": bool(
                     get("false_spine", "status") == DETECT_VALID
                     and quality_status in allowed_quality
                     and get("pointcloud", "status") == STATUS_SUCCESS
                     and get("sdf", "sdf_valid") is True
                 ),
-                "species": meta["species"],
-                "health": meta["health"],
-                "cell_type": meta["cell_type"],
-                "cell_type_binary": meta["cell_type_binary"],
-                "compartment": meta["compartment"],
+                "species": get("metadata", "species"),
+                "health": get("metadata", "health"),
+                "cell_type": get("metadata", "cell_type"),
+                "cell_type_binary": get("metadata", "cell_type_binary"),
+                "compartment": get("metadata", "compartment"),
                 "source_path": str(record.source_path),
                 "local_mesh_path": existing_path(local_mesh_path(record, cfg)),
                 "sealed_mesh_path": existing_path(sealed_mesh_path(record, cfg)),
@@ -1620,7 +1825,16 @@ def run_manifest_stage(config: SpinePreprocessingConfig, records: Optional[Seque
     return pd.DataFrame(all_rows)
 
 
-PIPELINE_ORDER = (STAGE_SEAL, STAGE_FALSE_SPINE, STAGE_ORIENT, STAGE_QC, STAGE_POINTCLOUD, STAGE_SDF)
+PIPELINE_ORDER = (
+    STAGE_SEAL,
+    STAGE_FALSE_SPINE,
+    STAGE_ORIENT,
+    STAGE_QC,
+    STAGE_POINTCLOUD,
+    STAGE_SDF,
+    STAGE_MORPHOMETRICS,
+    STAGE_METADATA,
+)
 
 
 def run_full_spine_preprocessing_pipeline(config: SpinePreprocessingConfig) -> Dict[str, pd.DataFrame]:

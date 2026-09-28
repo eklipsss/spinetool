@@ -1,14 +1,29 @@
 # Conda environment for spinetool on Windows.
 #
-# Create the environment in two steps (esda/libpysal are split into a second
-# `conda install` on purpose: solving all of these packages together in one
-# shot has been observed to crash conda's libsolv/libmamba backend with
-# "Assertion failed: (!p2 && d > 0), function solver_addrule" after ~20
-# minutes on win-64/python 3.8 - each half solves fine on its own; kept split
-# here too even after moving to python 3.10 as a precaution):
+# See README.md "Install" for the full, verified command order - in short:
 #   cd requirements
-#   conda create -n neuron-model -c conda-forge --file conda_win_requirements.txt
+#   conda create -n neuron-model -c conda-forge python=3.10 pip -y
+#   conda clean --all -y
+#   conda activate neuron-model
+#   conda install -c conda-forge libglib glib m2w64-toolchain -y
+#   conda install -n neuron-model -c conda-forge --file conda_win_requirements.txt
 #   conda install -n neuron-model -c conda-forge --file conda_win_requirements_geo.txt
+#   python -m pip install -r pip_win_requirements.txt
+#
+# Two things this order works around (both explained in more detail in
+# README.md):
+# - esda/libpysal are split into their own `conda install` on purpose:
+#   solving all of these packages together in one shot has been observed to
+#   crash conda's libsolv/libmamba backend with "Assertion failed: (!p2 &&
+#   d > 0), function solver_addrule" after ~20 minutes on win-64/python 3.8 -
+#   each half solves fine on its own; kept split here too even after moving
+#   to python 3.10 as a precaution.
+# - Creating the env with just python+pip first, then installing this file's
+#   packages as a separate `conda install` (rather than passing this file
+#   directly to `conda create`), with libglib/glib/m2w64-toolchain installed
+#   just before it, avoids a `gdk-pixbuf` post-link `LinkError`
+#   (`STATUS_DLL_NOT_FOUND`, return code 3221225781) seen on some Windows
+#   machines when this whole list installs in one shot.
 #
 # icosphere is used by src/spine_analysis but is not published on conda-forge;
 # install it afterwards from PyPI:

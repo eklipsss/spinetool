@@ -653,6 +653,37 @@ def _shared_vertex_ids(meshes_vertices: Sequence[np.ndarray], decimals: int) -> 
     return result
 
 
+def find_new_faces(
+    original_mesh: Any,
+    sealed_mesh: Any,
+    *,
+    decimals: int = 6,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Faces present in ``sealed_mesh`` but not in ``original_mesh``.
+
+    Repair may drop, split or append vertices, so faces are matched by vertex
+    coordinates rather than index. This covers *every* face added while
+    sealing, including small side holes that are not part of the attachment
+    cap (s-module-preprocessing.md 3.1.2) - useful on its own for visual QA
+    of the sealing step, and as the first step of
+    :func:`find_attachment_cap_faces`.
+
+    Returns ``(new_face_indices, original_vertex_ids, sealed_vertex_ids)``:
+    vertices at the same (rounded) coordinates in both meshes share an id,
+    so callers can map vertex indices between the two meshes (e.g. an
+    attachment loop's original-mesh indices into the sealed mesh) without
+    re-matching coordinates themselves.
+    """
+    original_ids, sealed_ids = _shared_vertex_ids(
+        [np.asarray(original_mesh.vertices), np.asarray(sealed_mesh.vertices)], decimals
+    )
+    original_faces = np.sort(original_ids[np.asarray(original_mesh.faces, dtype=int)], axis=1)
+    sealed_faces = np.sort(sealed_ids[np.asarray(sealed_mesh.faces, dtype=int)], axis=1)
+    original_face_keys = set(map(tuple, original_faces.tolist()))
+    new_faces = [i for i, face in enumerate(map(tuple, sealed_faces.tolist())) if face not in original_face_keys]
+    return np.asarray(new_faces, dtype=int), original_ids, sealed_ids
+
+
 def find_attachment_cap_faces(
     original_mesh: Any,
     sealed_mesh: Any,
@@ -663,28 +694,22 @@ def find_attachment_cap_faces(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Return indices of the sealed-mesh faces that close ``loop``.
 
-    Repair may drop, split or append vertices, so faces are matched by vertex
-    coordinates. New faces (absent in the original mesh) are grouped into patches
-    connected through shared edges; a patch belongs to the attachment cap if most of
+    New faces (see :func:`find_new_faces`) are grouped into patches connected
+    through shared edges; a patch belongs to the attachment cap if most of
     its rim vertices lie on the attachment loop.
 
     Returns ``(cap_face_indices, loop_vertex_indices_in_sealed_mesh)``.
     """
-    original_ids, sealed_ids = _shared_vertex_ids(
-        [np.asarray(original_mesh.vertices), np.asarray(sealed_mesh.vertices)], decimals
-    )
-    original_faces = np.sort(original_ids[np.asarray(original_mesh.faces, dtype=int)], axis=1)
+    new_faces, original_ids, sealed_ids = find_new_faces(original_mesh, sealed_mesh, decimals=decimals)
     sealed_faces = np.sort(sealed_ids[np.asarray(sealed_mesh.faces, dtype=int)], axis=1)
-    original_face_keys = set(map(tuple, original_faces.tolist()))
-    new_faces = [i for i, face in enumerate(map(tuple, sealed_faces.tolist())) if face not in original_face_keys]
 
     loop_ids = set(original_ids[loop.vertex_indices].tolist())
     loop_sealed_indices = np.flatnonzero(np.isin(sealed_ids, list(loop_ids))).astype(int)
-    if not new_faces:
+    if len(new_faces) == 0:
         return np.empty(0, dtype=int), loop_sealed_indices
 
     edge_to_faces: Dict[Tuple[int, int], List[int]] = {}
-    for face_index in new_faces:
+    for face_index in new_faces.tolist():
         a, b, c = sealed_faces[face_index]
         for edge in ((a, b), (b, c), (a, c)):
             edge_to_faces.setdefault(edge, []).append(face_index)
@@ -935,13 +960,26 @@ def count_self_intersecting_pairs(mesh: Any) -> int:
 
 
 def self_intersection_check(mesh: Any) -> Tuple[Optional[bool], Optional[int], str]:
-    """Return ``(has_self_intersections, n_intersecting_pairs, method)``."""
+    """Return ``(has_self_intersections, n_intersecting_pairs, method)``.
+
+    Prefers CGAL's ``self_intersections`` (exact geometric predicate, returns
+    every intersecting facet pair) over ``does_self_intersect`` (bool only),
+    so QC gets a real pair count instead of ``None`` when CGAL is available.
+    CGAL catches more cases (e.g. near-coplanar/edge-touching) than the
+    ``edge_triangle`` fallback below, so the two methods' counts are not
+    directly comparable.
+    """
     try:
-        from CGAL.CGAL_Polygon_mesh_processing import does_self_intersect
+        from CGAL.CGAL_Polygon_mesh_processing import self_intersections
         from src.spine_analysis.mesh.utils import v_f_to_mesh_isolated
 
         polyhedron = v_f_to_mesh_isolated(np.asarray(mesh.vertices, dtype=float), np.asarray(mesh.faces, dtype=int))
-        return bool(does_self_intersect(polyhedron)), None, "cgal"
+        for index, facet in enumerate(polyhedron.facets()):
+            facet.set_id(index)
+        pairs: List[Any] = []
+        self_intersections(polyhedron, pairs)
+        unique_pairs = {tuple(sorted((item[0].id(), item[1].id()))) for item in pairs}
+        return bool(unique_pairs), len(unique_pairs), "cgal"
     except Exception:
         pass
     try:
