@@ -1,0 +1,5 @@
+# Model B final: extended scratch training once the pilot looks sensible.
+defaults: [scratch_pilot.yaml]
+name: mogen-scratch-final
+train:
+  max_steps: 300000

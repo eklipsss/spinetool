@@ -1,0 +1,35 @@
+# Calibration of both reconstruction backends on REAL validation spines,
+# BEFORE training any generator (s-module-implementation-plan.md, stage 3).
+# Run on the Windows workstation:
+#   python scripts/neuron_model/calibrate_reconstruction.py --config configs/neuron-model/reconstruction/calibration.yaml workers=16
+defaults: [../base/experiment.yaml]
+runs_root: runs/analysis/neuron-model
+name: reconstruction-calibration
+calibration_split: val
+n_spines: 200             # random subset of the validation split (seeded)
+workers: 1                # raise on the workstation
+check_self_intersections: true
+compare:
+  n_points: 8192
+  f_score_thresholds: [10.0, 25.0, 50.0]   # nm
+  neck_quantile: 0.3
+postprocess:
+  min_component_area_fraction: 0.01
+selection:
+  min_validity: 0.99      # candidate must give valid meshes on >=99% of spines
+  error_column: raw_chamfer_l1_median
+poisson:
+  enabled: true
+  n_points: 8192          # the MoGen point count
+  k_normals: [20, 30, 50]
+  true_normals_control: true
+  fixed: {iters: 8, full_depth: 5, threads: 1}
+  grid:
+    depth: [6, 7, 8, 9]
+    point_weight: [0.0, 2.0, 4.0, 10.0]
+    samples_per_node: [1.0, 1.5, 3.0]
+    scale: [1.1, 1.25]
+marching_cubes:
+  enabled: true
+  resolutions: [128, 256]
+  chunk_size: 262144

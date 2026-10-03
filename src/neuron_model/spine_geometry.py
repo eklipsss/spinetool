@@ -593,6 +593,37 @@ class AttachmentDetection:
         ]
 
 
+def _score_candidates(
+    perimeters: np.ndarray,
+    areas: np.ndarray,
+    distances: np.ndarray,
+    weights: Tuple[float, float, float],
+) -> np.ndarray:
+    """Shared scoring formula for attachment-region candidates.
+
+    Used both for the (pre-seal) boundary loops in :func:`detect_attachment_loop`
+    and for the (post-seal) face patches in :func:`select_attachment_patch` - same
+    inputs (a perimeter/area/distance-to-skeleton triple per candidate), same
+    weights, so the two are directly comparable/interchangeable.
+    """
+
+    def relative_to_max(values: np.ndarray) -> np.ndarray:
+        top = float(np.max(values))
+        return values / top if top > 0 else np.ones_like(values)
+
+    finite = np.isfinite(distances)
+    proximity = np.zeros_like(distances)
+    if finite.any():
+        nearest = float(np.min(distances[finite]))
+        finite_distances = distances[finite]
+        proximity[finite] = np.where(
+            finite_distances > 0, nearest / np.where(finite_distances > 0, finite_distances, 1.0), 1.0
+        )
+
+    w_perimeter, w_area, w_distance = weights
+    return w_perimeter * relative_to_max(perimeters) + w_area * relative_to_max(areas) + w_distance * proximity
+
+
 def detect_attachment_loop(
     mesh: Any,
     branch_segments: Sequence[Segment],
@@ -615,21 +646,7 @@ def detect_attachment_loop(
     areas = np.asarray([loop.area for loop in loops], dtype=float)
     distances = np.asarray([loop.distance_to_skeleton for loop in loops], dtype=float)
 
-    def relative_to_max(values: np.ndarray) -> np.ndarray:
-        top = float(np.max(values))
-        return values / top if top > 0 else np.ones_like(values)
-
-    finite = np.isfinite(distances)
-    proximity = np.zeros_like(distances)
-    if finite.any():
-        nearest = float(np.min(distances[finite]))
-        finite_distances = distances[finite]
-        proximity[finite] = np.where(
-            finite_distances > 0, nearest / np.where(finite_distances > 0, finite_distances, 1.0), 1.0
-        )
-
-    w_perimeter, w_area, w_distance = weights
-    scores = w_perimeter * relative_to_max(perimeters) + w_area * relative_to_max(areas) + w_distance * proximity
+    scores = _score_candidates(perimeters, areas, distances, weights)
     order = np.argsort(-scores)
     best = loops[int(order[0])]
 
@@ -684,6 +701,35 @@ def find_new_faces(
     return np.asarray(new_faces, dtype=int), original_ids, sealed_ids
 
 
+def group_faces_by_component(sealed_mesh: Any, face_indices: np.ndarray) -> List[np.ndarray]:
+    """Group ``face_indices`` (into ``sealed_mesh``) into patches connected through shared edges.
+
+    Each connected component is one filled hole (or, in general, one blob of
+    mutually adjacent faces) - used both to pick out the attachment cap
+    (:func:`find_attachment_cap_faces`) and, on its own, for visual QA of
+    every hole sealing touched (``visualization.py``, one color per patch).
+
+    Returns patches sorted by size, largest first, each as a sorted array of
+    face indices.
+    """
+    sealed_faces = np.asarray(sealed_mesh.faces, dtype=int)
+    edge_to_faces: Dict[Tuple[int, int], List[int]] = {}
+    for face_index in face_indices.tolist():
+        a, b, c = sorted(sealed_faces[face_index])
+        for edge in ((a, b), (b, c), (a, c)):
+            edge_to_faces.setdefault(edge, []).append(face_index)
+
+    graph = nx.Graph()
+    graph.add_nodes_from(face_indices.tolist())
+    for faces in edge_to_faces.values():
+        for other in faces[1:]:
+            graph.add_edge(faces[0], other)
+
+    components = [np.asarray(sorted(component), dtype=int) for component in nx.connected_components(graph)]
+    components.sort(key=len, reverse=True)
+    return components
+
+
 def find_attachment_cap_faces(
     original_mesh: Any,
     sealed_mesh: Any,
@@ -695,8 +741,9 @@ def find_attachment_cap_faces(
     """Return indices of the sealed-mesh faces that close ``loop``.
 
     New faces (see :func:`find_new_faces`) are grouped into patches connected
-    through shared edges; a patch belongs to the attachment cap if most of
-    its rim vertices lie on the attachment loop.
+    through shared edges (:func:`group_faces_by_component`); a patch belongs
+    to the attachment cap if most of its rim vertices lie on the attachment
+    loop.
 
     Returns ``(cap_face_indices, loop_vertex_indices_in_sealed_mesh)``.
     """
@@ -708,20 +755,8 @@ def find_attachment_cap_faces(
     if len(new_faces) == 0:
         return np.empty(0, dtype=int), loop_sealed_indices
 
-    edge_to_faces: Dict[Tuple[int, int], List[int]] = {}
-    for face_index in new_faces.tolist():
-        a, b, c = sealed_faces[face_index]
-        for edge in ((a, b), (b, c), (a, c)):
-            edge_to_faces.setdefault(edge, []).append(face_index)
-
-    graph = nx.Graph()
-    graph.add_nodes_from(new_faces)
-    for faces in edge_to_faces.values():
-        for other in faces[1:]:
-            graph.add_edge(faces[0], other)
-
     cap_faces: List[int] = []
-    for component in nx.connected_components(graph):
+    for component in group_faces_by_component(sealed_mesh, new_faces):
         edge_counts: Dict[Tuple[int, int], int] = {}
         for face_index in component:
             a, b, c = sealed_faces[face_index]
@@ -731,9 +766,142 @@ def find_attachment_cap_faces(
         if not rim_vertices:
             continue
         if len(rim_vertices & loop_ids) / len(rim_vertices) >= min_rim_fraction:
-            cap_faces.extend(component)
+            cap_faces.extend(component.tolist())
 
     return np.asarray(sorted(cap_faces), dtype=int), loop_sealed_indices
+
+
+def find_new_face_patches(
+    original_mesh: Any,
+    sealed_mesh: Any,
+    branch_segments: Optional[Sequence[Segment]] = None,
+    *,
+    decimals: int = 6,
+) -> List[Dict[str, Any]]:
+    """Every face patch added while sealing, with ``BoundaryLoop``-like features
+    computed directly from the sealed mesh's own faces instead of from a
+    boundary-edge graph walk on the original mesh.
+
+    ``detect_attachment_loop``'s perimeter/area/``is_closed`` come from
+    ordering the *original* mesh's boundary edges into a cycle
+    (:func:`_order_component_vertices`); that ordering is only well-defined
+    when every boundary vertex in a hole has exactly 2 boundary edges. A
+    vertex with more (or fewer) - e.g. two holes touching at a single point -
+    makes that walk ambiguous, which is exactly what
+    ``attachment_ambiguous:attachment_loop_not_closed`` reports. Sealing
+    itself does not have this problem: whatever hole-filling
+    (``dendrite_analysis.mesh_repair.repair_mesh``) actually did is a
+    concrete, already-triangulated patch, so ``perimeter`` (sum of its rim
+    edge lengths - no cycle order needed), ``area`` (sum of its own
+    triangles' areas - the real curved-cap area, not a flat-polygon
+    approximation) and ``distance_to_skeleton`` (from the rim's centroid) are
+    always well-defined, regardless of how the original boundary graph looks.
+
+    Returns one dict per patch (largest first, matching
+    :func:`group_faces_by_component`) with keys ``face_indices`` (into
+    ``sealed_mesh``), ``perimeter``, ``area``, ``center``,
+    ``distance_to_skeleton``, ``vertex_indices``/``edges`` (the patch's rim,
+    mapped back to ``original_mesh`` vertex indices - hole-filling does not
+    move existing vertices, so a patch's rim vertices already exist there;
+    same convention as ``BoundaryLoop.vertex_indices``/``.edges``, so a
+    caller can store/plot a patch exactly like a loop), ``sealed_vertex_indices``
+    (the same rim, but into ``sealed_mesh`` instead) and ``n_edges``.
+    """
+    new_faces, original_ids, sealed_ids = find_new_faces(original_mesh, sealed_mesh, decimals=decimals)
+    if len(new_faces) == 0:
+        return []
+
+    shared_to_original: Dict[int, int] = {}
+    for original_index, shared_id in enumerate(original_ids.tolist()):
+        shared_to_original.setdefault(shared_id, original_index)
+
+    sealed_vertices = np.asarray(sealed_mesh.vertices, dtype=float)
+    sealed_faces = np.asarray(sealed_mesh.faces, dtype=int)
+
+    patches: List[Dict[str, Any]] = []
+    for component in group_faces_by_component(sealed_mesh, new_faces):
+        edge_counts: Dict[Tuple[int, int], int] = {}
+        for face_index in component.tolist():
+            a, b, c = sorted(sealed_faces[face_index].tolist())
+            for edge in ((a, b), (b, c), (a, c)):
+                edge_counts[edge] = edge_counts.get(edge, 0) + 1
+        rim_edges = np.asarray([edge for edge, count in edge_counts.items() if count == 1], dtype=int)
+        if len(rim_edges) == 0:
+            continue
+        rim_vertices = np.unique(rim_edges.reshape(-1))
+
+        perimeter = float(np.sum(np.linalg.norm(sealed_vertices[rim_edges[:, 0]] - sealed_vertices[rim_edges[:, 1]], axis=1)))
+        area = float(np.asarray(sealed_mesh.area_faces)[component].sum())
+        center = sealed_vertices[rim_vertices].mean(axis=0)
+        distance = distance_to_segments(center, branch_segments) if branch_segments else math.inf
+
+        original_vertex_indices = np.asarray(
+            [shared_to_original[sealed_ids[v]] for v in rim_vertices.tolist() if sealed_ids[v] in shared_to_original],
+            dtype=int,
+        )
+        original_edges = np.asarray(
+            [
+                (shared_to_original[sealed_ids[a]], shared_to_original[sealed_ids[b]])
+                for a, b in rim_edges.tolist()
+                if sealed_ids[a] in shared_to_original and sealed_ids[b] in shared_to_original
+            ],
+            dtype=int,
+        ) if len(rim_edges) else np.empty((0, 2), dtype=int)
+
+        patches.append(
+            {
+                "face_indices": component,
+                "perimeter": perimeter,
+                "area": area,
+                "center": center,
+                "distance_to_skeleton": float(distance),
+                "vertex_indices": original_vertex_indices,
+                "edges": original_edges,
+                "sealed_vertex_indices": rim_vertices,
+                "n_edges": int(len(rim_edges)),
+            }
+        )
+    return patches
+
+
+def select_attachment_patch(
+    original_mesh: Any,
+    sealed_mesh: Any,
+    branch_segments: Optional[Sequence[Segment]] = None,
+    *,
+    weights: Tuple[float, float, float] = (0.4, 0.35, 0.25),
+    ambiguity_ratio: float = 0.85,
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
+    """Fallback attachment-region selection, scored on sealed face patches rather
+    than pre-seal boundary loops (see :func:`find_new_face_patches`).
+
+    Meant to be tried only when :func:`detect_attachment_loop` itself came
+    back ambiguous - it uses the same scoring formula
+    (:func:`_score_candidates`) and the same ``weights``/``ambiguity_ratio``,
+    just on more robust per-candidate features, so it can resolve cases the
+    boundary-loop walk can't order into a simple cycle
+    (``attachment_loop_not_closed``) and can, in general, also come out
+    differently than the loop-based scoring on a ``close_candidates`` tie
+    (real triangulated patch area vs. a flat-polygon estimate).
+
+    Returns ``(winner, candidates, reason)``: ``winner`` is one of
+    ``candidates`` (see :func:`find_new_face_patches`) or ``None`` if still
+    ambiguous or there were no patches at all, in which case ``reason``
+    explains why (``"close_candidates"`` or ``"no_new_face_patches"``).
+    """
+    patches = find_new_face_patches(original_mesh, sealed_mesh, branch_segments)
+    if not patches:
+        return None, patches, "no_new_face_patches"
+
+    perimeters = np.asarray([patch["perimeter"] for patch in patches], dtype=float)
+    areas = np.asarray([patch["area"] for patch in patches], dtype=float)
+    distances = np.asarray([patch["distance_to_skeleton"] for patch in patches], dtype=float)
+    scores = _score_candidates(perimeters, areas, distances, weights)
+    order = np.argsort(-scores)
+
+    if len(patches) > 1 and scores[order[1]] >= ambiguity_ratio * scores[order[0]]:
+        return None, patches, "close_candidates"
+    return patches[int(order[0])], patches, None
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,8 @@
+# Model C final: baseline + geometric regularisers. PLACEHOLDER weights - set
+# from the one-at-a-time validation runs (surface, then eikonal, then normal).
+defaults: [baseline.yaml]
+name: vae-final
+loss:
+  surface: 1.0
+  eikonal: 0.1
+  normal: 0.1

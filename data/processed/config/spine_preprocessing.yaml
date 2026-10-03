@@ -1,0 +1,101 @@
+# Spine preprocessing config for the neuron-model S module.
+# See docs/neuron-model/s-module-preprocessing.md (section 5).
+# Keys inside each section are SpinePreprocessingConfig field names.
+# All lengths are in the native physical unit of the data (Minnie/H01: nm).
+#
+# This file's checked-in defaults target a quick smoke test on this (macOS)
+# machine, on the 1-3 neuron subset in datasets/minnie65/ - see CLAUDE.md
+# "Mac vs Windows" for the split between local testing (this machine, small
+# data) and full-dataset processing (the Windows workstation). Override
+# per-run with CLI flags (--workers/--batch-size/--output-root/...) rather
+# than editing these defaults for a one-off machine-specific run.
+#
+# Full-dataset runs on the Windows workstation (see
+# docs/neuron-model/windows-workstation-specs.md for the measured hardware):
+#   --workers ~20-28      (24 physical cores / 32 logical; leave a few free)
+#   --batch-size 512-1024 (bigger batches amortise the full-table parquet
+#                          rewrite after each batch over many more rows -
+#                          see run_stage()/`_write_table`; memory use is
+#                          bounded by `workers`, not `batch_size`, so this is
+#                          safe even with the machine's ~32 GB RAM)
+#   --output-root pointed at a local NVMe drive (e.g. D:\), NOT at the raw
+#                          dataset's location on the NAS (`O:\`): measured
+#                          NAS throughput for many small files was ~50-60x
+#                          slower than the local disk (178 vs ~9000-11000
+#                          files/s), and each spine writes ~15 small files.
+general:
+  batch_size: 128
+  workers: 8
+  resume: true
+  preprocessing_version: v1
+  physical_unit: nm
+  output_root: null          # null -> <dataset_root>/preprocessed; point at a
+                             # local fast disk for full-dataset Windows runs
+                             # (see the NAS-vs-local note above)
+  metadata_root: datasets
+
+sealing:
+  # Distance to the branch skeleton raised from 0.25 to 0.4 (perimeter/area
+  # scaled down, same 8:7 ratio as before) - decided after manual review of
+  # every spine whose seal status changed on a real neuron (864691134886335738):
+  # it correctly resolves attachment_loop_not_closed/close_candidates cases
+  # that were only ambiguous because a competing hole (false-spine branch
+  # fragment, or a hole in the head) scored well on perimeter/area despite
+  # being far from the skeleton - and in one case (limb_002/branch_004/
+  # spine_005) it caught a real misdetection: under the old weights the loop
+  # scoring *confidently* picked a large hole in the head (dist ~1458 nm) over
+  # the true, smaller attachment hole near the skeleton (dist ~411 nm) as
+  # "success" - attachment_cap_area/JunctionArea were silently wrong for that
+  # spine. The new weights at least flag it needs_review instead of picking
+  # silently wrong (still don't resolve it confidently either way - the two
+  # holes are genuinely close in score).
+  # Known remaining trade-off: for a handful of poorly segmented spines (head
+  # cut off during segmentation), the new weights occasionly resolve what
+  # should stay ambiguous into a confident (wrong) success, because the only
+  # other candidate hole now loses purely for being far from the skeleton -
+  # accepted as a minor, rare cost (false_spine_detection/manual QC catches
+  # most of these anyway).
+  attachment_weight_perimeter: 0.32
+  attachment_weight_area: 0.28
+  attachment_weight_distance: 0.4
+  # runner-up score >= ratio * best score -> attachment_ambiguous / needs_review
+  attachment_ambiguity_ratio: 0.85
+
+false_spine:
+  false_spine_threshold_nm: 300.0
+  false_spine_threshold_nm_by_dataset:
+    minnie65: 300.0
+    h01: 300.0
+  skeleton_sample_points: 10
+
+orientation:
+  only_valid_for_orientation: true
+  # minimal |in-plane component| of the branch tangent before falling back to PCA
+  min_tangent_component: 0.1
+
+mesh_qc:
+  transform_tolerance: 1.0e-6
+  invariance_rtol: 1.0e-6
+  degenerate_area_tol: 1.0e-12
+  max_degenerate_faces: 0
+  check_self_intersections: true
+  # needs_review meshes (e.g. self_intersections) still get pointcloud/SDF/
+  # morphometrics + train_eligible by default; set to false for a stricter
+  # run restricted to geometrically pristine (valid) meshes only.
+  allow_needs_review: true
+
+pointcloud_sampling:
+  pointcloud_sizes: [2048, 4096, 8192]
+  pointcloud_seeds: [42, 43, 44, 45]
+
+sdf:
+  sdf_pool_size: 16384
+  sdf_surface_fraction: 0.20
+  sdf_near_fraction: 0.60
+  sdf_uniform_fraction: 0.20
+  # placeholders, tune on validation (spines are ~0.5-2 um long)
+  sdf_near_sigmas: [5.0, 20.0, 60.0]
+  sdf_bbox_margin: 100.0
+  sdf_surface_tolerance: 1.0e-3
+  sdf_interior_probe: 2.0
+  # sign convention: negative inside; sample_type codes: 0 surface, 1 near_surface, 2 uniform

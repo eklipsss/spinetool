@@ -1,0 +1,8 @@
+# Evaluation protocol (stage 7, not implemented yet) - recorded here so every
+# model is later evaluated identically.
+n_samples: 1000
+generation_seeds: [1, 2, 3, 4, 5]
+surface_points: 2048
+morphometrics: [OldChordDistribution, OpenAngle, CVD, AverageDistance, LengthVolumeRatio, LengthAreaRatio, JunctionArea, Length, Area, Volume, ConvexHullVolume, ConvexHullRatio]
+joint_morphometrics: [OpenAngle, CVD, AverageDistance, LengthVolumeRatio, LengthAreaRatio, Length, Area, Volume, ConvexHullVolume, ConvexHullRatio]
+univariate_metrics: [wasserstein_1, ks_statistic, energy_distance]

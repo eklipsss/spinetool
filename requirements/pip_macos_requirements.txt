@@ -3,3 +3,7 @@
 #   conda activate neuron-model
 #   python -m pip install -r pip_macos_requirements.txt
 icosphere
+# Screened Poisson surface reconstruction (S-module reconstruction backend);
+# open3d is not used - its macOS pip wheel needs Homebrew libusb and its
+# Poisson has no point_weight/samples_per_node parameters.
+pymeshlab

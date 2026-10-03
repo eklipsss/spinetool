@@ -3,3 +3,5 @@
 #   conda activate neuron-model
 #   python -m pip install -r pip_win_requirements.txt
 icosphere
+# Screened Poisson surface reconstruction (S-module reconstruction backend)
+pymeshlab

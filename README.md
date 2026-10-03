@@ -22,7 +22,12 @@ conda install --name neuron-model -c conda-forge --file conda_win_requirements.t
 conda install --name neuron-model -c conda-forge --file conda_win_requirements_geo.txt
 conda activate neuron-model
 python -m pip install -r pip_win_requirements.txt
+python -m pip install -r pip_win_torch_requirements.txt
 ```
+The last line installs PyTorch with CUDA (needed only for the S-module spine
+generators - `src/neuron_model/spine_generation/`); check it with
+`python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`.
+
 Notes on this order:
 - `esda`/`libpysal` are installed as a separate step on purpose - solving them
   together with the rest of the list in one `conda create` can crash conda's
@@ -51,6 +56,10 @@ conda create --name neuron-model -c conda-forge --file conda_macos_requirements.
 conda activate neuron-model
 python -m pip install -r pip_macos_requirements.txt
 ```
+To add the S-module generator dependencies to an existing macOS env:
+`conda install -n neuron-model -c conda-forge pytorch` (conda-forge build, not
+the pip wheel - see the comment in `conda_macos_requirements.txt`) and
+`python -m pip install pymeshlab`.
 
 ## Run
 1. Open Anaconda

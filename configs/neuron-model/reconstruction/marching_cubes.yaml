@@ -1,0 +1,11 @@
+# Marching Cubes backend for the VAE SDF decoder. The grid spans the frozen
+# train bbox (data.bbox); resolution 128 for validation / fast experiments,
+# 256 for the final generation, 512 only if 256 systematically loses the neck.
+frozen: false
+calibration_run: null
+resolution_validation: 128
+resolution_final: 256
+iso_level: 0.0
+chunk_size: 262144
+postprocess:
+  min_component_area_fraction: 0.01

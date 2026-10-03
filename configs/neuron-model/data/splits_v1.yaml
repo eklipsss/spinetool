@@ -1,0 +1,16 @@
+# Fixed group split shared by all models (spine_generation_technical_spec.md §31).
+# Build once on the Windows workstation after the full preprocessing:
+#   python scripts/neuron_model/build_splits.py --config configs/neuron-model/data/splits_v1.yaml
+version: splits_v1
+seed: 20260929
+manifests: []             # e.g. ["O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet"]
+path_mode: relative
+require_train_eligible: true
+group_level: null         # null -> highest available: animal_id > sample_id > neuron_id > branch_id
+fractions: {train: 0.8, val: 0.1, test: 0.1}
+stratify: [dataset, species, health, cell_type_binary, compartment]
+output: data/processed/neuron-model/splits/splits_v1.parquet
+bbox:
+  output: data/processed/neuron-model/splits/bbox_splits_v1.json
+  margin: 100.0           # physical units (nm); same order as sdf_bbox_margin of the preprocessing
+  n_points: 8192

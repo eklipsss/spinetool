@@ -41,19 +41,47 @@ slow NAS read throughput below.
 
 ## Recommendations
 
-- **Set `output_root` to a local disk** (`D:\` looks best - dedicated "Data"
-  volume with 355 GB free) instead of writing `preprocessed/` next to the raw
-  data on `O:\`. Only read the raw `.off`/`.npy` files from the NAS; the
-  ~50-60x small-file write gap on `O:\` would otherwise dominate runtime.
+- **`output_root` on a local disk (`D:\`) was the original recommendation**,
+  but a real-data size measurement in `CLAUDE.md` ("Полный прогон Minnie65 на
+  Windows") puts the full Minnie65 output at **~1.4 TB** (~0.76M spines) - too big for either
+  local volume (`C:` 470 GB free, `D:` 355 GB free at the time of this
+  report), so for the actual full run `output_root` has to be on `O:\`
+  (~30 TB free) instead. The many-small-file write gap below is therefore a
+  real cost of the full run, not just a theoretical risk - see the mitigations
+  in `CLAUDE.md` (bigger `batch_size`, pilot timing run, network check below).
 - The NAS read/write throughput is confirmed slow (not a one-off fluke) and
-  far below both adapters' theoretical link speed - worth a quick check on
-  the network/NAS side (which adapter actually carries `O:\` traffic, NAS-side
-  load, SMB version) before doing any bulk sequential reads from `O:\`
-  (e.g. reading many full `branch_mesh.off`/`limb_mesh.off` files).
-- Confirm Windows Defender real-time protection status manually and, if
-  enabled, exclude `output_root` (and ideally the raw dataset path) from
-  scanning before a full run.
+  far below both adapters' theoretical link speed. Check which adapter
+  actually carries `O:\` traffic before doing any bulk NAS I/O:
+  ```powershell
+  Get-NetAdapter                                    # confirm Ethernet/Wi-Fi Up/Disconnected
+  $nasIp = (Resolve-DnsName LabidNAS).IPAddress[0]   # or whatever O:\ actually resolves to
+  Find-NetRoute -RemoteIPAddress $nasIp              # -> InterfaceAlias Windows will actually use
+  ```
+  Cross-check empirically (the route table can be right and actual traffic
+  still end up elsewhere in edge cases): run `Get-NetAdapterStatistics`,
+  copy one real file from `O:\` (e.g. `Copy-Item O:\Datasets\Minnie65\<...>\
+  spine_000.off C:\temp\test.off`), run `Get-NetAdapterStatistics` again -
+  whichever adapter's `ReceivedBytes` jumped is the one really carrying it.
+  If it's Wi-Fi and Ethernet shows "Up" in the first command, forcing
+  Ethernet (disable the Wi-Fi adapter for the duration of the run, or lower
+  Ethernet's `InterfaceMetric` via `Set-NetIPInterface` - both need admin) is
+  likely the single biggest speed win available, bigger than any
+  `workers`/`batch_size` tuning.
+- Confirm Windows Defender real-time protection status manually - the
+  `Get-MpPreference` CIM query already failed once (see above); try
+  `Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled` first
+  (sometimes works when `Get-MpPreference` doesn't), otherwise check via the
+  Windows Security app (Virus & threat protection -> Virus & threat
+  protection settings -> Manage settings). If enabled, exclude the raw
+  dataset path and `output_root` (Add or remove exclusions -> Add an
+  exclusion -> Folder; or `Add-MpPreference -ExclusionPath "O:\Datasets\
+  Minnie65"` from an elevated PowerShell). On a managed/lab machine this may
+  need an admin/IT - if the Security app shows "some settings are managed by
+  your organization" the account can't change it itself.
 - Start `workers` around 20-28 (of 32 logical processors) and `batch_size`
   small enough that `workers x batch_size` in-flight meshes/point
   clouds/SDF pools stay well under free RAM - re-check free RAM before the
-  run (it ranged 2.7-12.2 GB free across the two reports here).
+  run (it ranged 2.7-12.2 GB free across the two reports here). Note this
+  predates the ~0.76M-spine full-Minnie65 scale estimate in `CLAUDE.md`, which
+  revises `batch_size` upward (to ~4096) for a different reason - the
+  per-batch full-table parquet rewrite, not memory.

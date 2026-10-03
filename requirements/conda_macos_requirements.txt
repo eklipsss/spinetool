@@ -49,6 +49,12 @@ esda
 libpysal
 python-louvain
 
+# --- deep learning (S-module generators: VAE, MoGen port) ---
+# conda-forge build on purpose, not the pip wheel: the pip wheel bundles its
+# own libomp, while conda-forge OpenBLAS (numpy) already loads the conda one ->
+# "OMP: Error #15" on `import torch`. The conda-forge osx-arm64 build has MPS.
+pytorch
+
 # --- plotting / reporting ---
 matplotlib
 seaborn

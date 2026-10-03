@@ -1,0 +1,47 @@
+# Shared by all MoGen runs: A (pretrained -> fine-tune) and B (random init).
+# The spec requires these to be IDENTICAL between A and B (same split, point
+# count, coordinate scale, preprocessing version, architecture, solver,
+# reconstruction backend, evaluation) - so they live here, not in the leaves.
+defaults: [../base/experiment.yaml]
+precision: bf16           # CUDA only; no-op on mac
+
+data:
+  n_points: 8192          # MoGen resolution (reduces transfer risk)
+  # physical (nm) -> model units. Start: x_MoGen = x_um / 10 = x_nm * 1e-4 (spec).
+  # To be confirmed on the official smoke test / zero-shot (plan stage 4.1, 4.4).
+  coord_scale: 1.0e-4
+  jitter_std: 5.0         # nm, small Gaussian jitter; NO random rotations (local frame is meaningful)
+  batch_size: 8
+
+model:
+  architecture:           # = mouse_mixed (pfty_* in its config.json) = the spec
+    point_dim: 128
+    latent_dim: 256
+    n_latents: 256
+    n_blocks: 4
+    n_subblocks: 2
+    n_heads: 8
+    k_nn: 16
+    coord_dim: 3
+    cond_dim: null        # set from the exported checkpoint (Dense_0 input width) - scratch must use the same value
+
+flow:
+  time_schedule: mogen_cosine      # = cosine_2.0 of mouse_mixed; do not change before the baseline is reproduced
+  inference_schedule: mogen_cosine
+  inference_solver: midpoint
+  inference_steps: 100             # tuned on validation (quality vs time)
+
+train:
+  accumulation_steps: 4            # effective batch 32 = MoGen's batch_size
+  clip_norm: 0.1
+  ema_decay: 0.999
+  log_every: 100
+  validate_every: 2000
+  sample_every: 10000
+  checkpoint_every: 2000
+  tracked_metrics: {val_loss: min} # + best_morphology_metric once evaluation (stage 7) exists
+  n_val_batches: 50
+  n_samples: 8
+
+reconstruction:
+  poisson_config: configs/neuron-model/reconstruction/poisson.yaml

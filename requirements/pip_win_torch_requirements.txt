@@ -1,0 +1,12 @@
+# PyTorch with CUDA for the S-module generators (RTX 4090) - install after
+# conda_win_requirements*.txt and pip_win_requirements.txt:
+#   conda activate neuron-model
+#   python -m pip install -r pip_win_torch_requirements.txt
+# Check afterwards:
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# If `import torch` fails with "OMP: Error #15 ... libiomp5md.dll already
+# initialized", the conda numpy/MKL and the torch wheel each brought an OpenMP
+# runtime - report it rather than setting KMP_DUPLICATE_LIB_OK (see CLAUDE.md
+# "Модели генерации шипиков").
+--index-url https://download.pytorch.org/whl/cu128
+torch

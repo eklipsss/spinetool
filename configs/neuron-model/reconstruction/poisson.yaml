@@ -1,0 +1,18 @@
+# Screened Poisson backend for Flow Matching (MoGen) outputs.
+# PLACEHOLDER values (MeshLab defaults) - replaced by the calibration result
+# (calibration.yaml) and then FROZEN until the final test. Record the
+# calibration run id here when freezing.
+frozen: false
+calibration_run: null
+normals:
+  k_normal: 30
+poisson:
+  depth: 8
+  point_weight: 4.0
+  samples_per_node: 1.5
+  scale: 1.1
+  iters: 8
+  full_depth: 5
+  threads: 1
+postprocess:
+  min_component_area_fraction: 0.01

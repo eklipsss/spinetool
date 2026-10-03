@@ -1,0 +1,28 @@
+# Common experiment defaults for every S-module generator
+# (docs/neuron-model/s-module-implementation-plan.md). Model configs inherit
+# this via `defaults:`; override on the CLI with key=value.
+seed: 20260929
+device: auto              # auto -> cuda, then mps, then cpu
+precision: fp32           # bf16 / fp16 enabled only on CUDA (training.autocast)
+runs_root: runs/training/neuron-model
+
+data:
+  # One or more manifest.parquet files written by the preprocessing
+  # (<output_root>/<dataset>/manifest.parquet). Paths are re-rooted next to
+  # each manifest (path_mode: relative), so a folder copied from the Windows
+  # workstation works unchanged.
+  manifests: []
+  path_mode: relative
+  require_train_eligible: true
+  splits: data/processed/neuron-model/splits/splits_v1.parquet
+  split_version: splits_v1
+  bbox: data/processed/neuron-model/splits/bbox_splits_v1.json
+  physical_unit: nm
+  num_workers: 0
+
+checkpoint:
+  every_steps: 5000
+  keep_every: null        # also keep step_<N>.pt every N steps (null = off)
+
+logging:
+  every_steps: 100

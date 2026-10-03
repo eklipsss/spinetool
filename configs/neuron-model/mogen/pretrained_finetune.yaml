@@ -1,0 +1,14 @@
+# Model A: MoGen pretrained (mouse_mixed) -> full fine-tuning on spine point clouds.
+defaults: [_common.yaml]
+name: mogen-pretrained-finetune
+model:
+  init: pretrained
+  # written by scripts/neuron_model/export_mogen_weights.py (JAX env, plan stage 4.2)
+  pretrained_weights: data/external/mogen/mouse_mixed_750000_weights.npz
+  pretrained_collection: ema_params
+optimizer:
+  name: adamw             # Prodigy (MoGen reference, lr=0.5) is available as name: prodigy (pip install prodigyopt)
+  lr: 1.0e-5              # lower than scratch; tuned on validation
+  weight_decay: 0.0
+train:
+  max_steps: 100000

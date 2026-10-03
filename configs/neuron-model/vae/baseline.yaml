@@ -1,0 +1,76 @@
+# Model C baseline: PointNeXt -> VAE -> SIREN-SDF with loss = SDF + beta * KL only.
+# Then enable surface / eikonal / normal ONE AT A TIME (see final.yaml), so the
+# contribution of each regulariser is measurable.
+defaults: [../base/experiment.yaml]
+name: vae-baseline
+precision: bf16            # CUDA only; SIREN is sensitive - fall back to fp32 if the loss is unstable
+
+data:
+  n_points: 8192           # validation will also try 2048 / 4096
+  coord_scale: 1.0e-3      # nm -> um (one global factor, never per spine)
+  use_normals: true
+  query_counts: {surface: 1024, near: 3072, uniform: 1024}  # per spine per step, from sdf_samples.npz
+  batch_size: 8
+
+model:
+  latent_dim: 128          # validate 64 / 128 / 256 after a stable baseline
+  encoder:
+    type: pointnext
+    input_points: 8192
+    use_normals: true
+    base_width: 64
+    stage_widths: [64, 128, 256, 512]
+    strides: [1, 4, 4, 4]
+    blocks: [0, 1, 1, 1]
+    k_neighbors: 32
+    pooling: max           # or max_avg
+    global_feature_dim: 512
+    sampler: fps
+    norm: layer
+  decoder:
+    type: siren_sdf
+    hidden_dim: 256
+    hidden_layers: 5
+    output_dim: 1
+    first_omega_0: 30
+    hidden_omega_0: 30
+    cond_dim: 0            # reserved conditional input e(c) (0 = unconditional first version)
+
+loss:
+  sdf: 1.0
+  surface: 0.0
+  eikonal: 0.0
+  normal: 0.0
+  beta: 1.0e-3
+  kl_warmup_steps: 10000
+  free_bits: null          # e.g. 0.05 nats/dim if posterior collapse shows up (active_latent_dimensions -> 0)
+  sdf_loss: l1             # or smooth_l1
+  smooth_l1_beta: 0.01
+  sdf_clamp: null
+
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 0.0
+
+train:
+  max_steps: 200000
+  accumulation_steps: 1
+  clip_norm: 1.0
+  ema_decay: null          # EMA is not required for the VAE by the spec
+  log_every: 100
+  validate_every: 2000
+  sample_every: 10000
+  checkpoint_every: 2000
+  tracked_metrics: {val_loss: min}
+  n_val_batches: 50
+
+sampling:                  # periodic reconstruction + prior samples during training
+  resolution: 128          # validation grid (256 for the final generation)
+  n_reconstructions: 4
+  n_prior: 4
+  chunk_size: 262144
+  check_self_intersections: false
+
+reconstruction:
+  marching_cubes_config: configs/neuron-model/reconstruction/marching_cubes.yaml

@@ -54,6 +54,7 @@ from .spine_geometry import (
     orient_spines_w_holes,
     require_trimesh,
     sample_polyline_by_arclength,
+    select_attachment_patch,
     self_intersection_check,
 )
 from .spine_sampling import (
@@ -1002,6 +1003,35 @@ def _seal_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: Step
         cap_faces, loop_sealed_indices = timer.run(
             "identify attachment cap", lambda: find_attachment_cap_faces(mesh, repaired, detection.loop)
         )
+
+    # Fallback for an ambiguous pre-seal detection (s-module-preprocessing.md
+    # 3.5.4): detect_attachment_loop's perimeter/area/is_closed come from
+    # ordering the *original* mesh's boundary edges into a cycle, which is
+    # only well-defined when every boundary vertex has exactly 2 boundary
+    # edges - a vertex with more (two holes touching at one point) makes that
+    # ordering ambiguous even though sealing itself filled the hole just
+    # fine. select_attachment_patch reruns the same scoring on the sealed
+    # mesh's own face patches instead (real triangulated area, rim length
+    # that doesn't need a cycle order) - well-defined regardless, so it can
+    # resolve cases the loop walk can't, and may also break a close_candidates
+    # tie differently (real patch area vs. a flat-polygon estimate).
+    patch_winner: Optional[Dict[str, Any]] = None
+    patch_candidates: List[Dict[str, Any]] = []
+    if detection.ambiguous:
+        patch_winner, patch_candidates, _patch_reason = timer.run(
+            "attachment patch fallback",
+            lambda: select_attachment_patch(
+                mesh,
+                repaired,
+                segments,
+                weights=(cfg.attachment_weight_perimeter, cfg.attachment_weight_area, cfg.attachment_weight_distance),
+                ambiguity_ratio=cfg.attachment_ambiguity_ratio,
+            ),
+        )
+        if patch_winner is not None:
+            cap_faces = patch_winner["face_indices"]
+            loop_sealed_indices = patch_winner["sealed_vertex_indices"]
+
     cap_area = float(np.asarray(repaired.area_faces)[cap_faces].sum()) if len(cap_faces) else None
 
     report = timer.run(
@@ -1019,28 +1049,56 @@ def _seal_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: Step
         )
 
     review_reason = None
-    if detection.ambiguous:
+    if detection.ambiguous and patch_winner is None:
         review_reason = f"attachment_ambiguous:{detection.reason}"
     elif len(cap_faces) == 0:
         review_reason = "attachment_cap_not_found"
 
     loop = detection.loop
+    if patch_winner is not None:
+        loop_vertex_indices: Any = patch_winner["vertex_indices"]
+        loop_edges: Any = patch_winner["edges"]
+        loop_centroid: Any = patch_winner["center"]
+        loop_perimeter: Any = patch_winner["perimeter"]
+        loop_area: Any = patch_winner["area"]
+        loop_distance: Any = patch_winner["distance_to_skeleton"]
+        attachment_method = "patch_fallback"
+    else:
+        loop_vertex_indices = None if loop is None else loop.ordered_vertex_indices
+        loop_edges = None if loop is None else loop.edges
+        loop_centroid = None if loop is None else loop.center
+        loop_perimeter = None if loop is None else loop.perimeter
+        loop_area = None if loop is None else loop.area
+        loop_distance = None if loop is None else loop.distance_to_skeleton
+        attachment_method = "loop"
+
     attachment = {
         **record.identity,
         "source_mesh_path": str(record.source_path),
         "sealed_mesh_path": str(sealed_mesh_path(record, cfg)),
         "attachment_ambiguous": bool(review_reason is not None),
         "attachment_ambiguity_reason": review_reason,
-        "attachment_loop_vertex_indices": None if loop is None else loop.ordered_vertex_indices,
+        "attachment_method": attachment_method,
+        "attachment_loop_vertex_indices": loop_vertex_indices,
         "attachment_loop_vertex_indices_sealed": loop_sealed_indices,
-        "attachment_loop_edges": None if loop is None else loop.edges,
-        "attachment_loop_centroid_global": None if loop is None else loop.center,
-        "attachment_loop_perimeter": None if loop is None else loop.perimeter,
-        "attachment_loop_area": None if loop is None else loop.area,
-        "attachment_loop_distance_to_branch_skeleton": None if loop is None else loop.distance_to_skeleton,
+        "attachment_loop_edges": loop_edges,
+        "attachment_loop_centroid_global": loop_centroid,
+        "attachment_loop_perimeter": loop_perimeter,
+        "attachment_loop_area": loop_area,
+        "attachment_loop_distance_to_branch_skeleton": loop_distance,
         "attachment_cap_face_indices": cap_faces,
         "attachment_cap_area": cap_area,
         "candidate_loops": detection.candidates(),
+        "candidate_patches": [
+            {
+                "perimeter": float(patch["perimeter"]),
+                "area": float(patch["area"]),
+                "distance_to_branch_skeleton": float(patch["distance_to_skeleton"]),
+                "centroid_global": np.asarray(patch["center"], dtype=float).tolist(),
+                "n_edges": int(patch["n_edges"]),
+            }
+            for patch in patch_candidates
+        ],
         "physical_unit": cfg.physical_unit,
         "algorithm_version": ALGORITHM_VERSION,
     }
@@ -1058,6 +1116,7 @@ def _seal_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: Step
         "sealed_path": str(sealed_mesh_path(record, cfg)),
         "attachment_region_path": str(attachment_json_path(record, cfg)),
         "attachment_ambiguous": bool(review_reason is not None),
+        "attachment_method": attachment_method,
         "n_boundary_edges_before": n_boundary_before,
         "n_boundary_edges_after": report["n_boundary_edges"],
         "n_holes_before": n_holes_before,
@@ -1774,6 +1833,7 @@ def run_manifest_stage(config: SpinePreprocessingConfig, records: Optional[Seque
                 "status": get("false_spine", "status"),
                 "seal_status": get("seal", "status"),
                 "attachment_ambiguous": get("seal", "attachment_ambiguous"),
+                "attachment_method": get("seal", "attachment_method"),
                 "orient_status": get("orient", "status"),
                 "quality_status": quality_status,
                 "geometry_valid": get("quality", "geometry_valid"),

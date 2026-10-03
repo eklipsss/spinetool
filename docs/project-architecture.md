@@ -25,22 +25,22 @@ src/
   dendrite_analysis/          # dendrite domain library
   spine_analysis/             # spine domain library
   confocal_surface_repair/    # confocal repair tools
-  spinetool/                  # project-level utilities
+  neuron_model/                # neuron morphology generation model (preprocessing, geometry, sampling)
+    spine_generation/          # S-module generators: experiment infra, data, reconstruction, evaluation, models
 ```
-
-Use `src/spinetool/` for shared project infrastructure:
-
-- path helpers
-- config loading
-- common IO helpers
-- notebook bootstrap code
-- pipeline utilities that do not belong to only one domain package
 
 Use the domain packages for domain logic:
 
 - `src/dendrite_analysis/` for dendrite, branch, neuron, network, and dendrite metric code
 - `src/spine_analysis/` for spine meshes, spine metrics, clustering, classification, and segmentation code
 - `src/confocal_surface_repair/` for confocal surface repair logic and resources
+- `src/neuron_model/` for the neuron morphology generation project (see `docs/neuron-model/`): spine preprocessing pipeline, geometry, and sampling
+
+Shared project infrastructure that does not belong to a single domain package
+(path helpers, config loading, common IO helpers, notebook bootstrap code)
+does not have a dedicated location yet - add a short note in `docs/` before
+creating one, rather than reviving a generic `spinetool`-style catch-all
+package.
 
 Do not add new Python modules to the repository root. If a script is meant to be run directly, put it in `scripts/`. If it is reusable code, put it in `src/`.
 
@@ -63,7 +63,7 @@ notebooks/
 
 When creating a new notebook, choose the narrowest matching folder. Use `notebooks/exploratory/` only for temporary work.
 
-Notebook code should use shared path helpers from `src/spinetool/` once they are available. Until then, notebooks should resolve the project root explicitly before reading or writing project files.
+Notebooks should resolve the project root explicitly (see the bootstrap cell in `notebooks/neuron-model/spine-preprocessing.ipynb`) before reading or writing project files.
 
 ## Data
 
@@ -156,6 +156,17 @@ runs/training/2026-09-20_baseline_xgboost/
 ```
 
 Do not write training outputs, plots, checkpoints, metrics CSVs, or logs to the repository root.
+
+## Configs And Tests
+
+Experiment configuration files (YAML) live under `configs/<project>/`, for
+example `configs/neuron-model/vae/baseline.yaml`. Data-preprocessing configs
+that describe how a canonical processed dataset was built stay next to the
+data in `data/processed/config/`.
+
+Automated tests (pytest) live under `tests/<package>/`, for example
+`tests/neuron_model/`. Tests must be fast and self-contained (synthetic
+inputs or a handful of small files) - they run on the development laptop.
 
 ## Documentation
 

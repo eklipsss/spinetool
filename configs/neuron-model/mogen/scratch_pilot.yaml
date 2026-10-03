@@ -1,0 +1,11 @@
+# Model B pilot: same architecture from random init, short run to check loss/samples/metrics.
+defaults: [_common.yaml]
+name: mogen-scratch-pilot
+model:
+  init: random
+optimizer:
+  name: adamw
+  lr: 3.0e-4
+  weight_decay: 0.0
+train:
+  max_steps: 20000

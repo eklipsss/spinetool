@@ -6,6 +6,16 @@ render, per spine:
 0. the source mesh;
 1. the sealed mesh, with faces added while sealing in green and the
    attachment loop (the boundary that got capped) outlined in red;
+1b. the sealed mesh again, but with *every* hole sealing filled - not just
+    the one selected as the attachment region - each shown as its own solid
+    color, and no attachment-loop overlay at all. Useful for the ambiguous
+    cases (``attachment_ambiguous:close_candidates`` /
+    ``attachment_ambiguous:attachment_loop_not_closed`` in
+    ``sealed_spines.parquet``/``attachment_region_<mesh>.json``): the "1)"
+    figure above has no attachment loop to draw for these (there is no
+    chosen loop), so this is the only one of the two that still renders for
+    them, and lets you see how many holes there were and how their sizes
+    compare - the two things the ambiguity reasons are actually about.
 2. the sealed mesh in local coordinates, with the attachment cap faces in
    red and the local frame (origin + tangent/radial/binormal axes) drawn;
 3. the source mesh in local coordinates (same frame, no cap - it does not
@@ -36,6 +46,30 @@ ATTACHMENT_CAP_COLOR = "crimson"
 LOOP_CONTOUR_COLOR = "red"
 AXIS_COLORS = ("red", "green", "blue")
 AXIS_LABELS = ("tangent (+X)", "radial (+Y)", "binormal (+Z)")
+# One color per sealed hole (figure 1b) - cycled if there are more holes than colors;
+# in practice a spine has at most a handful of holes, so a repeat is very unlikely.
+HOLE_PATCH_COLORS = (
+    "seagreen", "crimson", "darkorange", "mediumpurple", "goldenrod",
+    "teal", "deeppink", "steelblue", "olive", "slategray",
+)
+
+
+def hole_patch_face_color_map(sealed_mesh: Any, new_faces: np.ndarray) -> Dict[int, str]:
+    """``{face_index: color}`` with one distinct color per sealed hole.
+
+    Groups ``new_faces`` (every face added while sealing - see
+    ``spine_geometry.find_new_faces``) into connected patches (one per hole,
+    via ``spine_geometry.group_faces_by_component``) and assigns each patch
+    its own color from :data:`HOLE_PATCH_COLORS`, largest hole first.
+    """
+    from .spine_geometry import group_faces_by_component
+
+    colors: Dict[int, str] = {}
+    for rank, component in enumerate(group_faces_by_component(sealed_mesh, new_faces)):
+        color = HOLE_PATCH_COLORS[rank % len(HOLE_PATCH_COLORS)]
+        for face_index in component.tolist():
+            colors[int(face_index)] = color
+    return colors
 
 
 def face_color_map(face_indices: Iterable[int], color: str) -> Dict[int, str]:
@@ -271,8 +305,8 @@ def visualize_spine_stage_outputs(record: Any, cfg: Any, *, show: bool = True) -
     of a branch" case in ``spine-preprocessing-visual-check.ipynb`` where not
     every spine reaches every stage.
 
-    Returns a dict with whichever of ``{"original", "sealed", "local_sealed",
-    "local_original", "pointclouds", "sdf"}`` could be built.
+    Returns a dict with whichever of ``{"original", "sealed", "sealed_holes",
+    "local_sealed", "local_original", "pointclouds", "sdf"}`` could be built.
     """
     import json
 
@@ -305,12 +339,26 @@ def visualize_spine_stage_outputs(record: Any, cfg: Any, *, show: bool = True) -
         sealed = load_trimesh(sealed_path, process=False)
         attachment = json.loads(attachment_path.read_text(encoding="utf-8"))
         new_faces, _, _ = find_new_faces(original, sealed)
-        figures["sealed"] = make_scene_figure(
-            [
-                mesh_trace(sealed, name="sealed", face_colors=face_color_map(new_faces, NEW_FACE_COLOR)),
-                edge_segments_trace(original.vertices, attachment["attachment_loop_edges"], name="attachment loop"),
-            ],
-            title=f"spine {spine_id} - 1) sealed mesh (green = new faces, red = attachment loop)",
+        loop_edges = attachment.get("attachment_loop_edges")
+        ambiguity_reason = attachment.get("attachment_ambiguity_reason")
+        traces = [mesh_trace(sealed, name="sealed", face_colors=face_color_map(new_faces, NEW_FACE_COLOR))]
+        title = f"spine {spine_id} - 1) sealed mesh (green = new faces, red = attachment loop)"
+        if loop_edges is not None:
+            traces.append(edge_segments_trace(original.vertices, loop_edges, name="attachment loop"))
+        else:
+            # attachment_ambiguous (s-module-preprocessing.md 3.5.4): no loop was
+            # chosen, so there is nothing to outline - see figure "1b" instead,
+            # which still renders every filled hole without needing one.
+            title = f"spine {spine_id} - 1) sealed mesh (green = new faces; no attachment loop - {ambiguity_reason})"
+        figures["sealed"] = make_scene_figure(traces, title=title)
+
+        hole_colors = hole_patch_face_color_map(sealed, new_faces)
+        holes_title = f"spine {spine_id} - 1b) all sealed holes, one color each (no attachment marking)"
+        if ambiguity_reason:
+            holes_title += f" - {ambiguity_reason}"
+        figures["sealed_holes"] = make_scene_figure(
+            [mesh_trace(sealed, name="sealed", face_colors=hole_colors)],
+            title=holes_title,
         )
     else:
         skip("1) sealed mesh", sealed_path)
