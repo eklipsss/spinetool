@@ -33,6 +33,15 @@ general:
                              # local fast disk for full-dataset Windows runs
                              # (see the NAS-vs-local note above)
   metadata_root: datasets
+  # Stage 2 (false-spine) runs CGAL skeletonization in a disposable subprocess per
+  # spine (spine_geometry.cgal_skeleton_segments_from_trimesh_isolated) - a hard
+  # native crash on pathological geometry (observed on the Windows full-dataset run:
+  # STATUS_HEAP_CORRUPTION, which otherwise kills a whole ProcessPoolExecutor worker
+  # and aborts the run via BrokenProcessPool) then just fails that one spine. This is
+  # the per-call timeout before the subprocess is killed and treated as crashed;
+  # normal skeletonization of a single spine mesh takes well under a second, so 120s
+  # leaves a wide margin without letting a hung call block a worker indefinitely.
+  skeleton_subprocess_timeout_s: 120.0
 
 sealing:
   # Distance to the branch skeleton raised from 0.25 to 0.4 (perimeter/area

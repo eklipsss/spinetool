@@ -1,8 +1,45 @@
-# Evaluation protocol (stage 7, not implemented yet) - recorded here so every
-# model is later evaluated identically.
-n_samples: 1000
-generation_seeds: [1, 2, 3, 4, 5]
-surface_points: 2048
-morphometrics: [OldChordDistribution, OpenAngle, CVD, AverageDistance, LengthVolumeRatio, LengthAreaRatio, JunctionArea, Length, Area, Volume, ConvexHullVolume, ConvexHullRatio]
-joint_morphometrics: [OpenAngle, CVD, AverageDistance, LengthVolumeRatio, LengthAreaRatio, Length, Area, Volume, ConvexHullVolume, ConvexHullRatio]
-univariate_metrics: [wasserstein_1, ks_statistic, energy_distance]
+# Evaluation protocol (plan stage 7) - one config for every model so all are judged identically.
+# Run on the Windows workstation:
+#   python scripts/neuron_model/evaluate_generators.py --config configs/neuron-model/evaluation/default.yaml \
+#     --model mogen_finetuned=runs/training/neuron-model/<id>/meshes \
+#     --model vae=runs/training/neuron-model/<id>/meshes \
+#     "data.manifests=['O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet']"
+defaults: [../base/experiment.yaml]
+runs_root: runs/analysis/neuron-model
+name: generator-evaluation
+
+protocol:                      # spec: 1000 samples x 5 generation seeds per model
+  n_samples: 1000
+  generation_seeds: [1, 2, 3, 4, 5]
+  mesh_kinds: [raw, postprocessed]   # evaluated separately (spec)
+
+real:
+  test_split: test               # generated sets are compared with the real TEST split
+  surface_points: 2048           # = pointcloud_2048 of the preprocessing; generated meshes sampled the same way
+  train_cloud_cache: data/interim/neuron-model/eval/train_clouds_2048.npy   # local disk! built once
+  chamfer_memorization: true     # Chamfer-DCR against the FULL train split (needs the cache)
+
+evaluation:                      # EvaluationConfig fields
+  surface_reference_size: 1000   # clouds per set for MMD-CD / COV-CD / 1-NNA-CD / diversity
+  chamfer_scale: 1.0e-3          # nm -> um^2 for readable Chamfer numbers (one global factor)
+  device: auto                   # cuda on the workstation
+  pair_chunk: 16
+  memorization_repeats: 20
+  memorization_k_candidates: 50
+  classifier_model: logistic     # or gbm
+  seed: 0
+  key_morphometrics: [Length, Volume, Area, OpenAngle, CVD]
+
+# Morphometric families (spine_morphometrics.py): 8 of 12 metrics need the attachment region.
+# Real spines keep their stage-1 region; generated meshes get one geometrically (step E,
+# evaluation/attachment.py): faces around the point where the y axis enters the mesh from
+# below whose normal is within max_tilt_deg of -y; plane-section fallback.
+morphometrics:
+  attachment_finder:
+    name: down_facing_cap          # null -> junction metrics NaN for generated sets
+    max_tilt_deg: 60.0
+    section_fallback: true
+    section_band_frac: 0.05
+    section_step_frac: 0.005
+  finder_bias_spines: 500          # finder on this many real test meshes vs stage-1 truth -> finder_bias.json (0 = off)
+  compute_chord_distribution: true

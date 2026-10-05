@@ -7,9 +7,16 @@ precision: bf16           # CUDA only; no-op on mac
 
 data:
   n_points: 8192          # MoGen resolution (reduces transfer risk)
-  # physical (nm) -> model units. Start: x_MoGen = x_um / 10 = x_nm * 1e-4 (spec).
-  # To be confirmed on the official smoke test / zero-shot (plan stage 4.1, 4.4).
-  coord_scale: 1.0e-4
+  # physical (nm) -> model units. The spec's starting guess (x_nm * 1e-4,
+  # "x_MoGen = x_um / 10") turned out ~4-5x too small - revised after comparing
+  # real spine point clouds against MoGen's own official training-set
+  # embeddings (mogen-release.web.app demo_archive.zip, emb_train_8192_train_mst.npz):
+  # matching mean_max_dist (mean pairwise point distance) and cov_eigval (PCA std)
+  # between our spines and their training distribution implies coord_scale in the
+  # 3.5e-4 to 6.5e-4 range (see s-module-implementation-plan.md "Открытые вопросы" #1
+  # for the full method and numbers) - 5e-4 is the working value until a bigger
+  # real sample (not just 10 spines) refines it further.
+  coord_scale: 5.0e-4
   jitter_std: 5.0         # nm, small Gaussian jitter; NO random rotations (local frame is meaningful)
   batch_size: 8
 

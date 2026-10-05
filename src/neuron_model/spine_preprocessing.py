@@ -23,7 +23,6 @@ import functools
 import hashlib
 import importlib.util
 import json
-import math
 import sqlite3
 import sys
 import time
@@ -42,7 +41,7 @@ from .spine_geometry import (
     atomic_export_mesh,
     boundary_edge_count,
     boundary_loops,
-    cgal_skeleton_segments_from_trimesh,
+    cgal_skeleton_segments_from_trimesh_isolated,
     detect_attachment_loop,
     distance_to_segments,
     find_attachment_cap_faces,
@@ -141,11 +140,19 @@ class SpinePreprocessingConfig:
     verbose: bool = False
     preprocessing_version: str = "v1"
     physical_unit: str = "nm"
+    # stage 2 robustness: CGAL skeletonization runs in a disposable subprocess (see
+    # spine_geometry.cgal_skeleton_segments_from_trimesh_isolated) so a native crash on
+    # one pathological mesh fails just that spine instead of killing the whole worker
+    # pool. Not a stage_hash parameter - purely a resource/timeout guard, doesn't change
+    # output, so changing it does not invalidate already-computed results.
+    skeleton_subprocess_timeout_s: float = 120.0
 
-    # stage 1: sealing / attachment loop
-    attachment_weight_perimeter: float = 0.4
-    attachment_weight_area: float = 0.35
-    attachment_weight_distance: float = 0.25
+    # stage 1: sealing / attachment loop (see data/processed/config/spine_preprocessing.yaml
+    # "sealing" for the rationale behind these specific values - distance to the
+    # branch skeleton is the strongest of the three criteria)
+    attachment_weight_perimeter: float = 0.32
+    attachment_weight_area: float = 0.28
+    attachment_weight_distance: float = 0.4
     attachment_ambiguity_ratio: float = 0.85
 
     # stage 2: false spines
@@ -214,6 +221,7 @@ class SpinePreprocessingConfig:
             metadata_root=Path(self.metadata_root).expanduser().resolve(),
             batch_size=max(1, int(self.batch_size)),
             workers=max(1, int(self.workers)),
+            skeleton_subprocess_timeout_s=float(self.skeleton_subprocess_timeout_s),
             limit=None if self.limit is None else int(self.limit),
             false_spine_threshold_nm_by_dataset=tuple((str(k), float(v)) for k, v in by_dataset),
             pointcloud_sizes=tuple(int(v) for v in self.pointcloud_sizes),
@@ -1141,8 +1149,19 @@ def _false_spine_eligibility(record: SpineRecord, cfg: SpinePreprocessingConfig,
 def _false_spine_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
     if not record.branch_skeleton_path.exists():
         raise FileNotFoundError(f"Missing branch skeleton: {record.branch_skeleton_path}")
-    sealed_mesh = timer.run("load sealed mesh", lambda: load_trimesh(sealed_mesh_path(record, cfg), process=False))
-    spine_segments = timer.run("build spine skeleton", lambda: cgal_skeleton_segments_from_trimesh(sealed_mesh))
+    # Run in an isolated subprocess, not in-process: CGAL's mean-curvature-flow
+    # skeletonization can hard-crash the whole process on pathological geometry
+    # (observed on Windows at full-dataset scale: STATUS_HEAP_CORRUPTION, which took
+    # down a ProcessPoolExecutor worker and aborted the whole run via
+    # BrokenProcessPool) instead of raising a catchable exception. Isolating it turns
+    # such a crash into an ordinary failed row for this one spine - see
+    # spine_geometry.cgal_skeleton_segments_from_trimesh_isolated.
+    spine_segments = timer.run(
+        "build spine skeleton (isolated)",
+        lambda: cgal_skeleton_segments_from_trimesh_isolated(
+            sealed_mesh_path(record, cfg), timeout=cfg.skeleton_subprocess_timeout_s
+        ),
+    )
     dendrite_segments = load_skeleton_segments_cached(record.branch_skeleton_path)
 
     def profile() -> np.ndarray:
@@ -1542,42 +1561,10 @@ def _sdf_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepT
 # ---------------------------------------------------------------------------
 
 
-def _metric_value(metric: Any) -> Any:
-    value = metric.value
-    if isinstance(value, np.ndarray):
-        return value.astype(float).tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return value
-
-
-def _safe_float(value: Any) -> Optional[float]:
-    try:
-        result = float(value)
-    except Exception:
-        return None
-    return result if math.isfinite(result) else None
-
-
 def _morphometrics_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
-    from src.spine_analysis.mesh.utils import v_f_to_mesh_isolated
-    from src.spine_analysis.shape_metric.float_metric import (
-        ConvexHullRatioSpineMetric,
-        ConvexHullVolumeSpineMetric,
-        VolumeSpineMetric,
-    )
-    from src.spine_analysis.shape_metric.histogram_metric import OldChordDistributionSpineMetric
-    from src.spine_analysis.shape_metric.junction_metric import (
-        AverageDistanceSpineMetric,
-        CVDSpineMetric,
-        LengthAreaRatioSpineMetric,
-        LengthSpineMetric,
-        LengthVolumeRatioSpineMetric,
-        OpenAngleSpineMetric,
-    )
-    from src.spine_analysis.shape_metric.utils import register_attachment_center
+    # The metric code lives in spine_morphometrics.py so generated spines (S-module
+    # evaluation) are measured by exactly the same code as real ones.
+    from .spine_morphometrics import AttachmentRegion, compute_chord_distribution, compute_scalar_metrics
 
     def load() -> Tuple[Any, Dict[str, Any]]:
         mesh = load_trimesh(local_sealed_mesh_path(record, cfg), process=False)
@@ -1585,64 +1572,18 @@ def _morphometrics_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, ti
         return mesh, attachment
 
     mesh, attachment = timer.run("load mesh", load)
-
-    def compute_scalar_metrics() -> Dict[str, Any]:
-        poly = v_f_to_mesh_isolated(np.asarray(mesh.vertices, dtype=float), np.asarray(mesh.faces, dtype=int))
-        # orient_spines_w_holes() centers the local frame on the attachment
-        # loop centroid, so that point is the origin here - the junction/
-        # attachment-center helpers in src.spine_analysis need it registered
-        # per mesh object (keyed by id()), not the original global point.
-        #
-        # This point is all these particular metrics actually use of the
-        # attachment region: OpenAngle/CVD/AverageDistance/Length(Ratio)
-        # only measure distances from `attachment_center` to every vertex
-        # (src/spine_analysis/shape_metric/junction_metric.py -
-        # JunctionSpineMetric._calculate uses _junction_center, i.e. exactly
-        # this registered point, for _surface_vectors; _calculate_junction_center
-        # returns the registered point directly rather than recomputing it).
-        # None of them touch `_junction_triangles` (the library's own,
-        # cruder "nearest face + 1-ring" attachment-region guess) - only
-        # AreaSpineMetric does, which is why "Area" is computed separately
-        # below from our own stage-1 attachment_cap_area instead of calling
-        # AreaSpineMetric: on real spines the library's own 1-ring re-guess
-        # of the attachment patch differed from our precise
-        # attachment_cap_face_indices by 40-130% in area.
-        register_attachment_center(poly, np.zeros(3, dtype=float))
-        return {
-            "OpenAngle": _metric_value(OpenAngleSpineMetric(poly)),
-            "CVD": _metric_value(CVDSpineMetric(poly)),
-            "AverageDistance": _metric_value(AverageDistanceSpineMetric(poly)),
-            "LengthVolumeRatio": _metric_value(LengthVolumeRatioSpineMetric(poly)),
-            "LengthAreaRatio": _metric_value(LengthAreaRatioSpineMetric(poly)),
-            "Length": _metric_value(LengthSpineMetric(poly)),
-            "Volume": _metric_value(VolumeSpineMetric(poly)),
-            "ConvexHullVolume": _metric_value(ConvexHullVolumeSpineMetric(poly)),
-            "ConvexHullRatio": _metric_value(ConvexHullRatioSpineMetric(poly)),
-        }
-
-    def compute_chord_distribution() -> Any:
-        # Separate step/timing: OldChordDistributionSpineMetric sptrays 3000
-        # random rays per mesh (its own fresh, unseeded random.Random()) and
-        # is by far the slowest of these metrics.
-        poly = v_f_to_mesh_isolated(np.asarray(mesh.vertices, dtype=float), np.asarray(mesh.faces, dtype=int))
-        register_attachment_center(poly, np.zeros(3, dtype=float))
-        return _metric_value(OldChordDistributionSpineMetric(poly))
-
-    values = timer.run("compute scalar metrics", compute_scalar_metrics)
-    # NOTE: OldChordDistributionSpineMetric samples its chords with an
-    # unseeded `random.Random()` inside src/spine_analysis (not modified per
-    # project convention) - this value is therefore not reproducible between
-    # runs, even for the same mesh. Stored as a best-effort snapshot; see
-    # docs/neuron-model/s-module-preprocessing.md 3.8.
-    values["OldChordDistribution"] = timer.run("compute OldChordDistribution", compute_chord_distribution)
-    values["JunctionArea"] = _safe_float(attachment.get("attachment_loop_area"))
-    # "Area" = total surface minus the attachment region - computed from our
-    # own stage-1 attachment_cap_face_indices/attachment_cap_area (exact),
-    # not AreaSpineMetric's own re-derived attachment-region guess (see the
-    # comment above compute_scalar_metrics). Area is rotation/translation
-    # invariant, so the cap area stored in attachment_region_<mesh>.json
-    # (computed on the global sealed mesh in stage 1) applies unchanged here.
-    values["Area"] = _safe_float(mesh.area - attachment.get("attachment_cap_area", 0.0))
+    # orient_spines_w_holes() centres the local frame on the attachment loop centroid, so
+    # the attachment centre is the origin here; cap/loop areas come from stage 1 (sealing)
+    # and are rotation/translation invariant, so the global-frame values apply unchanged.
+    region = AttachmentRegion(
+        center=np.zeros(3, dtype=float),
+        cap_area=attachment.get("attachment_cap_area"),
+        loop_area=attachment.get("attachment_loop_area"),
+    )
+    values = timer.run("compute scalar metrics", lambda: compute_scalar_metrics(mesh, region))
+    # Separate step/timing: the slowest metric (3000 random chords), and NOT reproducible
+    # between runs (unseeded random.Random() inside src/spine_analysis; §3.8.2).
+    values["OldChordDistribution"] = timer.run("compute OldChordDistribution", lambda: compute_chord_distribution(mesh, region))
 
     payload = {
         **record.identity,
@@ -1933,6 +1874,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-failed", dest="retry_failed_only", action="store_true", default=None)
     parser.add_argument("--verbose", action="store_true", default=None)
     parser.add_argument("--false-spine-threshold-nm", type=float)
+    parser.add_argument("--skeleton-subprocess-timeout-s", type=float)
     parser.add_argument("--allow-needs-review", action="store_true", default=None)
     parser.add_argument(
         "--include-invalid-for-orientation", dest="only_valid_for_orientation", action="store_false", default=None

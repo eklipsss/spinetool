@@ -204,8 +204,13 @@ def knn_indices(coord: torch.Tensor, k: int) -> torch.Tensor:
     """
     n = coord.shape[1]
     exclude_self = n > KNN_EXCLUDE_SELF_ABOVE
-    sq = (coord * coord).sum(-1)
-    dist = sq[:, :, None] + sq[:, None, :] - 2.0 * coord @ coord.transpose(1, 2)
+    # Direct difference (matches connectomics.jax.spatial.squared_distances), not the
+    # expand-of-squares identity (sq_a + sq_b - 2ab): the latter cancels two large,
+    # nearly-equal terms down to the tiny true distance, which is numerically unstable
+    # in fp32 and was observed to occasionally pick a different nearest neighbour than
+    # the reference JAX implementation (check_mogen_parity.py) - same asymptotic cost
+    # (still an [B, N, N] matrix), just computed in a stable order.
+    dist = ((coord[:, :, None, :] - coord[:, None, :, :]) ** 2).sum(-1)
     idx = torch.topk(-dist, k + int(exclude_self), dim=-1).indices
     return idx[..., 1:] if exclude_self else idx
 

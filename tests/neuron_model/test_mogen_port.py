@@ -74,6 +74,20 @@ def test_knn_includes_self_up_to_8192_and_excludes_above():
     assert not (knn_indices(big, 2)[0, :, 0] == torch.arange(8193)).any()
 
 
+def test_knn_matches_direct_distance_for_near_degenerate_points():
+    """Regression for the expand-of-squares distance formula (sq_a+sq_b-2ab): it cancels two
+    large, nearly-equal terms down to a tiny true distance and picked the wrong neighbour for
+    points that are almost coincident - caught by check_mogen_parity.py against the official
+    JAX model (same formula as connectomics.jax.spatial.squared_distances)."""
+    torch.manual_seed(0)
+    base = torch.randn(1, 30, 3)
+    coord = torch.cat([base, base[:, :5] + 1e-4 * torch.randn(1, 5, 3)], dim=1)  # near-duplicate points
+    direct = ((coord[:, :, None, :] - coord[:, None, :, :]) ** 2).sum(-1)
+    expand = coord.pow(2).sum(-1)[:, :, None] + coord.pow(2).sum(-1)[:, None, :] - 2.0 * coord @ coord.transpose(1, 2)
+    assert not torch.equal(torch.topk(-expand, 5, dim=-1).indices, torch.topk(-direct, 5, dim=-1).indices)
+    assert torch.equal(knn_indices(coord, 4), torch.topk(-direct, 4, dim=-1).indices)  # coord has <=8192 points -> self included, no exclusion shift
+
+
 def test_timestep_embedding_matches_formula():
     t = torch.tensor([0.0, 0.25, 1.0])
     emb = timestep_embedding(t, 8)

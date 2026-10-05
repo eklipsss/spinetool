@@ -565,6 +565,64 @@ def cgal_skeleton_segments_from_trimesh(mesh: Any) -> List[Segment]:
     return segments
 
 
+def cgal_skeleton_segments_from_trimesh_isolated(mesh_path: Path, *, timeout: float = 120.0) -> List[Segment]:
+    """Same result as :func:`cgal_skeleton_segments_from_trimesh`, but run in a throwaway
+    subprocess (``_cgal_skeletonize_worker.py``), same pattern as
+    ``src.spine_analysis.mesh.utils.v_f_to_mesh_isolated``.
+
+    ``surface_mesh_skeletonization`` is complex native code that can hard-crash the whole
+    process on pathological input instead of raising a catchable exception (observed on
+    Windows at full-dataset scale: ``STATUS_HEAP_CORRUPTION``, which took down a
+    ``ProcessPoolExecutor`` worker and aborted the whole pipeline run via
+    ``BrokenProcessPool`` - see ``CLAUDE.md``, "Этап 2 (false-spine)"). Running
+    it here turns such a crash into an ordinary ``RuntimeError`` for the one spine being
+    processed, which the stage runner already catches and records as a normal failed row.
+
+    ``mesh_path`` is read directly (no need to load the mesh into this process first).
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    worker_path = Path(__file__).with_name("_cgal_skeletonize_worker.py")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_path = Path(tmp_dir) / "skeleton.npz"
+        try:
+            result = subprocess.run(
+                [sys.executable, str(worker_path), str(mesh_path), str(output_path)],
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"cgal_skeleton_segments_from_trimesh_isolated: skeletonization of {mesh_path} "
+                f"did not finish within {timeout}s and was terminated."
+            ) from exc
+
+        if result.returncode == 1:
+            # an ordinary CGAL-level error (not closed / empty skeleton) - same wording
+            # as the in-process function, just relayed from the worker's stderr.
+            raise RuntimeError(result.stderr.strip() or "CGAL skeletonization failed.")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"cgal_skeleton_segments_from_trimesh_isolated: the worker process crashed "
+                f"(exit code {result.returncode}) while skeletonizing {mesh_path} - likely a "
+                "native crash in CGAL on pathological geometry (e.g. a Windows "
+                "STATUS_HEAP_CORRUPTION abort), not a catchable Python error. "
+                f"stderr:\n{result.stderr}"
+            )
+        if not output_path.exists():
+            raise RuntimeError(
+                "cgal_skeleton_segments_from_trimesh_isolated: worker exited cleanly but "
+                f"produced no output. stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        with np.load(output_path) as data:
+            segments_array = np.asarray(data["segments"], dtype=float)
+    return [(row[0], row[1]) for row in segments_array]
+
+
 # ---------------------------------------------------------------------------
 # Attachment loop / attachment cap (s-module-preprocessing.md, 3.1)
 # ---------------------------------------------------------------------------
