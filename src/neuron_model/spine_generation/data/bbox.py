@@ -59,9 +59,10 @@ def compute_frozen_bbox(
         raise ValueError("compute_frozen_bbox must be given the train split only")
     low = np.full(3, np.inf)
     high = np.full(3, -np.inf)
+    from ...pointcloud_io import load_points
+
     for path in train_index.frame[f"pointcloud_{n_points}_path"]:
-        with np.load(path) as data:
-            points = np.asarray(data["points"], dtype=float)
+        points = np.asarray(load_points(path, n_points, 1), dtype=float)
         low = np.minimum(low, points.min(axis=0))
         high = np.maximum(high, points.max(axis=0))
     if not np.isfinite(low).all():

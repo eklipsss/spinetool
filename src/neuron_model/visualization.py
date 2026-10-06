@@ -310,12 +310,14 @@ def visualize_spine_stage_outputs(record: Any, cfg: Any, *, show: bool = True) -
     """
     import json
 
+    from .pointcloud_io import load_pointcloud
     from .spine_geometry import find_new_faces, load_trimesh
     from .spine_preprocessing import (
         attachment_json_path,
         local_mesh_path,
         local_sealed_mesh_path,
         pointcloud_path,
+        pointclouds_path,
         sdf_samples_path,
         sealed_mesh_path,
     )
@@ -395,13 +397,17 @@ def visualize_spine_stage_outputs(record: Any, cfg: Any, *, show: bool = True) -
 
     sizes = list(cfg.pointcloud_sizes)
     n_variants = len(cfg.pointcloud_seeds)
-    first_pointcloud_path = pointcloud_path(record, cfg, sizes[0], 1) if sizes else None
+    # packed pointclouds.npz (current format) or legacy pointcloud_<n>_1.npz (older runs)
+    first_pointcloud_path = None
+    if sizes:
+        packed = pointclouds_path(record, cfg)
+        first_pointcloud_path = packed if packed.exists() else pointcloud_path(record, cfg, sizes[0], 1)
     if first_pointcloud_path is not None and first_pointcloud_path.exists():
         traces_by_cell: Dict[tuple, Any] = {}
         cell_titles: Dict[tuple, str] = {}
         for row, size in enumerate(sizes, start=1):
             for col in range(1, n_variants + 1):
-                npz = np.load(pointcloud_path(record, cfg, size, col))
+                npz = load_pointcloud(first_pointcloud_path, size, col)
                 traces_by_cell[(row, col)] = pointcloud_trace(
                     npz["points"], is_attachment_cap=npz["is_attachment_cap"], name=f"{size}/{col}"
                 )

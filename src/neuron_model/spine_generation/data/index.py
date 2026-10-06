@@ -22,6 +22,8 @@ from typing import Iterable, List, Optional, Sequence
 
 import pandas as pd
 
+from ...pointcloud_io import is_packed, legacy_variant_path
+
 KEY_COLUMNS = ("dataset", "neuron_id", "limb_id", "branch_id", "spine_id")
 PATH_COLUMNS = (
     "local_mesh_path",
@@ -33,6 +35,7 @@ PATH_COLUMNS = (
     "metadata_path",
     "morphometrics_path",
     "quality_path",
+    "pointclouds_path",  # packed point clouds (pointcloud_io.py); absent in older manifests
 )
 POINTCLOUD_SIZES = (2048, 4096, 8192)
 
@@ -46,11 +49,15 @@ def spine_relative_dir(neuron_id: str, limb_id: str, branch_id: str, spine_id: s
 
 
 def pointcloud_variant_path(variant_1_path: Path, variant: int) -> Path:
-    """``.../pointcloud_8192_1.npz`` -> ``.../pointcloud_8192_<variant>.npz``."""
+    """Legacy (per-variant files) only: ``.../pointcloud_8192_1.npz`` -> ``..._<variant>.npz``.
+
+    A packed ``pointclouds.npz`` holds every variant, so it is returned unchanged. Read
+    point clouds with ``src.neuron_model.pointcloud_io.load_pointcloud`` (handles both).
+    """
     path = Path(variant_1_path)
-    stem = path.stem  # pointcloud_<n>_1
-    prefix, _, _ = stem.rpartition("_")
-    return path.with_name(f"{prefix}_{int(variant)}{path.suffix}")
+    if is_packed(path):
+        return path
+    return legacy_variant_path(path, variant)
 
 
 def _file_name(stored: object) -> Optional[str]:
@@ -97,6 +104,7 @@ class SpineIndex:
         return SpineIndex(frame.reset_index(drop=True), self.dataset_versions)
 
     def pointcloud_path(self, row: pd.Series, n_points: int, variant: int = 1) -> Path:
+        """File holding that size/variant (the packed file, or the legacy per-variant one)."""
         return pointcloud_variant_path(Path(row[f"pointcloud_{n_points}_path"]), variant)
 
 

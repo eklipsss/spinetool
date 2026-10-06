@@ -39,14 +39,22 @@ def poisson_backend_works() -> bool:
 N_SURFACE, N_NEAR, N_UNIFORM = 20, 30, 10
 
 
-def _write_spine(root, neuron, limb, branch, spine, rng, scale):
+def _write_spine(root, neuron, limb, branch, spine, rng, scale, packed=True):
+    """``packed``: current format (one pointclouds.npz); False: legacy per-variant files."""
+    from src.neuron_model.pointcloud_io import write_pointclouds
+
     spine_dir = root / spine_relative_dir(neuron, limb, branch, spine)
     spine_dir.mkdir(parents=True)
+    clouds = {}
     for n in (2048, 4096, 8192):
         for variant in (1, 2, 3, 4):
             points = rng.normal(size=(n, 3)) * scale + variant  # variant-dependent offset
             normals = points / np.linalg.norm(points, axis=1, keepdims=True)
-            np.savez_compressed(spine_dir / f"pointcloud_{n}_{variant}.npz", points=points.astype(np.float32), normals=normals.astype(np.float32))
+            clouds[(n, variant)] = {"points": points.astype(np.float32), "normals": normals.astype(np.float32)}
+            if not packed:
+                np.savez_compressed(spine_dir / f"pointcloud_{n}_{variant}.npz", **clouds[(n, variant)])
+    if packed:
+        write_pointclouds(spine_dir / "pointclouds.npz", clouds)
     n_total = N_SURFACE + N_NEAR + N_UNIFORM
     sample_type = np.array([0] * N_SURFACE + [1] * N_NEAR + [2] * N_UNIFORM, dtype=np.uint8)
     normals = rng.normal(size=(n_total, 3)).astype(np.float32)
@@ -61,16 +69,14 @@ def _write_spine(root, neuron, limb, branch, spine, rng, scale):
     return spine_dir
 
 
-@pytest.fixture()
-def fake_dataset(tmp_path):
-    """12 neurons x 2 spines; manifest paths look like they came from the Windows workstation."""
+def _make_fake_dataset(tmp_path, packed):
     rng = np.random.default_rng(0)
     root = tmp_path / "preprocessed" / "minnie65"
     rows = []
     for n_idx in range(12):
         neuron = f"86469{n_idx:03d}"
         for spine in ("000", "001"):
-            _write_spine(root, neuron, "000", "001", spine, rng, scale=100.0 + n_idx)
+            _write_spine(root, neuron, "000", "001", spine, rng, scale=100.0 + n_idx, packed=packed)
             win_dir = f"O:\\Datasets\\Minnie65\\preprocessed\\minnie65\\{neuron}\\limb_000\\branch_001\\spines\\spine_{spine}"
             rows.append(
                 {
@@ -79,7 +85,12 @@ def fake_dataset(tmp_path):
                     "species": "mouse", "health": "healthy",
                     "cell_type_binary": "excitatory" if n_idx % 3 else "inhibitory",
                     "compartment": "apical" if n_idx % 2 else "basal",
-                    **{f"pointcloud_{n}_path": f"{win_dir}\\pointcloud_{n}_1.npz" for n in (2048, 4096, 8192)},
+                    **(
+                        {"pointclouds_path": f"{win_dir}\\pointclouds.npz",
+                         **{f"pointcloud_{n}_path": f"{win_dir}\\pointclouds.npz" for n in (2048, 4096, 8192)}}
+                        if packed
+                        else {f"pointcloud_{n}_path": f"{win_dir}\\pointcloud_{n}_1.npz" for n in (2048, 4096, 8192)}
+                    ),
                     "sdf_samples_path": f"{win_dir}\\sdf_samples.npz",
                     "local_sealed_mesh_path": f"{win_dir}\\local_sealed_spine_{spine}.off",
                     "preprocessing_version": "v1", "config_hash": "abc123",
@@ -87,3 +98,16 @@ def fake_dataset(tmp_path):
             )
     pd.DataFrame(rows).to_parquet(root / "manifest.parquet", index=False)
     return root
+
+
+@pytest.fixture()
+def fake_dataset(tmp_path):
+    """12 neurons x 2 spines, packed point clouds; manifest paths look like they came from
+    the Windows workstation."""
+    return _make_fake_dataset(tmp_path, packed=True)
+
+
+@pytest.fixture()
+def fake_dataset_legacy(tmp_path):
+    """Same, in the legacy per-variant point-cloud format (preprocessing before packed_v1)."""
+    return _make_fake_dataset(tmp_path, packed=False)

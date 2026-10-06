@@ -151,4 +151,11 @@ test/
 legacy/
 CGAL/
 datasets/
-data/
+data/*
+!data/processed/
+data/processed/*
+!data/processed/config/
+
+/trash/
+/runs/
+/models/checkpoints/

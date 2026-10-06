@@ -42,6 +42,16 @@ general:
   # normal skeletonization of a single spine mesh takes well under a second, so 120s
   # leaves a wide margin without letting a hung call block a worker indefinitely.
   skeleton_subprocess_timeout_s: 120.0
+  # Full pipeline in chunks of whole neurons: all stages + manifest for this many
+  # neurons, then the next chunk - complete neurons (usable via manifest.parquet) appear
+  # after every chunk instead of at the very end. Same total work; one process pool and
+  # one in-memory table cache for the whole run. 0 = each stage over the whole dataset.
+  neurons_per_chunk: 25
+  # Resume/eligibility trust processing_state.sqlite + the stage tables instead of
+  # stat-ing every spine's files (hours per stage on the NAS at full scale). true = also
+  # check the files on disk (in parallel, io_threads) - e.g. after deleting/moving files.
+  verify_outputs_on_resume: false
+  io_threads: 32
 
 sealing:
   # Distance to the branch skeleton raised from 0.25 to 0.4 (perimeter/area
@@ -96,6 +106,9 @@ mesh_qc:
 pointcloud_sampling:
   pointcloud_sizes: [2048, 4096, 8192]
   pointcloud_seeds: [42, 43, 44, 45]
+  # packed_v1: all sizes x seeds of a spine in one pointclouds.npz (12x fewer files on
+  # the NAS); read with src/neuron_model/pointcloud_io.load_pointcloud
+  pointcloud_format: packed_v1
 
 sdf:
   sdf_pool_size: 16384

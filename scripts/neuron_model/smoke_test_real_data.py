@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 import torch
 
+from src.neuron_model.pointcloud_io import load_points
 from src.neuron_model.spine_generation.data.bbox import compute_frozen_bbox
 from src.neuron_model.spine_generation.data.datasets import PointCloudDataset, SDFDataset, make_loader
 from src.neuron_model.spine_generation.data.index import load_spine_index
@@ -52,8 +53,7 @@ def main() -> None:
     print("\n=== real coordinate extents (local frame, physical units = nm for Minnie/H01) ===")
     extents = []
     for path in index.frame[f"pointcloud_{args.n_points}_path"]:
-        with np.load(path) as data:
-            points = np.asarray(data["points"], dtype=float)
+        points = np.asarray(load_points(path, args.n_points, 1), dtype=float)
         extents.append(points.max(axis=0) - points.min(axis=0))
     extents = np.asarray(extents)
     print(f"bounding-box size per spine (nm): min={extents.min(axis=0)} max={extents.max(axis=0)} mean={extents.mean(axis=0)}")

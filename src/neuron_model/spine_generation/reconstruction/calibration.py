@@ -76,12 +76,12 @@ def calibrate_poisson_spine(
 ) -> List[Dict[str, Any]]:
     """All (normals source, k_normal, Poisson params) candidates for one spine."""
     from ...spine_geometry import load_trimesh
-    from ..data.index import pointcloud_variant_path
+    from ...pointcloud_io import load_pointcloud
 
     reference = load_trimesh(spine["local_sealed_mesh_path"], process=False)
-    with np.load(pointcloud_variant_path(spine[f"pointcloud_{n_points}_path"], 1)) as data:
-        points = np.asarray(data["points"], dtype=np.float64)
-        true_normals = np.asarray(data["normals"], dtype=np.float64)
+    data = load_pointcloud(spine[f"pointcloud_{n_points}_path"], n_points, 1)
+    points = np.asarray(data["points"], dtype=np.float64)
+    true_normals = np.asarray(data["normals"], dtype=np.float64)
 
     sources: List[Dict[str, Any]] = []
     for k in k_normals:

@@ -19,7 +19,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
-from .index import SpineIndex, pointcloud_variant_path
+from ...pointcloud_io import load_pointcloud
+from .index import SpineIndex
 
 SAMPLE_SURFACE, SAMPLE_NEAR, SAMPLE_UNIFORM = 0, 1, 2  # spine_sampling.SAMPLE_TYPE_CODES
 
@@ -77,7 +78,7 @@ class PointCloudDataset:
         import torch
 
         variant = self._variant()
-        data = _load_npz(pointcloud_variant_path(self._paths[i], variant))
+        data = load_pointcloud(self._paths[i], self.n_points, variant)
         points = torch.from_numpy(np.asarray(data["points"], dtype=np.float32))
         if points.shape[0] != self.n_points:
             raise ValueError(f"{self._keys[i]}: expected {self.n_points} points, file has {points.shape[0]}")

@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..data.index import SpineIndex, pointcloud_variant_path
+from ...pointcloud_io import load_points
+from ..data.index import SpineIndex
 
 MESH_KINDS = ("raw", "postprocessed")
 
@@ -59,11 +60,10 @@ def load_generated_set(seed_dir: Path, mesh_kind: str = "raw") -> Tuple[List[Opt
 
 
 def load_real_clouds(index: SpineIndex, n_points: int, *, variant: int = 1) -> np.ndarray:
-    """``[n, n_points, 3]`` precomputed surface samples (``pointcloud_<n>_<variant>.npz``) of the indexed spines."""
+    """``[n, n_points, 3]`` precomputed surface samples (size ``n_points``, resampling ``variant``) of the indexed spines."""
     clouds = []
     for path in index.frame[f"pointcloud_{n_points}_path"]:
-        with np.load(pointcloud_variant_path(path, variant)) as data:
-            clouds.append(np.asarray(data["points"], dtype=np.float32))
+        clouds.append(np.asarray(load_points(path, n_points, variant), dtype=np.float32))
     return np.stack(clouds) if clouds else np.empty((0, n_points, 3), dtype=np.float32)
 
 
@@ -78,8 +78,7 @@ def build_cloud_cache(index: SpineIndex, n_points: int, out_path: Path, *, varia
     tmp = out_path.with_name(out_path.name + ".tmp.npy")
     cache = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float32, shape=(len(index), n_points, 3))
     for i, path in enumerate(index.frame[f"pointcloud_{n_points}_path"]):
-        with np.load(pointcloud_variant_path(path, variant)) as data:
-            cache[i] = data["points"]
+        cache[i] = load_points(path, n_points, variant)
     cache.flush()
     del cache
     tmp.replace(out_path)

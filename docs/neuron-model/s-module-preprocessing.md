@@ -608,6 +608,14 @@ pointcloud_8192_4.npz
 
 Каждый вариант должен формироваться одним и тем же алгоритмом area-weighted surface sampling, но с отдельным фиксированным seed.
 
+**Хранение (формат `packed_v1`, параметр `pointcloud_format`, с 2026-10).** Все 12 вариантов (3 размера × 4 seed) шипика записываются в **один** файл `pointclouds.npz`, а не в 12 отдельных файлов, перечисленных выше. Причина: на NAS полного прогона стоимость записи определяется числом создаваемых файлов (~178 файлов/с против ~10 000 локально), и 12 файлов на шипик давали ~10 млн файлов на Minnie65.
+
+- `.npz` — это zip из `.npy`-массивов с ключами `<поле>_<N>_<вариант>`: `points_8192_2`, `normals_8192_2`, `face_indices_8192_2`, `is_attachment_cap_8192_2`, `seed_8192_2`, `sampling_seed_8192_2`.
+- Читать через `src/neuron_model/pointcloud_io.load_pointcloud(path, N, вариант)`. Хелпер лениво читает только запрошенный вариант и возвращает те же поля, что раньше хранил отдельный файл.
+- Разбить пакет обратно на отдельные файлы можно через `unpack_pointclouds`.
+- Данные в старом формате (по файлу на вариант) тот же хелпер читает без изменений.
+- `pointcloud_format` входит в `stage_hash` стадии point cloud.
+
 Зафиксировать четыре значения:
 
 ```text
@@ -619,7 +627,7 @@ sampling_seed_4
 
 Конкретные значения задаются в конфигурации и не должны меняться после формирования версии датасета.
 
-Каждый файл pointcloud_<...>.npz должен содержать минимум:
+Каждый вариант (отдельный файл в старом формате или группа ключей `<поле>_<N>_<вариант>` в `pointclouds.npz`) должен содержать минимум:
 
 ```text
 points              float32 [N, 3]
@@ -1016,18 +1024,8 @@ inhibitory: BC, BPC, MC, NGC, Unsure I
                 sealed_<исходное_название_мэша>.off
                 local_sealed_<исходное_название_мэша>.off
                 attachment_region_<исходное_название_мэша>.json
-                pointcloud_2048_1.npz
-                pointcloud_2048_2.npz
-                pointcloud_2048_3.npz
-                pointcloud_2048_4.npz
-                pointcloud_4096_1.npz
-                pointcloud_4096_2.npz
-                pointcloud_4096_3.npz
-                pointcloud_4096_4.npz
-                pointcloud_8192_1.npz
-                pointcloud_8192_2.npz
-                pointcloud_8192_3.npz
-                pointcloud_8192_4.npz
+                pointclouds.npz          # все 3 размера x 4 варианта (packed_v1, см. 3.6.2);
+                                         # до 2026-10 - 12 файлов pointcloud_<N>_<вариант>.npz
                 sdf_samples.npz
                 transform_<исходное_название_мэша>.json
                 metadata.json
@@ -1076,9 +1074,9 @@ attachment_region_<mesh>.json
 — информация только об исходной области крепления и соответствующей ей искусственной крышке.
 
 ```text
-pointcloud_*.npz
+pointclouds.npz
 ```
-— канонические облака точек фиксированного размера.
+— канонические облака точек фиксированного размера, все варианты в одном файле (3.6.2).
 
 ```text
 sdf_samples.npz
@@ -1138,7 +1136,8 @@ source_path
 local_mesh_path
 sealed_mesh_path
 local_sealed_mesh_path
-pointcloud_2048_path
+pointclouds_path        # packed_v1: один файл со всеми вариантами
+pointcloud_2048_path    # packed_v1: тот же pointclouds.npz (оставлены для совместимости загрузчиков)
 pointcloud_4096_path
 pointcloud_8192_path
 sdf_samples_path

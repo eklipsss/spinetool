@@ -91,8 +91,18 @@ def _polyhedron(mesh: Any, center: Optional[np.ndarray]):
     return poly
 
 
-def compute_scalar_metrics(mesh: Any, attachment: Optional[AttachmentRegion]) -> Dict[str, Any]:
-    """Every metric except OldChordDistribution; junction metrics are ``None`` without ``attachment``."""
+def build_polyhedron(mesh: Any, attachment: Optional[AttachmentRegion]) -> Any:
+    """The CGAL Polyhedron the metrics run on (attachment centre registered). Building it
+    costs a subprocess (``v_f_to_mesh_isolated``), so callers that compute several metric
+    groups for one mesh should build it once and pass it as ``poly=``."""
+    return _polyhedron(mesh, None if attachment is None else attachment.center)
+
+
+def compute_scalar_metrics(mesh: Any, attachment: Optional[AttachmentRegion], *, poly: Any = None) -> Dict[str, Any]:
+    """Every metric except OldChordDistribution; junction metrics are ``None`` without ``attachment``.
+
+    ``poly``: a :func:`build_polyhedron` result for this mesh/attachment (built here if None).
+    """
     from src.spine_analysis.shape_metric.float_metric import (
         ConvexHullRatioSpineMetric,
         ConvexHullVolumeSpineMetric,
@@ -107,7 +117,8 @@ def compute_scalar_metrics(mesh: Any, attachment: Optional[AttachmentRegion]) ->
         OpenAngleSpineMetric,
     )
 
-    poly = _polyhedron(mesh, None if attachment is None else attachment.center)
+    if poly is None:
+        poly = build_polyhedron(mesh, attachment)
     values: Dict[str, Any] = {name: None for name in JUNCTION_METRICS}
     if attachment is not None:
         # These only use the registered attachment CENTRE (JunctionSpineMetric._calculate:
@@ -138,14 +149,17 @@ def compute_scalar_metrics(mesh: Any, attachment: Optional[AttachmentRegion]) ->
     return values
 
 
-def compute_chord_distribution(mesh: Any, attachment: Optional[AttachmentRegion] = None) -> Any:
+def compute_chord_distribution(mesh: Any, attachment: Optional[AttachmentRegion] = None, *, poly: Any = None) -> Any:
     """OldChordDistribution (slowest metric: 3000 random chords; not seeded upstream)."""
     from src.spine_analysis.shape_metric.histogram_metric import OldChordDistributionSpineMetric
 
-    return _metric_value(OldChordDistributionSpineMetric(_polyhedron(mesh, None if attachment is None else attachment.center)))
+    if poly is None:
+        poly = build_polyhedron(mesh, attachment)
+    return _metric_value(OldChordDistributionSpineMetric(poly))
 
 
 def compute_spine_morphometrics(mesh: Any, attachment: Optional[AttachmentRegion]) -> Dict[str, Any]:
-    values = compute_scalar_metrics(mesh, attachment)
-    values["OldChordDistribution"] = compute_chord_distribution(mesh, attachment)
+    poly = build_polyhedron(mesh, attachment)
+    values = compute_scalar_metrics(mesh, attachment, poly=poly)
+    values["OldChordDistribution"] = compute_chord_distribution(mesh, attachment, poly=poly)
     return values

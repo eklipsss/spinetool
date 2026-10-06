@@ -48,8 +48,14 @@ def load_trimesh(path: Path, *, process: bool = False):
     return mesh
 
 
+_CREATED_DIRS: set = set()
+
+
 def atomic_export_mesh(mesh: Any, output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # mkdir once per directory per process (each call is a round trip on the NAS)
+    if str(output_path.parent) not in _CREATED_DIRS:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _CREATED_DIRS.add(str(output_path.parent))
     tmp_path = output_path.with_name(f"{output_path.name}.tmp")
     mesh.export(str(tmp_path), file_type=output_path.suffix.lstrip(".") or None)
     tmp_path.replace(output_path)
@@ -434,6 +440,14 @@ def load_skeleton_segments(path: Path) -> List[Segment]:
     if not result:
         raise RuntimeError(f"No valid 3-D segments found in skeleton: {path}")
     return result
+
+
+@functools.lru_cache(maxsize=8192)
+def skeleton_exists_cached(path: Path) -> bool:
+    """``Path.exists`` for a branch skeleton, cached per process: the raw tree is read-only
+    during a run (s-module-preprocessing.md 2.2) and many spines share one skeleton, so
+    this saves a NAS round trip per spine and stage."""
+    return Path(path).exists()
 
 
 @functools.lru_cache(maxsize=2048)
