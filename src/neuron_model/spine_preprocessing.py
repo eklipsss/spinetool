@@ -359,11 +359,23 @@ def discover_spines(config: SpinePreprocessingConfig) -> List[SpineRecord]:
             if path.is_dir() and not path.name.startswith(".")
         ]
 
+    # Narrow the glob to exactly what --neuron-id/--limb-id/--branch-id/--spine-id ask for,
+    # instead of always walking the WHOLE raw tree and filtering records afterwards via
+    # _record_matches. On the NAS, directory listing is a network round trip per level too
+    # (dataset -> neuron -> limb -> branch -> spines/), so a single-neuron discover_spines()
+    # still walked all ~735 neurons before filtering down to one - observed to take 15+
+    # minutes for what should be a near-instant single-neuron listing.
+    neuron_segment = cfg.neuron_id if cfg.neuron_id is not None else "*"
+    limb_segment = f"limb_{_strip_prefix(cfg.limb_id, 'limb_')}" if cfg.limb_id is not None else "limb_*"
+    branch_segment = f"branch_{_strip_prefix(cfg.branch_id, 'branch_')}" if cfg.branch_id is not None else "branch_*"
+    spine_segment = f"spine_{_strip_prefix(cfg.spine_id, 'spine_')}.off" if cfg.spine_id is not None else "spine_*.off"
+    pattern = f"{neuron_segment}/{limb_segment}/{branch_segment}/spines/{spine_segment}"
+
     records: List[SpineRecord] = []
     for dataset_name, dataset_root in dataset_roots:
         if not dataset_root.exists():
             continue
-        for spine_path in sorted(dataset_root.glob("*/limb_*/branch_*/spines/spine_*.off")):
+        for spine_path in sorted(dataset_root.glob(pattern)):
             branch_path = spine_path.parent.parent
             limb_path = branch_path.parent
             neuron_path = limb_path.parent

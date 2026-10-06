@@ -211,3 +211,56 @@ def test_packed_pointclouds_roundtrip_and_unpack(tmp_path):
     legacy_first = tmp_path / "legacy" / "pointcloud_16_1.npz"
     assert np.array_equal(load_points(legacy_first, 32, 2), clouds[(32, 2)]["points"])
     assert legacy_variant_path(legacy_first, 2).name == "pointcloud_16_2.npz"
+
+
+# --- discover_spines: narrowed glob -------------------------------------------------
+
+
+def _make_raw_tree(root: Path) -> None:
+    """``<root>/minnie65/<neuron>/limb_<L>/branch_<B>/spines/spine_<S>.off``, 2 neurons x
+    2 limbs x 2 branches x 2 spines, so filters at every level have >1 candidate to narrow."""
+    dataset_root = root / "minnie65"
+    for neuron in ("n1", "n2"):
+        for limb in ("000", "001"):
+            for branch in ("000", "001"):
+                spines_dir = dataset_root / neuron / f"limb_{limb}" / f"branch_{branch}" / "spines"
+                spines_dir.mkdir(parents=True)
+                for spine in ("000", "001"):
+                    (spines_dir / f"spine_{spine}.off").write_text("OFF\n0 0 0\n")
+
+
+def test_discover_spines_glob_matches_filters_at_every_level(tmp_path):
+    _make_raw_tree(tmp_path)
+    base = dict(raw_data_root=tmp_path, dataset="minnie65")
+
+    all_records = sp.discover_spines(sp.SpinePreprocessingConfig(**base))
+    assert len(all_records) == 16
+
+    by_neuron = sp.discover_spines(sp.SpinePreprocessingConfig(**base, neuron_id="n1"))
+    assert len(by_neuron) == 8 and {r.neuron_id for r in by_neuron} == {"n1"}
+
+    by_limb = sp.discover_spines(sp.SpinePreprocessingConfig(**base, neuron_id="n1", limb_id="limb_000"))
+    assert len(by_limb) == 4 and {r.limb_id for r in by_limb} == {"000"}  # accepts with or without the "limb_" prefix
+
+    one = sp.discover_spines(sp.SpinePreprocessingConfig(**base, neuron_id="n2", limb_id="001", branch_id="000", spine_id="001"))
+    assert [r.key for r in one] == [("minnie65", "n2", "001", "000", "001")]
+
+    assert sp.discover_spines(sp.SpinePreprocessingConfig(**base, neuron_id="does-not-exist")) == []
+
+
+def test_discover_spines_neuron_filter_does_not_list_other_neurons(tmp_path, monkeypatch):
+    """The glob for one --neuron-id must not enumerate the other neuron directories at all -
+    the whole point of narrowing it (see discover_spines): on a slow NAS, listing every
+    neuron before filtering is what made a single-neuron run take 15+ minutes."""
+    _make_raw_tree(tmp_path)
+    listed = []
+    original = Path.iterdir
+
+    def tracking_iterdir(self):
+        listed.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "iterdir", tracking_iterdir)
+    records = sp.discover_spines(sp.SpinePreprocessingConfig(raw_data_root=tmp_path, dataset="minnie65", neuron_id="n1"))
+    assert len(records) == 8
+    assert not any(p.name == "n2" for p in listed)
