@@ -396,3 +396,20 @@ def test_move_staged_tree_moves_files_and_cleans_up(tmp_path):
     assert (final_root / "n1" / "spine_001" / "metadata.json").read_text() == "{}"
     assert not (final_root / "n1" / "spine_000" / "x.json.tmp").exists()
     assert not staged.exists() and sp._staged_root_dirs(tmp_path / "staging") == []
+
+
+def test_append_after_parts_dir_was_removed_in_the_same_process(tmp_path):
+    """Regression: a prior call in the same process (e.g. an earlier notebook cell) can
+    compact and delete a table's parts dir; _ensure_dir's per-process cache must not make
+    the next append() believe that directory still exists."""
+    path = tmp_path / "errors.parquet"
+    record = _record(tmp_path)
+    sp._append_table_part(path, [_row(record, status="failed")])
+    parts_dir = sp._table_parts_dir(path)
+    assert str(parts_dir) not in sp._CREATED_DIRS  # no longer cached as existing
+    assert parts_dir.is_dir()
+    sp._remove_table_parts(path)  # simulates compaction: deletes the dir
+    assert not parts_dir.exists()
+    # a later call in the SAME process (same _CREATED_DIRS) must recreate it, not crash
+    sp._append_table_part(path, [_row(record, status="needs_review")])
+    assert len(sp._read_table_rows(path)) == 1

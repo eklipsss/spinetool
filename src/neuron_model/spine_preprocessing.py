@@ -531,14 +531,23 @@ def _with_parent_dir(path: Path, write: Callable[[], Any]) -> Any:
     """Run ``write`` and create ``path.parent`` only if the write fails for lack of it.
 
     Spine directories are created by stage 1 (seal); every later stage writes into a
-    directory that already exists, so an up-front ``mkdir`` is a wasted NAS round trip
-    per file. Optimistic write first, ``mkdir`` + retry only on ``FileNotFoundError``.
-    (``mkdir`` directly, not through the per-process cache of :func:`_ensure_dir`: staging
-    directories are deleted after their files are moved, so a cached "exists" can be stale.)
+    directory that already exists, so an up-front ``mkdir`` is a wasted NAS round trip per
+    file. Optimistic write first, ``mkdir`` + retry only if it turns out the directory is
+    missing. (``mkdir`` directly, not through the per-process cache of :func:`_ensure_dir`:
+    a part/staging directory can be deleted mid-process - by compaction, or by an earlier
+    call in the same Python process/kernel, e.g. an earlier notebook cell - and the cache
+    does not know that, so it would wrongly skip mkdir and this write would fail with the
+    directory genuinely gone.)
+
+    Catches plain ``OSError``, not just ``FileNotFoundError``: ``open()``/``Path.write_text``
+    raise ``FileNotFoundError`` for a missing parent, but ``DataFrame.to_parquet`` raises a
+    bare ``OSError`` with its own "non-existent directory" message instead. Either way we
+    only act when ``path.parent`` is confirmed missing; any other ``OSError`` re-raises
+    untouched.
     """
     try:
         return write()
-    except FileNotFoundError:
+    except OSError:
         if Path(path).parent.exists():
             raise  # missing for another reason (e.g. the source of a rename) - not ours to fix
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -730,10 +739,15 @@ def _append_table_part(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     if not rows:
         return
     parts_dir = _table_parts_dir(path)
-    _ensure_dir(parts_dir)
     part = parts_dir / f"part-{time.time_ns():020d}-{os.getpid()}.parquet"
     tmp_path = part.with_name(f"{part.name}.tmp")
-    pd.DataFrame([_jsonable(row) for row in rows]).to_parquet(tmp_path, index=False)
+    frame = pd.DataFrame([_jsonable(row) for row in rows])
+    # Optimistic write, not _ensure_dir: a part directory is deleted by compaction (possibly
+    # by an EARLIER call in this same process/kernel - e.g. a notebook test cell run before
+    # the real pipeline cell), and _ensure_dir's per-process cache does not know that, so it
+    # would skip mkdir and this write would fail with the directory genuinely gone. See
+    # _with_parent_dir.
+    _with_parent_dir(tmp_path, lambda: frame.to_parquet(tmp_path, index=False))
     tmp_path.replace(part)
 
 
@@ -747,6 +761,7 @@ def _remove_table_parts(path: Path) -> None:
             parts_dir.rmdir()
         except OSError:
             pass
+    _CREATED_DIRS.discard(str(parts_dir))  # defense in depth: see _append_table_part
 
 
 def _write_frame_atomic(frame: pd.DataFrame, path: Path) -> None:

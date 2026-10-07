@@ -159,3 +159,4 @@ data/processed/*
 /trash/
 /runs/
 /models/checkpoints/
+/spinetool_staging/
