@@ -52,6 +52,17 @@ general:
   # check the files on disk (in parallel, io_threads) - e.g. after deleting/moving files.
   verify_outputs_on_resume: false
   io_threads: 32
+  # Stages 5-9 (QC, point cloud, SDF, morphometrics, metadata) as ONE worker task per spine:
+  # the spine's mesh / attachment JSON are read once instead of once per stage. Same
+  # tables, journal and outputs as running them separately (false = old behaviour).
+  fuse_stages: true
+  # Local staging for the fused stages' outputs: workers write to this folder (a fast local
+  # disk, e.g. C:\spinetool_staging), a background mover moves each finished chunk to the
+  # final (NAS) location while the next chunk computes; leftovers of an interrupted run are
+  # moved first on the next start. null = write straight to the final location.
+  staging_root: null
+  staging_max_gb: 200          # pause before the next chunk while more than this is still waiting to be moved
+  staging_move_threads: 8      # parallel file copies to the NAS
 
 sealing:
   # Distance to the branch skeleton raised from 0.25 to 0.4 (perimeter/area

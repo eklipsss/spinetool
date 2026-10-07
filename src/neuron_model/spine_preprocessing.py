@@ -18,12 +18,16 @@ other stages. Every spine keeps all its artifacts in
 from __future__ import annotations
 
 import argparse
+import contextlib
+import copy
 import dataclasses
 import functools
 import hashlib
 import importlib.util
 import json
 import os
+import queue
+import shutil
 import sqlite3
 import threading
 import sys
@@ -32,7 +36,7 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -162,6 +166,16 @@ class SpinePreprocessingConfig:
     # (+ manifest) before moving on, so complete neurons appear early; 0 = every stage over
     # the whole dataset at once. Not a stage_hash parameter.
     neurons_per_chunk: int = 25
+    # Stages 5-9 (QC, point cloud, SDF, morphometrics, metadata) as ONE worker task per
+    # spine (run_fused_stages): the spine's mesh / JSON are read once instead of once per
+    # stage. Same tables / journal / outputs as running them separately.
+    fuse_stages: bool = True
+    # Local staging for the fused stages' outputs (e.g. a folder on C:): workers write
+    # there, a background mover moves each finished chunk to the final (NAS) location while
+    # the next chunk computes. None = write straight to the final location.
+    staging_root: Optional[Path] = None
+    staging_max_gb: float = 200.0      # pause before the next chunk while more is still waiting to be moved
+    staging_move_threads: int = 8      # parallel file copies to the NAS
 
     # stage 1: sealing / attachment loop (see data/processed/config/spine_preprocessing.yaml
     # "sealing" for the rationale behind these specific values - distance to the
@@ -243,6 +257,9 @@ class SpinePreprocessingConfig:
             workers=max(1, int(self.workers)),
             io_threads=max(1, int(self.io_threads)),
             neurons_per_chunk=max(0, int(self.neurons_per_chunk)),
+            staging_root=None if self.staging_root is None else Path(self.staging_root).expanduser().resolve(),
+            staging_max_gb=float(self.staging_max_gb),
+            staging_move_threads=max(1, int(self.staging_move_threads)),
             skeleton_subprocess_timeout_s=float(self.skeleton_subprocess_timeout_s),
             limit=None if self.limit is None else int(self.limit),
             false_spine_threshold_nm_by_dataset=tuple((str(k), float(v)) for k, v in by_dataset),
@@ -510,31 +527,128 @@ def _ensure_dir(path: Path) -> None:
         _CREATED_DIRS.add(key)
 
 
+def _with_parent_dir(path: Path, write: Callable[[], Any]) -> Any:
+    """Run ``write`` and create ``path.parent`` only if the write fails for lack of it.
+
+    Spine directories are created by stage 1 (seal); every later stage writes into a
+    directory that already exists, so an up-front ``mkdir`` is a wasted NAS round trip
+    per file. Optimistic write first, ``mkdir`` + retry only on ``FileNotFoundError``.
+    (``mkdir`` directly, not through the per-process cache of :func:`_ensure_dir`: staging
+    directories are deleted after their files are moved, so a cached "exists" can be stale.)
+    """
+    try:
+        return write()
+    except FileNotFoundError:
+        if Path(path).parent.exists():
+            raise  # missing for another reason (e.g. the source of a rename) - not ours to fix
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        return write()
+
+
+# ---------------------------------------------------------------------------
+# Per-spine I/O scope (fused stages 5-9) and local staging
+# ---------------------------------------------------------------------------
+#
+# The fused stages (QC, point cloud, SDF, morphometrics, metadata) run as ONE worker call
+# per spine. Inside that call every stage reads the same local_sealed mesh and the same
+# attachment JSON; the scope memoises them (and JSON written by an earlier stage of the
+# same call, e.g. quality_*.json written by QC and updated by SDF), so each is read from
+# the NAS once per spine instead of once per stage.
+#
+# With staging on, writes for a path inside the final preprocessed root go to the same
+# relative path under a local staging directory (``staging_root/<dataset>/chunk_<k>``);
+# a background mover then moves each finished chunk to the NAS. Table rows / manifest
+# always record the FINAL paths.
+
+_IO_SCOPE: Optional[Dict[str, Any]] = None
+
+
+@contextlib.contextmanager
+def _spine_io_scope(staging: Optional[Tuple[str, str]] = None) -> Iterator[None]:
+    """``staging``: ``(final_preprocessed_root, staging_dir)`` or None."""
+    global _IO_SCOPE
+    previous = _IO_SCOPE
+    _IO_SCOPE = {"meshes": {}, "json": {}, "staging": staging}
+    try:
+        yield
+    finally:
+        _IO_SCOPE = previous
+
+
+def _staged_path(path: Path) -> Path:
+    """Where a write to ``path`` actually goes (the staging copy when staging is on)."""
+    scope = _IO_SCOPE
+    if scope is None or scope["staging"] is None:
+        return Path(path)
+    final_root, staging_dir = scope["staging"]
+    try:
+        relative = Path(path).relative_to(final_root)
+    except ValueError:
+        return Path(path)
+    return Path(staging_dir) / relative
+
+
+def _read_source(path: Path) -> Path:
+    """The staged copy if this call already wrote one, else the final path."""
+    staged = _staged_path(path)
+    if staged != Path(path) and staged.exists():
+        return staged
+    return Path(path)
+
+
+def _load_mesh(path: Path) -> Any:
+    """``load_trimesh(path, process=False)``, memoised within a spine I/O scope."""
+    scope = _IO_SCOPE
+    if scope is None:
+        return load_trimesh(path, process=False)
+    key = str(path)
+    if key not in scope["meshes"]:
+        scope["meshes"][key] = load_trimesh(_read_source(Path(path)), process=False)
+    return scope["meshes"][key]
+
+
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    _ensure_dir(path.parent)
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as fd:
-        json.dump(_jsonable(payload), fd, ensure_ascii=False, indent=2)
-    tmp_path.replace(path)
+    target = _staged_path(path)
+    tmp_path = target.with_name(f"{target.name}.tmp")
+    data = _jsonable(payload)
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    _with_parent_dir(target, lambda: tmp_path.write_text(text, encoding="utf-8"))
+    tmp_path.replace(target)
+    if _IO_SCOPE is not None:
+        _IO_SCOPE["json"][str(path)] = copy.deepcopy(data)
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as fd:
-        return json.load(fd)
+    scope = _IO_SCOPE
+    if scope is not None and str(path) in scope["json"]:
+        return copy.deepcopy(scope["json"][str(path)])
+    source = _read_source(Path(path)) if scope is not None else Path(path)
+    with source.open("r", encoding="utf-8") as fd:
+        data = json.load(fd)
+    if scope is not None:
+        scope["json"][str(path)] = copy.deepcopy(data)
+    return data
 
 
 def _update_json_atomic(path: Path, updates: Mapping[str, Any]) -> None:
-    payload = _read_json(path) if path.exists() else {}
+    try:  # no separate exists() round trip: a missing file is just an empty payload
+        payload = _read_json(path)
+    except FileNotFoundError:
+        payload = {}
     payload.update(_jsonable(updates))
     _write_json_atomic(path, payload)
 
 
 def _write_npz_atomic(path: Path, **arrays: Any) -> None:
-    _ensure_dir(path.parent)
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    with tmp_path.open("wb") as fd:
-        np.savez_compressed(fd, **arrays)
-    tmp_path.replace(path)
+    target = _staged_path(path)
+    tmp_path = target.with_name(f"{target.name}.tmp")
+
+    def write() -> None:
+        with tmp_path.open("wb") as fd:
+            np.savez_compressed(fd, **arrays)
+
+    _with_parent_dir(target, write)
+    tmp_path.replace(target)
 
 
 def _write_table(
@@ -657,24 +771,40 @@ class _TableCache:
     def __init__(self) -> None:
         self._frames: Dict[str, List[pd.DataFrame]] = {}
         self._merged: Dict[str, pd.DataFrame] = {}
+        # spine keys of the merged frame's rows, in row order (kept incrementally on append,
+        # so lookups for a chunk don't rebuild 5-column keys over the whole table each time)
+        self._keys: Dict[str, List[Tuple[str, ...]]] = {}
+
+    def _load(self, key: str, path: Path) -> None:
+        if key not in self._frames:
+            self._frames[key] = [f for f in _read_table_frames(path) if len(f)]
 
     def frame(self, path: Path) -> pd.DataFrame:
         key = str(path)
-        if key not in self._frames:
-            self._frames[key] = _read_table_frames(path)
+        self._load(key, path)
         if key not in self._merged:
-            frames = [f for f in self._frames[key] if len(f)]
-            self._merged[key] = pd.concat(frames, ignore_index=True) if len(frames) > 1 else (frames[0] if frames else pd.DataFrame())
+            frames = self._frames[key]
+            merged = pd.concat(frames, ignore_index=True) if len(frames) > 1 else (frames[0] if frames else pd.DataFrame())
+            self._merged[key] = merged
+            self._frames[key] = [merged] if len(merged) else []  # don't hold the pieces AND the concat
         return self._merged[key]
+
+    def keys(self, path: Path) -> List[Tuple[str, ...]]:
+        key = str(path)
+        if key not in self._keys:
+            self._keys[key] = _frame_keys(self.frame(path))
+        return self._keys[key]
 
     def append(self, path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         if not rows:
             return
         key = str(path)
-        if key not in self._frames:
-            self._frames[key] = _read_table_frames(path)
-        self._frames[key].append(pd.DataFrame([_jsonable(row) for row in rows]))
+        self._load(key, path)
+        new = pd.DataFrame([_jsonable(row) for row in rows])
+        self._frames[key].append(new)
         self._merged.pop(key, None)
+        if key in self._keys:
+            self._keys[key] = self._keys[key] + _frame_keys(new)
 
     def deduplicated(self, path: Path) -> pd.DataFrame:
         frame = self.frame(path)
@@ -683,12 +813,18 @@ class _TableCache:
         return frame.drop_duplicates(subset=list(_KEY_COLUMNS), keep="last").reset_index(drop=True)
 
 
-def _rows_for_keys(frame: pd.DataFrame, keys: Iterable[Tuple[str, ...]]) -> Dict[Tuple[str, ...], Dict[str, Any]]:
-    """Rows of ``frame`` whose spine key is in ``keys`` (later duplicates win)."""
+def _rows_for_keys(
+    frame: pd.DataFrame,
+    keys: Iterable[Tuple[str, ...]],
+    frame_keys: Optional[Sequence[Tuple[str, ...]]] = None,
+) -> Dict[Tuple[str, ...], Dict[str, Any]]:
+    """Rows of ``frame`` whose spine key is in ``keys`` (later duplicates win).
+    ``frame_keys``: precomputed keys of ``frame``'s rows (e.g. :meth:`_TableCache.keys`)."""
     if not len(frame):
         return {}
     wanted = set(keys)
-    positions = [i for i, key in enumerate(_frame_keys(frame)) if key in wanted]
+    all_keys = _frame_keys(frame) if frame_keys is None else frame_keys
+    positions = [i for i, key in enumerate(all_keys) if key in wanted]
     rows: Dict[Tuple[str, ...], Dict[str, Any]] = {}
     for row in frame.iloc[positions].to_dict(orient="records"):
         rows[_row_key(row)] = row
@@ -990,12 +1126,38 @@ def _state_from_row(row: Mapping[str, Any]) -> str:
     return status if status in {STATUS_SUCCESS, STATUS_NEEDS_REVIEW, STATUS_SKIPPED, STATUS_FAILED} else STATUS_SUCCESS
 
 
+def _fmt_duration(seconds: float) -> str:
+    seconds = float(seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, sec = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}m {sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {sec:02d}s"
+
+
+# Above this many neurons a journal query by neuron (primary-key probes) is no cheaper than
+# one sequential "WHERE stage=?" scan, so the whole stage is read instead.
+_JOURNAL_NEURON_FILTER_MAX = 200
+
+
 def _print_summary(stage: str, dataset_root: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     statuses = pd.Series([row.get("status") for row in rows], dtype=object).value_counts(dropna=False)
     print(f"\n[{stage}] {dataset_root}")
     print(f"  Processed:           {len(rows)}")
     for status, count in statuses.items():
         print(f"  {str(status):<20} {int(count)}")
+
+
+def _warm_up_worker_kernels() -> None:
+    """Compile numba kernels once in the main process (cached on disk) before a pool starts."""
+    from .spine_sampling import warm_up_winding_kernel
+
+    try:
+        warm_up_winding_kernel()
+    except Exception as exc:  # never block a run on this; workers fall back / compile themselves
+        print(f"[warm-up] numba winding kernel unavailable ({type(exc).__name__}: {exc}); numpy fallback")
 
 
 def run_stage(
@@ -1026,29 +1188,37 @@ def run_stage(
 
     own_executor = executor is None and cfg.workers > 1
     if own_executor:
+        _warm_up_worker_kernels()
         executor = ProcessPoolExecutor(max_workers=cfg.workers)
     result_rows: List[Dict[str, Any]] = []
     try:
         for root, group in groups.items():
+            stage_started = time.time()
             _ensure_dir(root)
             table_path = root / spec.table
             group_keys = [record.key for record in group]
+            # only this group's rows are needed: outputs go to part files and the full
+            # table is rebuilt from disk/cache at compaction
             if cache is not None:
-                rows_by_key = _rows_for_keys(cache.frame(table_path), group_keys)
+                rows_by_key = _rows_for_keys(cache.frame(table_path), group_keys, cache.keys(table_path))
             else:
-                rows_by_key = _read_table_rows(table_path)
-            store = ProcessingStateStore(root / "processing_state.sqlite")
+                rows_by_key = _rows_for_keys(_read_table_frame(table_path), group_keys)
             context: Dict[str, Any] = {"root": root, "_lock": threading.Lock(), "cache": cache}
             touched: List[Tuple[str, ...]] = []
             todo: List[SpineRecord] = []
-            # One query for the whole root instead of one per record - matters
-            # once a dataset has tens of thousands of spines (full Minnie/H01
-            # on the Windows workstation; see docs/neuron-model/
-            # windows-workstation-specs.md for the target hardware profile).
-            neurons = sorted({(record.dataset, record.neuron_id) for record in group})
-            # a subset of a dataset (chunk / --neuron-id): read only those neurons' journal pages
-            all_states = store.get_all_states(spec.name, neurons=neurons if cache is not None else None)
+            timings = {"load": 0.0, "scan": 0.0, "process": 0.0, "compact": 0.0}
+            store = ProcessingStateStore(root / "processing_state.sqlite")
             try:
+                # One query for the whole root instead of one per record - matters
+                # once a dataset has tens of thousands of spines (full Minnie/H01
+                # on the Windows workstation; see docs/neuron-model/
+                # windows-workstation-specs.md for the target hardware profile).
+                # A subset (chunk / --neuron-id): only those neurons' journal pages.
+                neurons = sorted({(record.dataset, record.neuron_id) for record in group})
+                all_states = store.get_all_states(
+                    spec.name, neurons=neurons if len(neurons) <= _JOURNAL_NEURON_FILTER_MAX else None
+                )
+                timings["load"] = time.time() - stage_started
                 # Pre-scan: decide what to (re)process. Eligibility and "already done" come
                 # from the stage tables + state journal (in-memory lookups) - no per-spine
                 # NAS round trips unless verify_outputs_on_resume, in which case the file
@@ -1061,18 +1231,21 @@ def run_stage(
                 todo_index: List[int] = []
                 for index, (record, reason) in enumerate(zip(group, reasons)):
                     touched.append(record.key)
+                    state = all_states.get(record.key)
                     if reason is not None:
                         previous = rows_by_key.get(record.key)
-                        if not (
+                        unchanged = (
                             previous is not None
                             and previous.get("status") == STATUS_SKIPPED
                             and previous.get("reason") == reason
-                        ):
+                        )
+                        if not unchanged:
                             rows_by_key[record.key] = {**_base_row(record), "status": STATUS_SKIPPED, "reason": reason}
                             changed_rows.append(rows_by_key[record.key])
-                        store.mark(record, spec.name, STATUS_SKIPPED, error=reason, config_hash=stage_hash, commit=False)
+                        # journal write only if something changed (skips are re-derived every run)
+                        if not (unchanged and state == (STATUS_SKIPPED, ALGORITHM_VERSION, stage_hash)):
+                            store.mark(record, spec.name, STATUS_SKIPPED, error=reason, config_hash=stage_hash, commit=False)
                         continue
-                    state = all_states.get(record.key)
                     if cfg.retry_failed_only:
                         if state is not None and state[0] == STATUS_FAILED:
                             todo_index.append(index)
@@ -1093,12 +1266,15 @@ def run_stage(
                 _append_table_part(table_path, changed_rows)
                 if cache is not None:
                     cache.append(table_path, changed_rows)
+                timings["scan"] = time.time() - scan_started
                 print(
-                    f"[{spec.cli_name}] scan done in {time.time() - scan_started:.1f}s: "
+                    f"[{spec.cli_name}] scan done in {_fmt_duration(timings['scan'])} "
+                    f"(tables + journal loaded in {_fmt_duration(timings['load'])}): "
                     f"{len(todo)} to process, {len(done_candidates) - n_missing_outputs} already done, "
                     f"{sum(r is not None for r in reasons)} skipped",
                     flush=True,
                 )
+                process_started = time.time()
 
                 progress = _progress(len(todo), f"{spec.cli_name} [{root.parent.name}]")
                 counters = {STATUS_SUCCESS: 0, STATUS_FAILED: 0, STATUS_NEEDS_REVIEW: 0}
@@ -1183,19 +1359,499 @@ def run_stage(
                         )
                 if progress is not None:
                     progress.close()
+                timings["process"] = time.time() - process_started
             finally:
                 store.close()
 
             if compact:
+                compact_started = time.time()
                 _compact_stage_table(spec, cfg, root, group[0].dataset_root, cache=cache)
+                timings["compact"] = time.time() - compact_started
             group_rows = [rows_by_key[key] for key in touched if key in rows_by_key]
             _print_summary(spec.cli_name, group[0].dataset_root, group_rows)
+            print(
+                f"  time:                {_fmt_duration(time.time() - stage_started)} "
+                f"(load {_fmt_duration(timings['load'])}, scan {_fmt_duration(timings['scan'])}, "
+                f"process {_fmt_duration(timings['process'])}"
+                + (f" = {len(todo) / timings['process']:.1f} spines/s" if todo and timings["process"] > 0 else "")
+                + (f", compact {_fmt_duration(timings['compact'])}" if compact else "")
+                + ")",
+                flush=True,
+            )
             result_rows.extend(group_rows)
     finally:
         if own_executor and executor is not None:
             executor.shutdown()
 
     return pd.DataFrame([_jsonable(row) for row in result_rows])
+
+
+# ---------------------------------------------------------------------------
+# Local staging -> final location mover
+# ---------------------------------------------------------------------------
+
+_STAGING_MARKER = "_FINAL_ROOT.txt"  # in every staged root dir: the final preprocessed root it mirrors
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for dirpath, _, filenames in os.walk(path):
+        for name in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total
+
+
+def _staged_root_dirs(staging_root: Path) -> List[Path]:
+    """Every staged root dir (``<staging_root>/<chunk>/<dataset>``) that still has a marker."""
+    if not Path(staging_root).is_dir():
+        return []
+    return sorted(marker.parent for marker in Path(staging_root).glob(f"*/*/{_STAGING_MARKER}"))
+
+
+def _move_staged_tree(staged_dir: Path, threads: int) -> Tuple[int, int, float]:
+    """Move every file of ``staged_dir`` to the final root named in its marker; atomic per
+    file (copy to ``<name>.moving`` next to the target, rename, then delete the source).
+    Returns ``(n_files, n_bytes, seconds)``."""
+    started = time.time()
+    staged_dir = Path(staged_dir)
+    final_root = Path((staged_dir / _STAGING_MARKER).read_text(encoding="utf-8").strip())
+    files = [
+        p for p in staged_dir.rglob("*")
+        if p.is_file() and p.name != _STAGING_MARKER and not p.name.endswith(".tmp")
+    ]
+
+    def move(src: Path) -> int:
+        size = src.stat().st_size
+        dst = final_root / src.relative_to(staged_dir)
+        tmp = dst.with_name(f"{dst.name}.moving")
+        _with_parent_dir(tmp, lambda: shutil.copyfile(src, tmp))
+        os.replace(tmp, dst)
+        src.unlink()
+        return size
+
+    with ThreadPoolExecutor(max_workers=max(1, int(threads))) as pool:
+        n_bytes = sum(pool.map(move, files))
+    for leftover in staged_dir.rglob("*.tmp"):  # half-written scratch of an interrupted worker
+        leftover.unlink(missing_ok=True)
+    (staged_dir / _STAGING_MARKER).unlink(missing_ok=True)
+    for directory in sorted((p for p in staged_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    for directory in (staged_dir, staged_dir.parent):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return len(files), n_bytes, time.time() - started
+
+
+class _StagingMover:
+    """Moves staged root dirs to their final location in ONE background (daemon) thread,
+    in submission order, while the pipeline computes the next chunk. A failed move is
+    reported and left in staging; the next run moves leftovers before it starts."""
+
+    def __init__(self, threads: int) -> None:
+        self.threads = max(1, int(threads))
+        self.errors: List[str] = []
+        self.moved_files = 0
+        self.moved_bytes = 0
+        self.busy_seconds = 0.0
+        self._queue: "queue.Queue[Optional[Path]]" = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="staging-mover", daemon=True)
+        self._thread.start()
+
+    def submit(self, staged_dir: Path) -> None:
+        self._queue.put(Path(staged_dir))
+
+    def _run(self) -> None:
+        while True:
+            staged_dir = self._queue.get()
+            try:
+                if staged_dir is None:
+                    return
+                n_files, n_bytes, seconds = _move_staged_tree(staged_dir, self.threads)
+                self.moved_files += n_files
+                self.moved_bytes += n_bytes
+                self.busy_seconds += seconds
+                rate = n_bytes / seconds / 1e6 if seconds > 0 else 0.0
+                print(
+                    f"[staging] moved {n_files} files ({n_bytes / 1e9:.2f} GB) of {staged_dir.parent.name} "
+                    f"to the final location in {_fmt_duration(seconds)} ({rate:.1f} MB/s)",
+                    flush=True,
+                )
+            except Exception as exc:  # keep the thread alive; leftovers are retried next run
+                self.errors.append(f"{staged_dir}: {type(exc).__name__}: {exc}")
+                print(f"[staging] WARNING: moving {staged_dir} failed ({type(exc).__name__}: {exc}); "
+                      "it stays in staging and is moved at the start of the next run", flush=True)
+            finally:
+                self._queue.task_done()
+
+    def pending(self) -> int:
+        return self._queue.unfinished_tasks
+
+    def wait_for_progress(self, poll: float = 0.5) -> None:
+        """Block until at least one queued move job has finished (or none is pending)."""
+        start = self._queue.unfinished_tasks
+        while start and self._queue.unfinished_tasks >= start:
+            time.sleep(poll)
+
+    def wait(self) -> None:
+        self._queue.join()
+
+    def close(self) -> None:
+        self._queue.put(None)
+
+
+# ---------------------------------------------------------------------------
+# Fused stages 5-9: one worker call per spine
+# ---------------------------------------------------------------------------
+#
+# QC, point cloud, SDF, morphometrics and metadata run as ONE task per spine instead of five
+# separate passes over the chunk. Inside the task the stages share the spine's mesh / JSON
+# reads (_spine_io_scope), and each stage keeps its own table, journal state, stage_hash,
+# eligibility and resume semantics - the rows are exactly what the separate stages write.
+#
+# Stages 6-8 depend on the spine's QC status. When QC itself runs in the same task their
+# quality condition is checked in the worker right after QC ("gated" actions); a stage that
+# is already done is re-checked against the new QC status too, as running the stages one
+# after another would do.
+
+FUSED_STAGES = (STAGE_QC, STAGE_POINTCLOUD, STAGE_SDF, STAGE_MORPHOMETRICS, STAGE_METADATA)
+_ACTION_RUN = "run"
+_ACTION_GATED_RUN = "gated_run"  # run if the QC status from this task allows it
+_ACTION_GATED_DONE = "gated_done"  # already done; turns into a skip if the new QC status does not allow it
+
+
+def _execute_fused_worker(
+    plan: Sequence[Tuple[str, str]],
+    record: SpineRecord,
+    cfg: SpinePreprocessingConfig,
+    staging: Optional[Tuple[str, str]] = None,
+) -> Dict[str, Any]:
+    """Top-level (picklable). ``plan`` = ``[(stage, action), ...]`` in pipeline order.
+    Returns per-stage outcomes (as :func:`_execute_stage_worker`, or ``{"skip_reason"}``)
+    plus the QC status produced by this task (None if QC did not run here)."""
+    outcomes: Dict[str, Dict[str, Any]] = {}
+    quality: Any = None
+    with _spine_io_scope(staging):
+        for stage, action in plan:
+            if action == _ACTION_GATED_DONE:
+                continue
+            if action == _ACTION_GATED_RUN:
+                reason = _quality_reason(quality, cfg)
+                if reason is not None:
+                    outcomes[stage] = {"skip_reason": reason}
+                    continue
+            outcome = _execute_stage_worker(stage, record, cfg)
+            outcomes[stage] = outcome
+            if stage == STAGE_QC:
+                quality = STATUS_FAILED if outcome["error"] is not None else outcome["row"].get("status")
+    return {"outcomes": outcomes, "quality": quality}
+
+
+def _map_records(fn: Callable[[SpineRecord], Any], records: Sequence[SpineRecord], cfg: SpinePreprocessingConfig) -> List[Any]:
+    """``fn`` over records; threaded when its file checks hit the network (verify mode)."""
+    if not cfg.verify_outputs_on_resume or len(records) < 2:
+        return [fn(record) for record in records]
+    with ThreadPoolExecutor(max_workers=cfg.io_threads) as pool:
+        return list(pool.map(fn, records))
+
+
+def run_fused_stages(
+    config: SpinePreprocessingConfig,
+    records: Optional[Sequence[SpineRecord]] = None,
+    *,
+    stages: Sequence[str] = FUSED_STAGES,
+    executor: Optional[ProcessPoolExecutor] = None,
+    compact: bool = True,
+    cache: Optional[_TableCache] = None,
+    staging_dir: Optional[Path] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Run ``stages`` (a subset of stages 5-9) with ONE worker task per spine.
+
+    Same tables, journal, resume, eligibility and outputs as running :func:`run_stage` for
+    each stage in turn; only the scheduling differs. ``staging_dir``: write this call's
+    outputs under ``staging_dir`` (mirroring the preprocessed root) instead of the final
+    location - the caller moves them later (see :class:`_StagingMover`).
+    """
+    cfg = config.normalized()
+    records = list(discover_spines(cfg) if records is None else records)
+    wanted = set(stages)
+    if not wanted <= set(FUSED_STAGES):
+        raise ValueError(f"only stages {FUSED_STAGES} can be fused, got {sorted(wanted - set(FUSED_STAGES))}")
+    stages = [stage for stage in PIPELINE_ORDER if stage in wanted]
+    specs = {stage: STAGES[stage] for stage in stages}
+    hashes = {stage: cfg.stage_hash(stage) for stage in stages}
+    label = "+".join(specs[stage].cli_name for stage in stages)
+    qc_fused = STAGE_QC in wanted
+
+    groups: Dict[Path, List[SpineRecord]] = {}
+    for record in records:
+        groups.setdefault(preprocessed_root(record, cfg), []).append(record)
+
+    own_executor = executor is None and cfg.workers > 1
+    if own_executor:
+        _warm_up_worker_kernels()
+        executor = ProcessPoolExecutor(max_workers=cfg.workers)
+    results: Dict[str, List[Dict[str, Any]]] = {stage: [] for stage in stages}
+    try:
+        for root, group in groups.items():
+            started = time.time()
+            _ensure_dir(root)
+            staging = None
+            if staging_dir is not None:
+                root_staging = Path(staging_dir) / group[0].dataset
+                root_staging.mkdir(parents=True, exist_ok=True)
+                (root_staging / _STAGING_MARKER).write_text(str(root), encoding="utf-8")
+                staging = (str(root), str(root_staging))
+            keys = [record.key for record in group]
+            tables = {stage: root / specs[stage].table for stage in stages}
+            rows: Dict[str, Dict[Tuple[str, ...], Dict[str, Any]]] = {}
+            for stage, path in tables.items():
+                if cache is not None:
+                    rows[stage] = _rows_for_keys(cache.frame(path), keys, cache.keys(path))
+                else:
+                    rows[stage] = _rows_for_keys(_read_table_frame(path), keys)
+            context: Dict[str, Any] = {"root": root, "_lock": threading.Lock(), "cache": cache}
+            timings = {"load": 0.0, "scan": 0.0, "process": 0.0, "compact": 0.0}
+            store = ProcessingStateStore(root / "processing_state.sqlite")
+            try:
+                neurons = sorted({(record.dataset, record.neuron_id) for record in group})
+                neuron_filter = neurons if len(neurons) <= _JOURNAL_NEURON_FILTER_MAX else None
+                states = {stage: store.get_all_states(stage, neurons=neuron_filter) for stage in stages}
+                timings["load"] = time.time() - started
+
+                # ---- scan -------------------------------------------------------
+                scan_started = time.time()
+                print(f"[{label}] scanning {len(group)} records ...", flush=True)
+                changed: Dict[str, List[Dict[str, Any]]] = {stage: [] for stage in stages}
+
+                def skip(stage: str, record: SpineRecord, reason: str) -> None:
+                    previous = rows[stage].get(record.key)
+                    unchanged = (
+                        previous is not None
+                        and previous.get("status") == STATUS_SKIPPED
+                        and previous.get("reason") == reason
+                    )
+                    if not unchanged:
+                        rows[stage][record.key] = {**_base_row(record), "status": STATUS_SKIPPED, "reason": reason}
+                        changed[stage].append(rows[stage][record.key])
+                    if not (unchanged and states[stage].get(record.key) == (STATUS_SKIPPED, ALGORITHM_VERSION, hashes[stage])):
+                        store.mark(record, stage, STATUS_SKIPPED, error=reason, config_hash=hashes[stage], commit=False)
+
+                def wants_run(stage: str, record: SpineRecord) -> Optional[bool]:
+                    """True = run, False = done (resume), None = nothing (retry_failed_only)."""
+                    state = states[stage].get(record.key)
+                    if cfg.retry_failed_only:
+                        return True if state is not None and state[0] == STATUS_FAILED else None
+                    done = _status_from_state(state, hashes[stage]) in {STATUS_SUCCESS, STATUS_NEEDS_REVIEW}
+                    return not (cfg.resume and not cfg.force and done and record.key in rows[stage])
+
+                actions: List[Dict[str, str]] = [{} for _ in group]
+                skipped = {stage: 0 for stage in stages}
+                quality_now: List[Any] = [None] * len(group)  # None + qc_runs -> decided in the worker
+                qc_runs = [False] * len(group)
+
+                if qc_fused:
+                    qc_reasons = _map_records(lambda r: specs[STAGE_QC].eligibility(r, cfg, context), group, cfg)
+                    quality_table = _status_lookup(context, "mesh_quality.parquet")
+                    for i, (record, reason) in enumerate(zip(group, qc_reasons)):
+                        if reason is not None:
+                            skip(STAGE_QC, record, reason)
+                            skipped[STAGE_QC] += 1
+                            quality_now[i] = STATUS_SKIPPED
+                            continue
+                        run = wants_run(STAGE_QC, record)
+                        if run:
+                            actions[i][STAGE_QC] = _ACTION_RUN
+                            qc_runs[i] = True
+                        else:
+                            if run is False:
+                                actions[i][STAGE_QC] = "done"
+                            quality_now[i] = quality_table.get(record.key)
+                else:
+                    quality_table = _status_lookup(context, "mesh_quality.parquet")
+                    quality_now = [quality_table.get(record.key) for record in group]
+
+                for stage in stages:
+                    if stage == STAGE_QC:
+                        continue
+                    gated = stage in (STAGE_POINTCLOUD, STAGE_SDF, STAGE_MORPHOMETRICS)
+
+                    def reason_for(i_record: Tuple[int, SpineRecord], stage: str = stage, gated: bool = gated) -> Optional[str]:
+                        i, record = i_record
+                        if not gated:
+                            return specs[stage].eligibility(record, cfg, context) if specs[stage].eligibility else None
+                        if qc_runs[i]:
+                            # quality is decided in the worker; QC running implies orient produced
+                            return _training_prerequisite_reason(record, cfg, context)
+                        return _training_eligibility_given_quality(record, cfg, context, quality_now[i])
+
+                    reasons = _map_records(reason_for, list(enumerate(group)), cfg)
+                    for i, (record, reason) in enumerate(zip(group, reasons)):
+                        if reason is not None:
+                            skip(stage, record, reason)
+                            skipped[stage] += 1
+                            continue
+                        run = wants_run(stage, record)
+                        if run is None:
+                            continue
+                        if gated and qc_runs[i]:
+                            actions[i][stage] = _ACTION_GATED_RUN if run else _ACTION_GATED_DONE
+                        else:
+                            actions[i][stage] = _ACTION_RUN if run else "done"
+
+                if cfg.verify_outputs_on_resume:  # "done" whose output file is gone -> rerun
+                    checks = [
+                        (i, stage) for i, acts in enumerate(actions) for stage, action in acts.items()
+                        if action in ("done", _ACTION_GATED_DONE)
+                    ]
+                    present = _parallel_exists([specs[stage].output_path(group[i], cfg) for i, stage in checks], cfg.io_threads)
+                    for (i, stage), ok in zip(checks, present):
+                        if not ok:
+                            actions[i][stage] = _ACTION_GATED_RUN if actions[i][stage] == _ACTION_GATED_DONE else _ACTION_RUN
+
+                plans: List[List[Tuple[str, str]]] = []
+                todo: List[int] = []
+                for i, acts in enumerate(actions):
+                    plan = [(stage, acts[stage]) for stage in stages if acts.get(stage) in (_ACTION_RUN, _ACTION_GATED_RUN, _ACTION_GATED_DONE)]
+                    plans.append(plan)
+                    if any(action in (_ACTION_RUN, _ACTION_GATED_RUN) for _, action in plan):
+                        todo.append(i)
+                store.commit()
+                for stage in stages:
+                    _append_table_part(tables[stage], changed[stage])
+                    if cache is not None:
+                        cache.append(tables[stage], changed[stage])
+                timings["scan"] = time.time() - scan_started
+                for stage in stages:
+                    n_run = sum(1 for acts in actions if acts.get(stage) in (_ACTION_RUN, _ACTION_GATED_RUN))
+                    n_done = sum(1 for acts in actions if acts.get(stage) in ("done", _ACTION_GATED_DONE))
+                    print(
+                        f"[{specs[stage].cli_name}] {n_run} to process, {n_done} already done, {skipped[stage]} skipped",
+                        flush=True,
+                    )
+                print(
+                    f"[{label}] scan done in {_fmt_duration(timings['scan'])} "
+                    f"(tables + journal loaded in {_fmt_duration(timings['load'])}): {len(todo)} spines to process",
+                    flush=True,
+                )
+
+                # ---- process ----------------------------------------------------
+                process_started = time.time()
+                progress = _progress(len(todo), f"{label} [{root.parent.name}]")
+                failed = {stage: 0 for stage in stages}
+                for batch_index in _batch_iter(todo, cfg.batch_size):
+                    batch = [group[i] for i in batch_index]
+                    batch_plans = [plans[i] for i in batch_index]
+                    for record, plan in zip(batch, batch_plans):
+                        for stage, action in plan:
+                            if action in (_ACTION_RUN, _ACTION_GATED_RUN):
+                                store.mark(
+                                    record, stage, STATUS_PROCESSING, started_at=time.time(),
+                                    input_path=specs[stage].input_path(record, cfg),
+                                    output_path=specs[stage].output_path(record, cfg),
+                                    config_hash=hashes[stage], commit=False,
+                                )
+                    store.commit()
+                    if executor is None:
+                        results_batch = [_execute_fused_worker(plan, record, cfg, staging) for plan, record in zip(batch_plans, batch)]
+                    else:
+                        results_batch = list(
+                            executor.map(
+                                _execute_fused_worker, batch_plans, batch, [cfg] * len(batch), [staging] * len(batch),
+                                chunksize=_map_chunksize(batch, cfg.workers),
+                            )
+                        )
+                    batch_rows: Dict[str, List[Dict[str, Any]]] = {stage: [] for stage in stages}
+                    errors: List[Dict[str, Any]] = []
+                    for record, plan, result in zip(batch, batch_plans, results_batch):
+                        for stage, action in plan:
+                            if action == _ACTION_GATED_DONE:
+                                reason = _quality_reason(result["quality"], cfg)
+                                if reason is not None:  # new QC status no longer allows this stage
+                                    skip(stage, record, reason)
+                                    batch_rows[stage].append(rows[stage][record.key])
+                                continue
+                            outcome = result["outcomes"][stage]
+                            if "skip_reason" in outcome:
+                                skip(stage, record, outcome["skip_reason"])
+                                batch_rows[stage].append(rows[stage][record.key])
+                                continue
+                            error = outcome["error"]
+                            if error is None:
+                                row = {**_base_row(record), **outcome["row"]}
+                                state = _state_from_row(row)
+                                row.pop("_state", None)
+                                error_text = row.get("reason") if state == STATUS_NEEDS_REVIEW else None
+                            else:
+                                state = STATUS_FAILED
+                                failed[stage] += 1
+                                error_text = f"{error['exception_type']}: {error['message']}"
+                                row = {**_base_row(record), "status": STATUS_FAILED, "error": error_text}
+                                errors.append(
+                                    {
+                                        "stage": stage,
+                                        "object_id": record.object_id,
+                                        **error,
+                                        "input_path": str(specs[stage].input_path(record, cfg)),
+                                        "created_at": outcome["ended"],
+                                    }
+                                )
+                            row["step_timings"] = json.dumps(outcome["timings"])
+                            row["preprocessing_version"] = cfg.preprocessing_version
+                            row["config_hash"] = hashes[stage]
+                            rows[stage][record.key] = row
+                            batch_rows[stage].append(row)
+                            store.mark(
+                                record, stage, state,
+                                started_at=outcome["started"], ended_at=outcome["ended"], error=error_text,
+                                input_path=specs[stage].input_path(record, cfg),
+                                output_path=specs[stage].output_path(record, cfg),
+                                config_hash=hashes[stage], commit=False,
+                            )
+                    store.commit()
+                    _append_errors(root, errors)
+                    for stage in stages:
+                        _append_table_part(tables[stage], batch_rows[stage])
+                        if cache is not None:
+                            cache.append(tables[stage], batch_rows[stage])
+                    if progress is not None:
+                        progress.update(len(batch))
+                        progress.set_postfix(failed=sum(failed.values()))
+                if progress is not None:
+                    progress.close()
+                timings["process"] = time.time() - process_started
+            finally:
+                store.close()
+
+            if compact:
+                compact_started = time.time()
+                for stage in stages:
+                    _compact_stage_table(specs[stage], cfg, root, group[0].dataset_root, cache=cache)
+                timings["compact"] = time.time() - compact_started
+            for stage in stages:
+                stage_rows = [rows[stage][key] for key in keys if key in rows[stage]]
+                _print_summary(specs[stage].cli_name, group[0].dataset_root, stage_rows)
+                results[stage].extend(stage_rows)
+            print(
+                f"[{label}] time: {_fmt_duration(time.time() - started)} "
+                f"(load {_fmt_duration(timings['load'])}, scan {_fmt_duration(timings['scan'])}, "
+                f"process {_fmt_duration(timings['process'])}"
+                + (f" = {len(todo) / timings['process']:.1f} spines/s" if todo and timings["process"] > 0 else "")
+                + (f", compact {_fmt_duration(timings['compact'])}" if compact else "")
+                + ")",
+                flush=True,
+            )
+    finally:
+        if own_executor and executor is not None:
+            executor.shutdown()
+    return {stage: pd.DataFrame([_jsonable(row) for row in stage_rows]) for stage, stage_rows in results.items()}
 
 
 def _compact_stage_table(
@@ -1205,11 +1861,21 @@ def _compact_stage_table(
     dataset_root: Path,
     *,
     cache: Optional[_TableCache] = None,
+    force: bool = False,
 ) -> None:
     """Merge the stage table's part files into the main table (one rewrite) + its
-    table-manifest JSON; then the errors log. No-op when there are no parts."""
+    table-manifest JSON; then the errors log. No-op when there are no parts.
+
+    Unless ``force``, a big table with only a few new rows in parts (e.g. a handful of
+    retried failures) is left as main + parts: every reader merges parts anyway, and
+    rewriting e.g. the whole sealed_spines.parquet on the NAS for 2 rows costs minutes.
+    """
     table_path = root / spec.table
-    if _table_part_paths(table_path):
+    parts = _table_part_paths(table_path)
+    if parts and not force and _parts_are_small(table_path, parts):
+        _compact_errors(root)
+        return
+    if parts:
         if cache is not None:
             _ensure_dir(table_path.parent)
             frame = cache.deduplicated(table_path)
@@ -1235,20 +1901,43 @@ def _compact_stage_table(
     _compact_errors(root)
 
 
+# A BIG table (>= _COMPACT_BIG_TABLE_ROWS rows) is rewritten only when its parts hold at
+# least _COMPACT_MIN_PART_SHARE of its rows or _COMPACT_MAX_PART_FILES part files have piled
+# up; smaller tables are always compacted - see _compact_stage_table.
+_COMPACT_BIG_TABLE_ROWS = 50_000
+_COMPACT_MIN_PART_SHARE = 0.02
+_COMPACT_MAX_PART_FILES = 200
+
+
+def _parts_are_small(table_path: Path, parts: Sequence[Path]) -> bool:
+    import pyarrow.parquet as pq
+
+    if len(parts) >= _COMPACT_MAX_PART_FILES or not table_path.exists():
+        return False
+    try:
+        main_rows = pq.ParquetFile(table_path).metadata.num_rows
+        part_rows = sum(pq.ParquetFile(part).metadata.num_rows for part in parts)
+    except Exception:
+        return False
+    return main_rows >= _COMPACT_BIG_TABLE_ROWS and part_rows < _COMPACT_MIN_PART_SHARE * main_rows
+
+
 def compact_stage_tables(
     config: SpinePreprocessingConfig,
     records: Sequence[SpineRecord],
     *,
     cache: Optional[_TableCache] = None,
+    force: bool = False,
 ) -> None:
-    """Compact every stage table (and errors log) of the roots touched by ``records``."""
+    """Compact every stage table (and errors log) of the roots touched by ``records``.
+    ``force=True`` also rewrites tables whose parts are small (see _compact_stage_table)."""
     cfg = config.normalized()
     roots: Dict[Path, Path] = {}
     for record in records:
         roots.setdefault(preprocessed_root(record, cfg), record.dataset_root)
     for root, dataset_root in roots.items():
         for stage in PIPELINE_ORDER:
-            _compact_stage_table(STAGES[stage], cfg, root, dataset_root, cache=cache)
+            _compact_stage_table(STAGES[stage], cfg, root, dataset_root, cache=cache, force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -1274,14 +1963,18 @@ def _status_lookup(context: Dict[str, Any], table: str, column: str = "status") 
     if cache_key not in context:
         with context.setdefault("_lock", threading.Lock()):
             if cache_key not in context:
-                frame_key = f"frame:{table}"
+                frame_key, keys_key = f"frame:{table}", f"keys:{table}"
                 if frame_key not in context:
                     path = Path(context["root"]) / table
                     cache = context.get("cache")
-                    context[frame_key] = cache.frame(path) if cache is not None else _read_table_frame(path)
+                    if cache is not None:
+                        context[frame_key], context[keys_key] = cache.frame(path), cache.keys(path)
+                    else:
+                        context[frame_key] = _read_table_frame(path)
+                        context[keys_key] = _frame_keys(context[frame_key])  # once per table, not per column
                 frame = context[frame_key]
                 values = frame[column].tolist() if column in frame.columns else [None] * len(frame)
-                context[cache_key] = dict(zip(_frame_keys(frame), values))
+                context[cache_key] = dict(zip(context[keys_key], values))
     return context[cache_key]
 
 
@@ -1289,21 +1982,42 @@ def _upstream_produced(context: Dict[str, Any], table: str, record: SpineRecord)
     return _status_lookup(context, table).get(record.key) in _PRODUCED_STATES
 
 
-def _training_eligibility(record: SpineRecord, cfg: SpinePreprocessingConfig, context: Dict[str, Any]) -> Optional[str]:
-    """Stages 6-8 run only for valid spines with an allowed mesh-quality status."""
+def _quality_reason(quality: Any, cfg: SpinePreprocessingConfig) -> Optional[str]:
+    """Skip reason for stages 6-8 given the spine's mesh-quality status (None = allowed)."""
+    allowed = {QUALITY_VALID, STATUS_NEEDS_REVIEW} if cfg.allow_needs_review else {QUALITY_VALID}
+    return None if quality in allowed else f"mesh_quality_{quality or 'missing'}"
+
+
+def _training_prerequisite_reason(record: SpineRecord, cfg: SpinePreprocessingConfig, context: Dict[str, Any]) -> Optional[str]:
+    """The part of :func:`_training_eligibility` checked before mesh quality."""
     if _status_lookup(context, "false_spines.parquet").get(record.key) != DETECT_VALID:
         return "not_valid_after_false_spine_detection"
-    quality = _status_lookup(context, "mesh_quality.parquet").get(record.key)
-    allowed = {QUALITY_VALID, STATUS_NEEDS_REVIEW} if cfg.allow_needs_review else {QUALITY_VALID}
-    if quality not in allowed:
-        return f"mesh_quality_{quality or 'missing'}"
+    return None
+
+
+def _training_local_sealed_reason(record: SpineRecord, cfg: SpinePreprocessingConfig, context: Dict[str, Any]) -> Optional[str]:
+    """The part of :func:`_training_eligibility` checked after mesh quality."""
     if cfg.verify_outputs_on_resume:
         missing = not local_sealed_mesh_path(record, cfg).exists()
     else:  # orient succeeded <=> it wrote local_sealed_mesh
         missing = not _upstream_produced(context, "oriented_spines.parquet", record)
-    if missing:
-        return "missing_local_sealed_mesh"
-    return None
+    return "missing_local_sealed_mesh" if missing else None
+
+
+def _training_eligibility_given_quality(
+    record: SpineRecord, cfg: SpinePreprocessingConfig, context: Dict[str, Any], quality: Any
+) -> Optional[str]:
+    return (
+        _training_prerequisite_reason(record, cfg, context)
+        or _quality_reason(quality, cfg)
+        or _training_local_sealed_reason(record, cfg, context)
+    )
+
+
+def _training_eligibility(record: SpineRecord, cfg: SpinePreprocessingConfig, context: Dict[str, Any]) -> Optional[str]:
+    """Stages 6-8 run only for valid spines with an allowed mesh-quality status."""
+    quality = _status_lookup(context, "mesh_quality.parquet").get(record.key)
+    return _training_eligibility_given_quality(record, cfg, context, quality)
 
 
 def _scan_eligibility(
@@ -1686,9 +2400,9 @@ def _face_edge_lengths(mesh: Any) -> np.ndarray:
 def _qc_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
     def load() -> Tuple[Any, Any, Any, Dict[str, Any], Dict[str, Any]]:
         return (
-            load_trimesh(local_sealed_mesh_path(record, cfg), process=False),
-            load_trimesh(sealed_mesh_path(record, cfg), process=False),
-            load_trimesh(record.source_path, process=False),
+            _load_mesh(local_sealed_mesh_path(record, cfg)),
+            _load_mesh(sealed_mesh_path(record, cfg)),
+            _load_mesh(record.source_path),
             _read_json(transform_json_path(record, cfg)),
             _read_json(attachment_json_path(record, cfg)),
         )
@@ -1848,7 +2562,7 @@ def _cap_face_mask(record: SpineRecord, cfg: SpinePreprocessingConfig, n_faces: 
 def _pointcloud_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
     if cfg.pointcloud_format != "packed_v1":
         raise ValueError(f"Unsupported pointcloud_format {cfg.pointcloud_format!r} (only 'packed_v1')")
-    mesh = timer.run("load mesh", lambda: load_trimesh(local_sealed_mesh_path(record, cfg), process=False))
+    mesh = timer.run("load mesh", lambda: _load_mesh(local_sealed_mesh_path(record, cfg)))
     cap_mask = _cap_face_mask(record, cfg, len(mesh.faces))
     seeds: Dict[str, int] = {}
     clouds: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -1872,8 +2586,8 @@ def _pointcloud_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer
     output = pointclouds_path(record, cfg)
 
     def save() -> None:  # one file (and one NAS create/rename) for all sizes x variants
-        _ensure_dir(output.parent)
-        write_pointclouds(output, clouds)
+        target = _staged_path(output)
+        _with_parent_dir(target, lambda: write_pointclouds(target, clouds))
 
     timer.run("save", save)
     row: Dict[str, Any] = {
@@ -1898,7 +2612,7 @@ def _pointcloud_output(record: SpineRecord, cfg: SpinePreprocessingConfig) -> Pa
 
 
 def _sdf_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: StepTimer) -> Dict[str, Any]:
-    mesh = timer.run("load mesh", lambda: load_trimesh(local_sealed_mesh_path(record, cfg), process=False))
+    mesh = timer.run("load mesh", lambda: _load_mesh(local_sealed_mesh_path(record, cfg)))
     cap_mask = _cap_face_mask(record, cfg, len(mesh.faces))
     fractions = (cfg.sdf_surface_fraction, cfg.sdf_near_fraction, cfg.sdf_uniform_fraction)
     seed = stable_seed(cfg.preprocessing_version, *record.key, "sdf")
@@ -1958,7 +2672,7 @@ def _morphometrics_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, ti
     from .spine_morphometrics import AttachmentRegion, build_polyhedron, compute_chord_distribution, compute_scalar_metrics
 
     def load() -> Tuple[Any, Dict[str, Any]]:
-        mesh = load_trimesh(local_sealed_mesh_path(record, cfg), process=False)
+        mesh = _load_mesh(local_sealed_mesh_path(record, cfg))
         attachment = _read_json(attachment_json_path(record, cfg))
         return mesh, attachment
 
@@ -2146,12 +2860,13 @@ def run_manifest_stage(
         groups.setdefault(preprocessed_root(record, cfg), []).append(record)
 
     for root, group in groups.items():
+        manifest_started = time.time()
         group_keys = [record.key for record in group]
 
         def table_rows(path: Path) -> Dict[Tuple[str, ...], Dict[str, Any]]:
             if cache is not None:
-                return _rows_for_keys(cache.frame(path), group_keys)
-            return _read_table_rows(path)
+                return _rows_for_keys(cache.frame(path), group_keys, cache.keys(path))
+            return _rows_for_keys(_read_table_frame(path), group_keys)
 
         tables = {
             name: table_rows(root / table)
@@ -2280,6 +2995,7 @@ def run_manifest_stage(
                 status_column="status",
             )
         _print_summary("manifest", group[0].dataset_root, [rows_by_key[record.key] for record in group])
+        print(f"  time:                {_fmt_duration(time.time() - manifest_started)}", flush=True)
 
     return pd.DataFrame(all_rows)
 
@@ -2325,40 +3041,138 @@ def run_full_spine_preprocessing_pipeline(config: SpinePreprocessingConfig) -> D
     only at the very end. One process pool and one in-memory table cache serve the whole
     run; stage tables are compacted once at the end. Total work is the same as stage by
     stage over the whole dataset (``neurons_per_chunk = 0``).
+
+    ``fuse_stages``: stages 5-9 run as one worker task per spine (:func:`run_fused_stages`).
+    ``staging_root``: their outputs are written to a local folder first and moved to the
+    final location by a background mover while the next chunk computes; leftovers of an
+    interrupted run are moved before anything else.
     """
     cfg = config.normalized()
+    started = time.time()
     records = discover_spines(cfg)
+    n_neurons_total = len({(r.dataset, r.neuron_id) for r in records})
+    print(
+        f"[discover] {len(records)} spines, {n_neurons_total} neurons in {_fmt_duration(time.time() - started)}",
+        flush=True,
+    )
     chunks = _neuron_chunks(records, cfg.neurons_per_chunk)
-    if len(chunks) <= 1:
-        executor = ProcessPoolExecutor(max_workers=cfg.workers) if cfg.workers > 1 else None
-        try:
-            results = {stage: run_stage(stage, cfg, records, executor=executor) for stage in PIPELINE_ORDER}
-        finally:
-            if executor is not None:
-                executor.shutdown()
-        results[STAGE_MANIFEST] = run_manifest_stage(cfg, records)
-        return results
+    fused = [stage for stage in FUSED_STAGES if stage in PIPELINE_ORDER] if cfg.fuse_stages else []
+    separate = [stage for stage in PIPELINE_ORDER if stage not in fused]
 
+    mover: Optional[_StagingMover] = None
+    staging_root = None if (cfg.staging_root is None or not fused) else Path(cfg.staging_root)
+    if staging_root is not None:
+        staging_root.mkdir(parents=True, exist_ok=True)
+        mover = _StagingMover(cfg.staging_move_threads)
+        leftovers = _staged_root_dirs(staging_root)
+        if leftovers:
+            print(f"[staging] moving {len(leftovers)} staged dir(s) left by a previous run ...", flush=True)
+            for staged_dir in leftovers:
+                mover.submit(staged_dir)
+            mover.wait()
+    run_tag = time.strftime("%Y%m%d-%H%M%S")
+
+    # Always go through one shared cache, even for a single chunk (neuron_id-scoped test
+    # runs, or neurons_per_chunk=0): without it, every stage re-reads its own table AND
+    # every upstream table its eligibility needs (e.g. false-spine and orient each read
+    # the WHOLE sealed_spines.parquet again for eligibility, on top of seal's own read of
+    # it) - on the NAS this cold-read cost is what made a single-neuron test take minutes
+    # before any stage even printed its "scanning" line, not the per-spine processing.
     cache = _TableCache()
+    _warm_up_worker_kernels()
     executor = ProcessPoolExecutor(max_workers=cfg.workers) if cfg.workers > 1 else None
     parts: Dict[str, List[pd.DataFrame]] = {stage: [] for stage in (*PIPELINE_ORDER, STAGE_MANIFEST)}
-    started = time.time()
+    # Multi-chunk runs keep only the identity/status columns of each chunk's result (all the
+    # notebooks use is ``frame["status"]``); full rows of ~0.8M spines x 9 stages would
+    # duplicate in RAM what the table cache already holds. Single-chunk runs keep full rows.
+    slim_columns = [*_KEY_COLUMNS, "status", "reason", "error"] if len(chunks) > 1 else None
+    chunks_started = time.time()
+    completed = False
+
+    def keep(stage: str, result: pd.DataFrame) -> None:
+        if slim_columns is not None:
+            result = result[[c for c in slim_columns if c in result.columns]]
+        parts[stage].append(result)
+
     try:
         for index, chunk in enumerate(chunks, start=1):
-            n_neurons = len({(r.dataset, r.neuron_id) for r in chunk})
-            print(
-                f"\n=== chunk {index}/{len(chunks)}: {n_neurons} neurons, {len(chunk)} spines "
-                f"({time.time() - started:.0f}s elapsed) ===",
-                flush=True,
-            )
-            for stage in PIPELINE_ORDER:
-                parts[stage].append(run_stage(stage, cfg, chunk, executor=executor, compact=False, cache=cache))
-            parts[STAGE_MANIFEST].append(run_manifest_stage(cfg, chunk, cache=cache))
+            if staging_root is not None and mover is not None:
+                limit = cfg.staging_max_gb * 1e9
+                waiting_since = None
+                while mover.pending() and _dir_size(staging_root) > limit:
+                    if waiting_since is None:
+                        waiting_since = time.time()
+                        print(
+                            f"[staging] {_dir_size(staging_root) / 1e9:.1f} GB still waiting to be moved "
+                            f"(limit {cfg.staging_max_gb:g} GB) - pausing until the mover catches up ...",
+                            flush=True,
+                        )
+                    mover.wait_for_progress()  # re-measure only after a move job finished
+                if waiting_since is not None:
+                    print(f"[staging] resumed after {_fmt_duration(time.time() - waiting_since)}", flush=True)
+            chunk_started = time.time()
+            if len(chunks) > 1:
+                n_neurons = len({(r.dataset, r.neuron_id) for r in chunk})
+                print(
+                    f"\n=== chunk {index}/{len(chunks)}: {n_neurons} neurons, {len(chunk)} spines "
+                    f"({_fmt_duration(time.time() - started)} elapsed) ===",
+                    flush=True,
+                )
+            for stage in separate:
+                keep(stage, run_stage(stage, cfg, chunk, executor=executor, compact=False, cache=cache))
+            if fused:
+                chunk_staging = None if staging_root is None else staging_root / f"{run_tag}_chunk_{index:04d}"
+                fused_results = run_fused_stages(
+                    cfg, chunk, stages=fused, executor=executor, compact=False, cache=cache, staging_dir=chunk_staging,
+                )
+                for stage in fused:
+                    keep(stage, fused_results[stage])
+                if chunk_staging is not None and mover is not None:
+                    for staged_dir in _staged_root_dirs(staging_root):
+                        if staged_dir.parent == chunk_staging:
+                            mover.submit(staged_dir)
+            keep(STAGE_MANIFEST, run_manifest_stage(cfg, chunk, cache=cache))
+            if len(chunks) > 1:
+                elapsed_chunks = time.time() - chunks_started
+                eta = elapsed_chunks / index * (len(chunks) - index)
+                print(
+                    f"=== chunk {index}/{len(chunks)} done in {_fmt_duration(time.time() - chunk_started)}; "
+                    f"elapsed {_fmt_duration(time.time() - started)}, "
+                    f"ETA for remaining {len(chunks) - index} chunks ~{_fmt_duration(eta)} ===",
+                    flush=True,
+                )
+        completed = True
     finally:
         if executor is not None:
             executor.shutdown()
+        if mover is not None:
+            if completed:
+                if mover.pending():
+                    print("[staging] waiting for the remaining staged chunks to be moved ...", flush=True)
+                mover.wait()
+                rate = mover.moved_bytes / mover.busy_seconds / 1e6 if mover.busy_seconds > 0 else 0.0
+                print(
+                    f"[staging] total moved: {mover.moved_files} files, {mover.moved_bytes / 1e9:.2f} GB "
+                    f"(mover busy {_fmt_duration(mover.busy_seconds)}, {rate:.1f} MB/s)"
+                    + (f"; {len(mover.errors)} FAILED moves - see warnings above" if mover.errors else ""),
+                    flush=True,
+                )
+            else:
+                print(
+                    "[staging] interrupted: staged files not yet moved stay in "
+                    f"{staging_root} and are moved at the start of the next run",
+                    flush=True,
+                )
+            mover.close()
         # merge part files even after an interruption, so the tables on disk are compact
+        compact_started = time.time()
+        print("[compact] merging stage table parts ...", flush=True)
         compact_stage_tables(cfg, records, cache=cache)
+        print(
+            f"[compact] done in {_fmt_duration(time.time() - compact_started)}; "
+            f"pipeline total {_fmt_duration(time.time() - started)}",
+            flush=True,
+        )
     return {stage: pd.concat(frames, ignore_index=True) if frames else pd.DataFrame() for stage, frames in parts.items()}
 
 
@@ -2393,6 +3207,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skeleton-subprocess-timeout-s", type=float)
     parser.add_argument("--neurons-per-chunk", type=int, help="0 = whole dataset stage by stage")
     parser.add_argument("--io-threads", type=int)
+    parser.add_argument("--no-fuse-stages", dest="fuse_stages", action="store_false", default=None,
+                        help="run stages 5-9 one after another instead of one task per spine")
+    parser.add_argument("--staging-root", type=Path, help="local folder for staging outputs before they are moved to the NAS")
+    parser.add_argument("--staging-max-gb", type=float)
+    parser.add_argument("--staging-move-threads", type=int)
     parser.add_argument(
         "--verify-outputs", dest="verify_outputs_on_resume", action="store_true", default=None,
         help="stat output files on resume/eligibility (slow on the NAS; parallel with --io-threads)",

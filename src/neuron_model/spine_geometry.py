@@ -52,12 +52,21 @@ _CREATED_DIRS: set = set()
 
 
 def atomic_export_mesh(mesh: Any, output_path: Path) -> None:
-    # mkdir once per directory per process (each call is a round trip on the NAS)
-    if str(output_path.parent) not in _CREATED_DIRS:
+    # Optimistic write: mkdir (a NAS round trip) only if the directory turns out to be
+    # missing; mkdir at most once per directory per process.
+    tmp_path = output_path.with_name(f"{output_path.name}.tmp")
+
+    def export() -> None:
+        mesh.export(str(tmp_path), file_type=output_path.suffix.lstrip(".") or None)
+
+    try:
+        export()
+    except FileNotFoundError:
+        if output_path.parent.exists():
+            raise
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _CREATED_DIRS.add(str(output_path.parent))
-    tmp_path = output_path.with_name(f"{output_path.name}.tmp")
-    mesh.export(str(tmp_path), file_type=output_path.suffix.lstrip(".") or None)
+        export()
     tmp_path.replace(output_path)
 
 

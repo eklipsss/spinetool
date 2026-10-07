@@ -4,6 +4,7 @@ packed point clouds."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -264,3 +265,134 @@ def test_discover_spines_neuron_filter_does_not_list_other_neurons(tmp_path, mon
     records = sp.discover_spines(sp.SpinePreprocessingConfig(raw_data_root=tmp_path, dataset="minnie65", neuron_id="n1"))
     assert len(records) == 8
     assert not any(p.name == "n2" for p in listed)
+
+
+def test_full_pipeline_shares_one_table_cache_even_for_a_single_chunk(tmp_path, monkeypatch):
+    """A single-neuron (single-chunk) run must still share one _TableCache across every
+    stage + manifest call - without it, each stage used to re-read its own table AND every
+    upstream table its eligibility needs from scratch (observed: redundant full reads of
+    the same NAS-hosted parquet across seal/false-spine/orient within one test run)."""
+    seen_caches = []
+
+    def fake_run_stage(stage, cfg, chunk, *, executor=None, compact=True, cache=None):
+        seen_caches.append(("stage", stage, cache))
+        return pd.DataFrame()
+
+    def fake_run_manifest_stage(cfg, chunk, *, cache=None):
+        seen_caches.append(("manifest", None, cache))
+        return pd.DataFrame()
+
+    def fake_compact(cfg, records, *, cache=None):
+        seen_caches.append(("compact", None, cache))
+
+    monkeypatch.setattr(sp, "discover_spines", lambda cfg: [_record(tmp_path)])
+    monkeypatch.setattr(sp, "run_stage", fake_run_stage)
+    def fake_run_fused_stages(cfg, chunk, *, stages, executor=None, compact=True, cache=None, staging_dir=None):
+        seen_caches.append(("fused", None, cache))
+        return {stage: pd.DataFrame() for stage in stages}
+
+    monkeypatch.setattr(sp, "run_manifest_stage", fake_run_manifest_stage)
+    monkeypatch.setattr(sp, "run_fused_stages", fake_run_fused_stages)
+    monkeypatch.setattr(sp, "compact_stage_tables", fake_compact)
+
+    cfg = _cfg(tmp_path, workers=1, neurons_per_chunk=25)  # 1 neuron -> a single chunk
+    sp.run_full_spine_preprocessing_pipeline(cfg)
+
+    assert seen_caches, "no stage/manifest calls recorded"
+    caches = {cache for _, _, cache in seen_caches}
+    assert len(caches) == 1 and None not in caches, f"expected one shared, non-None cache, got {caches}"
+    assert {kind for kind, _, _ in seen_caches} == {"stage", "fused", "manifest", "compact"}
+
+
+# --- winding numbers: numba kernel == numpy reference --------------------------------
+
+
+def test_numba_winding_numbers_match_numpy_off_the_surface():
+    import trimesh
+
+    from src.neuron_model.spine_sampling import warm_up_winding_kernel, winding_numbers
+
+    if not warm_up_winding_kernel():
+        pytest.skip("numba not installed")
+    mesh = trimesh.creation.icosphere(subdivisions=2, radius=10.0)
+    rng = np.random.default_rng(0)
+    surface = mesh.sample(500)
+    normals = mesh.face_normals[mesh.nearest.on_surface(surface)[2]]
+    points = np.vstack([
+        rng.normal(size=(500, 3)) * 15.0,          # inside and outside
+        surface + normals * 0.05,                   # just outside
+        surface - normals * 0.05,                   # just inside
+    ])
+    triangles = np.asarray(mesh.triangles, dtype=float)
+    reference = winding_numbers(points, triangles, backend="numpy")
+    fast = winding_numbers(points, triangles, backend="numba")
+    assert np.max(np.abs(reference - fast)) < 1e-10
+    assert np.array_equal(reference > 0.5, fast > 0.5)
+    assert np.all(fast[500:1000] < 0.5) and np.all(fast[1000:] > 0.5)
+    with pytest.raises(ValueError):
+        winding_numbers(points, triangles, backend="cuda")
+
+
+# --- fused stages 5-9 / staging ----------------------------------------------------------
+
+
+def test_fused_worker_gates_downstream_stages_on_the_qc_status_it_produced(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_stage_worker(stage, record, cfg):
+        calls.append(stage)
+        row = {"status": "invalid"} if stage == sp.STAGE_QC else {"status": sp.STATUS_SUCCESS}
+        return {"row": row, "error": None, "started": 0.0, "ended": 0.0, "timings": {}}
+
+    monkeypatch.setattr(sp, "_execute_stage_worker", fake_stage_worker)
+    record, cfg = _record(tmp_path), _cfg(tmp_path)
+    plan = [
+        (sp.STAGE_QC, sp._ACTION_RUN),
+        (sp.STAGE_POINTCLOUD, sp._ACTION_GATED_RUN),
+        (sp.STAGE_SDF, sp._ACTION_GATED_DONE),
+        (sp.STAGE_METADATA, sp._ACTION_RUN),
+    ]
+    result = sp._execute_fused_worker(plan, record, cfg)
+    assert calls == [sp.STAGE_QC, sp.STAGE_METADATA]  # gated point cloud not run, done SDF untouched
+    assert result["quality"] == "invalid"
+    assert result["outcomes"][sp.STAGE_POINTCLOUD] == {"skip_reason": "mesh_quality_invalid"}
+    assert sp.STAGE_SDF not in result["outcomes"]
+    assert sp._quality_reason("needs_review", cfg) is None
+    assert sp._quality_reason("needs_review", _cfg(tmp_path, allow_needs_review=False)) == "mesh_quality_needs_review"
+
+
+def test_spine_io_scope_memoises_reads_and_redirects_writes_to_staging(tmp_path):
+    final_root, staging_dir = tmp_path / "final", tmp_path / "staging"
+    target = final_root / "n1" / "spine_000" / "quality.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"a": 1}')
+    with sp._spine_io_scope((str(final_root), str(staging_dir))):
+        assert sp._read_json(target) == {"a": 1}
+        target.write_text('{"a": 999}')  # memoised: the NAS file is not read again
+        assert sp._read_json(target) == {"a": 1}
+        sp._update_json_atomic(target, {"b": 2})
+        staged = staging_dir / "n1" / "spine_000" / "quality.json"
+        assert staged.exists() and json.loads(staged.read_text()) == {"a": 1, "b": 2}
+        assert sp._read_json(target) == {"a": 1, "b": 2}
+        assert sp._staged_path(tmp_path / "elsewhere.json") == tmp_path / "elsewhere.json"
+    assert json.loads(target.read_text()) == {"a": 999}  # final file untouched until moved
+    assert sp._staged_path(target) == target  # no scope -> no redirect
+
+
+def test_move_staged_tree_moves_files_and_cleans_up(tmp_path):
+    final_root = tmp_path / "final"
+    (final_root / "n1" / "spine_000").mkdir(parents=True)
+    staged = tmp_path / "staging" / "run_chunk_0001" / "minnie65"
+    (staged / "n1" / "spine_000").mkdir(parents=True)
+    (staged / sp._STAGING_MARKER).write_text(str(final_root))
+    (staged / "n1" / "spine_000" / "pointclouds.npz").write_bytes(b"data")
+    (staged / "n1" / "spine_001").mkdir()
+    (staged / "n1" / "spine_001" / "metadata.json").write_text("{}")  # target dir does not exist yet
+    (staged / "n1" / "spine_000" / "x.json.tmp").write_text("partial")
+    assert sp._staged_root_dirs(tmp_path / "staging") == [staged]
+    n_files, n_bytes, _ = sp._move_staged_tree(staged, threads=2)
+    assert n_files == 2 and n_bytes == 6
+    assert (final_root / "n1" / "spine_000" / "pointclouds.npz").read_bytes() == b"data"
+    assert (final_root / "n1" / "spine_001" / "metadata.json").read_text() == "{}"
+    assert not (final_root / "n1" / "spine_000" / "x.json.tmp").exists()
+    assert not staged.exists() and sp._staged_root_dirs(tmp_path / "staging") == []
