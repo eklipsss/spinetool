@@ -50,7 +50,14 @@ def main() -> None:
     seed_everything(int(cfg["seed"]))
     device = get_device(cfg.get("device", "auto"))
 
-    index = load_spine_index([resolve_path(p) for p in data_cfg["manifests"]], path_mode=data_cfg.get("path_mode", "relative"), check_files=(f"pointcloud_{data_cfg['n_points']}_path", "sdf_samples_path"))
+    # see train_mogen.py: override with "data.check_files=[]" to skip the per-spine exists()
+    # check when nothing is being staged to the NAS right now.
+    default_check_files = (f"pointcloud_{data_cfg['n_points']}_path", "sdf_samples_path")
+    index = load_spine_index(
+        [resolve_path(p) for p in data_cfg["manifests"]],
+        path_mode=data_cfg.get("path_mode", "relative"),
+        check_files=tuple(data_cfg.get("check_files", default_check_files)),
+    )
     index = index.with_split(load_splits(resolve_path(data_cfg["splits"])))
     train_ds, val_ds = sdf_datasets(index, data_cfg)
     bbox = FrozenBBox.load(resolve_path(data_cfg["bbox"]))

@@ -51,7 +51,10 @@ def main() -> None:
     if not data.get("manifests"):
         parser.error("set data.manifests=[...]")
 
-    index = load_spine_index([resolve_path(p) for p in data["manifests"]], path_mode=data.get("path_mode", "relative"))
+    # only n_spines end up read - skip load_spine_index's default per-file exists() check over
+    # the whole manifest (same NAS cost as build_splits.py); a missing file among the sampled
+    # ones just surfaces as an "error" row from run_calibration, not a crash.
+    index = load_spine_index([resolve_path(p) for p in data["manifests"]], path_mode=data.get("path_mode", "relative"), check_files=())
     index = index.with_split(load_splits(resolve_path(data["splits"])), cfg["calibration_split"])
     frame = index.frame.sample(n=min(int(cfg["n_spines"]), len(index)), random_state=int(cfg["seed"])).sort_values("spine_key")
     spines = frame.to_dict(orient="records")

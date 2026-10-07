@@ -59,7 +59,16 @@ def main() -> None:
     seed_everything(int(cfg["seed"]))
     device = get_device(cfg.get("device", "auto"))
 
-    index = load_spine_index([resolve_path(p) for p in data_cfg["manifests"]], path_mode=data_cfg.get("path_mode", "relative"), check_files=(f"pointcloud_{data_cfg['n_points']}_path",))
+    # check_files defaults to verifying every train-split spine's pointcloud file actually exists
+    # (needed while a staging mover may still be moving files to the NAS); override with
+    # "data.check_files=[]" to skip it when nothing is being staged - saves one NAS stat() per
+    # spine (can be tens of minutes at full dataset scale).
+    default_check_files = (f"pointcloud_{data_cfg['n_points']}_path",)
+    index = load_spine_index(
+        [resolve_path(p) for p in data_cfg["manifests"]],
+        path_mode=data_cfg.get("path_mode", "relative"),
+        check_files=tuple(data_cfg.get("check_files", default_check_files)),
+    )
     index = index.with_split(load_splits(resolve_path(data_cfg["splits"])))
     train_ds, val_ds = point_cloud_datasets(index, data_cfg)
     if not args.resume:
