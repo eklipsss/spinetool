@@ -176,6 +176,13 @@ class SpinePreprocessingConfig:
     staging_root: Optional[Path] = None
     staging_max_gb: float = 200.0      # pause before the next chunk while more is still waiting to be moved
     staging_move_threads: int = 8      # parallel file copies to the NAS
+    # processing_state.sqlite lives here instead of under the NAS preprocessed root, if set
+    # (defaults to staging_root when that is set and this isn't - see _journal_path).
+    # SQLite over SMB/NAS is fragile under sustained write load (observed in production:
+    # "database disk image is malformed" after ~5 hours); the parquet stage tables are the
+    # real source of truth (every row records its own status + config_hash), so the journal
+    # is fully disposable - rebuild_journal_from_tables() rebuilds it from them if needed.
+    journal_root: Optional[Path] = None
 
     # stage 1: sealing / attachment loop (see data/processed/config/spine_preprocessing.yaml
     # "sealing" for the rationale behind these specific values - distance to the
@@ -260,6 +267,7 @@ class SpinePreprocessingConfig:
             staging_root=None if self.staging_root is None else Path(self.staging_root).expanduser().resolve(),
             staging_max_gb=float(self.staging_max_gb),
             staging_move_threads=max(1, int(self.staging_move_threads)),
+            journal_root=None if self.journal_root is None else Path(self.journal_root).expanduser().resolve(),
             skeleton_subprocess_timeout_s=float(self.skeleton_subprocess_timeout_s),
             limit=None if self.limit is None else int(self.limit),
             false_spine_threshold_nm_by_dataset=tuple((str(k), float(v)) for k, v in by_dataset),
@@ -865,6 +873,18 @@ def _base_row(record: SpineRecord) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _journal_path(root: Path, cfg: SpinePreprocessingConfig) -> Path:
+    """Where ``processing_state.sqlite`` for ``root`` lives: a local folder
+    (``journal_root``, or ``staging_root`` if that is set and ``journal_root`` isn't)
+    instead of ``root`` itself on the NAS - see the ``journal_root`` field for why."""
+    journal_root = cfg.journal_root if cfg.journal_root is not None else cfg.staging_root
+    if journal_root is None:
+        return root / "processing_state.sqlite"
+    tag = hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:10]
+    label = root.parent.name if root.name == "preprocessed" else root.name
+    return Path(journal_root) / "journal" / f"{label}-{tag}" / "processing_state.sqlite"
+
+
 class ProcessingStateStore:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -963,9 +983,9 @@ class ProcessingStateStore:
             for d, n, l, b, s, status, av, ch in cursor.fetchall()
         }
 
-    def mark(
+    def mark_key(
         self,
-        record: SpineRecord,
+        key: Tuple[str, str, str, str, str],
         stage: str,
         status: str,
         *,
@@ -990,7 +1010,7 @@ class ProcessingStateStore:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                *record.key,
+                *key,
                 stage,
                 status,
                 started_at,
@@ -1006,8 +1026,100 @@ class ProcessingStateStore:
         if commit:
             self.conn.commit()
 
+    def mark(
+        self,
+        record: SpineRecord,
+        stage: str,
+        status: str,
+        *,
+        started_at: Optional[float] = None,
+        ended_at: Optional[float] = None,
+        error: Optional[str] = None,
+        input_path: Optional[Path] = None,
+        output_path: Optional[Path] = None,
+        config_hash: str,
+        commit: bool = True,
+    ) -> None:
+        self.mark_key(
+            record.key, stage, status,
+            started_at=started_at, ended_at=ended_at, error=error,
+            input_path=input_path, output_path=output_path, config_hash=config_hash, commit=commit,
+        )
+
     def commit(self) -> None:
         self.conn.commit()
+
+
+def rebuild_journal_from_tables(root: Path, *, db_path: Optional[Path] = None, batch_size: int = 50_000) -> int:
+    """Rebuild a ``processing_state.sqlite`` for ``root`` from its stage tables.
+
+    Use after the journal itself is corrupted or lost - e.g. sqlite's own
+    ``DatabaseError: database disk image is malformed``, observed in production after
+    several hours of sustained writes to a journal file living on the NAS (SMB/network
+    filesystems do not reliably support sqlite's locking and atomic-write assumptions;
+    see ``journal_root``, which avoids this going forward by keeping the journal on local
+    disk instead - pass ``db_path=_journal_path(root, cfg)`` to rebuild straight to the new
+    location if you are migrating at the same time, otherwise the old NAS path is reused).
+
+    This never needs to read the broken file - the parquet stage tables are the real
+    source of truth (every row already records its own ``status`` and ``config_hash``),
+    so the journal is reconstructed from them alone. An existing file at ``db_path`` (even
+    a working one) is moved aside, not deleted, so it can be inspected later; the function
+    still works if that move or the original file is missing entirely.
+
+    A record whose only sqlite row was lost in a corrupted transaction is not silently
+    treated as done afterwards: ``run_stage``'s resume check also requires the key to be
+    present in the stage's own table, so at worst it is reprocessed once more.
+    """
+    root = Path(root)
+    db_path = Path(db_path) if db_path is not None else root / "processing_state.sqlite"
+    if db_path.exists():
+        backup = db_path.with_name(f"{db_path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        try:
+            db_path.replace(backup)
+            print(f"[rebuild] moved the existing journal aside to {backup}", flush=True)
+        except OSError as exc:  # e.g. still open elsewhere - rebuild a fresh file next to it
+            print(f"[rebuild] could not move {db_path} aside ({exc}); writing a new file instead", flush=True)
+            db_path = db_path.with_name(f"processing_state.rebuilt-{time.strftime('%Y%m%d-%H%M%S')}.sqlite")
+    store = ProcessingStateStore(db_path)
+    n_written = 0
+    try:
+        for stage_name, spec in STAGES.items():
+            frame = _read_table_frame(root / spec.table)
+            if not len(frame):
+                continue
+            rows = []
+            for row in frame.to_dict(orient="records"):
+                config_hash = row.get("config_hash")
+                if row.get("status") is None or config_hash is None or any(pd.isna(row.get(c)) for c in _KEY_COLUMNS):
+                    continue  # can't reconstruct a trustworthy entry without all of these
+                # The table's own "status" is the domain/business value a worker returned
+                # (e.g. false-spine's "valid"/"invalid", QC's "valid"/"needs_review") - NOT
+                # necessarily the pipeline/journal state. run_stage already resolves that
+                # distinction once, via _state_from_row, before a row ever reaches the
+                # table (its "_state" override is popped beforehand); applying the exact
+                # same function here recovers the original journal value from "status"
+                # alone, e.g. "valid" -> "success" but "needs_review" -> "needs_review".
+                key = tuple(str(row[c]) for c in _KEY_COLUMNS)
+                rows.append((*key, stage_name, _state_from_row(row), None, None, None, row.get("error"), None, None, ALGORITHM_VERSION, str(config_hash)))
+            for start in range(0, len(rows), batch_size):
+                store.conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO processing_state (
+                        dataset, neuron_id, limb_id, branch_id, spine_id, stage, status,
+                        started_at, ended_at, duration_s, error, input_path, output_path,
+                        algorithm_version, config_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows[start:start + batch_size],
+                )
+                store.conn.commit()
+            n_written += len(rows)
+            print(f"[rebuild] {spec.cli_name}: {len(rows)} rows from {spec.table}", flush=True)
+    finally:
+        store.close()
+    print(f"[rebuild] done: {n_written} journal rows written to {db_path}", flush=True)
+    return n_written
 
 
 def _status_from_state(state: Optional[Tuple[str, str, str]], config_hash: str) -> Optional[str]:
@@ -1222,7 +1334,7 @@ def run_stage(
             touched: List[Tuple[str, ...]] = []
             todo: List[SpineRecord] = []
             timings = {"load": 0.0, "scan": 0.0, "process": 0.0, "compact": 0.0}
-            store = ProcessingStateStore(root / "processing_state.sqlite")
+            store = ProcessingStateStore(_journal_path(root, cfg))
             try:
                 # One query for the whole root instead of one per record - matters
                 # once a dataset has tens of thousands of spines (full Minnie/H01
@@ -1634,7 +1746,7 @@ def run_fused_stages(
                     rows[stage] = _rows_for_keys(_read_table_frame(path), keys)
             context: Dict[str, Any] = {"root": root, "_lock": threading.Lock(), "cache": cache}
             timings = {"load": 0.0, "scan": 0.0, "process": 0.0, "compact": 0.0}
-            store = ProcessingStateStore(root / "processing_state.sqlite")
+            store = ProcessingStateStore(_journal_path(root, cfg))
             try:
                 neurons = sorted({(record.dataset, record.neuron_id) for record in group})
                 neuron_filter = neurons if len(neurons) <= _JOURNAL_NEURON_FILTER_MAX else None
@@ -3227,6 +3339,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--staging-root", type=Path, help="local folder for staging outputs before they are moved to the NAS")
     parser.add_argument("--staging-max-gb", type=float)
     parser.add_argument("--staging-move-threads", type=int)
+    parser.add_argument("--journal-root", type=Path,
+                        help="local folder for processing_state.sqlite instead of the NAS (defaults to --staging-root)")
     parser.add_argument(
         "--verify-outputs", dest="verify_outputs_on_resume", action="store_true", default=None,
         help="stat output files on resume/eligibility (slow on the NAS; parallel with --io-threads)",

@@ -413,3 +413,115 @@ def test_append_after_parts_dir_was_removed_in_the_same_process(tmp_path):
     # a later call in the SAME process (same _CREATED_DIRS) must recreate it, not crash
     sp._append_table_part(path, [_row(record, status="needs_review")])
     assert len(sp._read_table_rows(path)) == 1
+
+
+# --- journal: local redirection + rebuild from tables --------------------------------
+
+
+def test_journal_path_defaults_to_nas_then_journal_root_then_staging_root(tmp_path):
+    root = tmp_path / "preprocessed"
+    assert sp._journal_path(root, _cfg(tmp_path)) == root / "processing_state.sqlite"
+
+    staged = _cfg(tmp_path, staging_root=tmp_path / "staging")
+    via_staging = sp._journal_path(root, staged)
+    assert str(via_staging).startswith(str(tmp_path / "staging" / "journal"))
+    assert via_staging.name == "processing_state.sqlite"
+
+    both = _cfg(tmp_path, staging_root=tmp_path / "staging", journal_root=tmp_path / "journal_elsewhere")
+    via_journal_root = sp._journal_path(root, both)
+    assert str(via_journal_root).startswith(str(tmp_path / "journal_elsewhere"))
+
+    # same root -> same path every time (stable, so a later rebuild lands on the same file)
+    assert sp._journal_path(root, staged) == via_staging
+    # a different root must not collide
+    assert sp._journal_path(tmp_path / "other" / "preprocessed", staged) != via_staging
+
+
+def test_rebuild_journal_from_tables_recovers_resume_decisions(tmp_path):
+    root = tmp_path / "preprocessed"
+    root.mkdir()
+    cfg = _cfg(tmp_path)
+    a, b, c = (_record(tmp_path, spine=s) for s in ("000", "001", "002"))
+    sp._write_table(
+        [
+            _row(a, status="success", config_hash="h1"),
+            _row(b, status="needs_review", config_hash="h1"),
+            _row(c, status="failed", config_hash="h1", error="boom"),
+        ],
+        root / "sealed_spines.parquet",
+    )
+    # a real (working) journal already present - must be moved aside, not merged with
+    old_store = sp.ProcessingStateStore(root / "processing_state.sqlite")
+    old_store.mark_key(a.key, sp.STAGE_SEAL, "success", config_hash="stale-hash")
+    old_store.close()
+
+    n = sp.rebuild_journal_from_tables(root)
+    assert n == 3
+    assert list(root.glob("processing_state.sqlite.bak-*"))  # old file preserved, not deleted
+
+    store = sp.ProcessingStateStore(root / "processing_state.sqlite")
+    states = store.get_all_states(sp.STAGE_SEAL)
+    store.close()
+    assert states[a.key] == ("success", sp.ALGORITHM_VERSION, "h1")  # NOT the stale "stale-hash" row
+    assert states[b.key][0] == "needs_review" and states[c.key][0] == "failed"
+    # matches what run_stage's own resume logic would decide
+    assert sp._status_from_state(states[a.key], "h1") == "success"
+    assert sp._status_from_state(states[a.key], "different-hash") is None
+
+
+def test_rebuild_journal_from_tables_to_an_explicit_local_path(tmp_path):
+    root = tmp_path / "preprocessed"
+    root.mkdir()
+    record = _record(tmp_path)
+    sp._write_table([_row(record, status="success", config_hash="h1")], root / "sealed_spines.parquet")
+    target = tmp_path / "local_journal" / "processing_state.sqlite"
+    n = sp.rebuild_journal_from_tables(root, db_path=target)
+    assert n == 1 and target.exists() and not (root / "processing_state.sqlite").exists()
+    store = sp.ProcessingStateStore(target)
+    assert store.get_all_states(sp.STAGE_SEAL)[record.key][0] == "success"
+    store.close()
+
+
+def test_rebuild_journal_resolves_domain_status_to_the_real_journal_state(tmp_path):
+    """Regression: a stage's table "status" can be a domain/business value (false-spine's
+    "valid"/"invalid", QC's "valid"/"needs_review"/"invalid") that differs from the
+    pipeline/journal state run_stage actually recorded (always "success" unless the
+    worker itself failed or the status is literally one of the reserved journal words) -
+    see _state_from_row, which strips the "_state" override before a row reaches a table."""
+    root = tmp_path / "preprocessed"
+    root.mkdir()
+    valid, invalid, reviewed = (_record(tmp_path, spine=s) for s in ("000", "001", "002"))
+    sp._write_table(
+        [
+            _row(valid, status="valid", config_hash="h1"),      # domain "valid" -> journal "success"
+            _row(invalid, status="invalid", config_hash="h1"),  # domain "invalid" -> journal "success" too
+            _row(reviewed, status="needs_review", config_hash="h1"),  # already a reserved word -> kept as-is
+        ],
+        root / "false_spines.parquet",
+    )
+    sp.rebuild_journal_from_tables(root)
+    store = sp.ProcessingStateStore(root / "processing_state.sqlite")
+    states = store.get_all_states(sp.STAGE_FALSE_SPINE)
+    store.close()
+    assert states[valid.key][0] == sp.STATUS_SUCCESS
+    assert states[invalid.key][0] == sp.STATUS_SUCCESS
+    assert states[reviewed.key][0] == sp.STATUS_NEEDS_REVIEW
+    # exactly what run_stage's resume check needs to treat all three as already done
+    for record in (valid, invalid, reviewed):
+        assert sp._status_from_state(states[record.key], "h1") in {sp.STATUS_SUCCESS, sp.STATUS_NEEDS_REVIEW}
+
+
+def test_rebuild_journal_skips_rows_missing_status_or_config_hash(tmp_path):
+    root = tmp_path / "preprocessed"
+    root.mkdir()
+    a, b = _record(tmp_path, spine="000"), _record(tmp_path, spine="001")
+    sp._write_table(
+        [_row(a, status="success", config_hash="h1"), _row(b, status="success", config_hash=None)],
+        root / "sealed_spines.parquet",
+    )
+    n = sp.rebuild_journal_from_tables(root)
+    assert n == 1  # the row with no config_hash can't be trusted - skipped, not guessed
+    store = sp.ProcessingStateStore(root / "processing_state.sqlite")
+    states = store.get_all_states(sp.STAGE_SEAL)
+    store.close()
+    assert list(states) == [a.key]
