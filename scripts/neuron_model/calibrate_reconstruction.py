@@ -5,7 +5,7 @@ Windows workstation BEFORE training any generator:
 
     python scripts/neuron_model/calibrate_reconstruction.py \
         --config configs/neuron-model/reconstruction/calibration.yaml \
-        "data.manifests=['O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet']" workers=16
+        "data.manifests=['O:/Datasets/Minnie65/preprocessed/manifest.parquet']" workers=16
 
 Writes ``runs/analysis/neuron-model/<id>/``: per-spine results (parquet),
 per-candidate summaries (csv) and ``selection.json`` with the proposed frozen
@@ -77,7 +77,7 @@ def main() -> None:
             true_normals_control=bool(pcfg["true_normals_control"]),
             **common,
         )
-        results = run_calibration(spines, worker, workers=int(cfg["workers"]))
+        results = run_calibration(spines, worker, workers=int(cfg["workers"]), label="poisson")
         results.to_parquet(run.metrics / "poisson_results.parquet", index=False)
         ok = results[results.get("error").isna()] if "error" in results else results
         summary = summarize(ok, ["normals_source", "k_normal", "depth", "point_weight", "samples_per_node", "scale"])
@@ -102,7 +102,7 @@ def main() -> None:
             chunk_size=int(mcfg["chunk_size"]),
             **common,
         )
-        results = run_calibration(spines, worker, workers=int(cfg["workers"]))
+        results = run_calibration(spines, worker, workers=int(cfg["workers"]), label="marching_cubes")
         results.to_parquet(run.metrics / "marching_cubes_results.parquet", index=False)
         ok = results[results.get("error").isna()] if "error" in results else results
         summary = summarize(ok, ["resolution"])

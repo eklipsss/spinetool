@@ -3,7 +3,7 @@
 Windows workstation (RTX 4090):
 
     python scripts/neuron_model/train_mogen.py --config configs/neuron-model/mogen/pretrained_finetune.yaml \
-        "data.manifests=['O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet']" data.num_workers=8
+        "data.manifests=['O:/Datasets/Minnie65/preprocessed/manifest.parquet']" data.num_workers=8
 
 Resume an interrupted run (same config is read back from the run directory):
 

@@ -89,6 +89,7 @@ def run_training(
     started = time.perf_counter()
     last_metrics: Dict[str, float] = {}
     model.train()
+    print(f"training: step {step}/{loop.max_steps}, logging every {loop.log_every} steps", flush=True)
     while step < loop.max_steps:
         logs: Dict[str, float] = {}
         for _ in range(loop.accumulation_steps):
@@ -113,7 +114,13 @@ def run_training(
             on_step(step, logs)
         if step % loop.log_every == 0 or step == loop.max_steps:
             elapsed = time.perf_counter() - started
-            logger.log("train", step, {k: v / window_n for k, v in window.items()}, steps_per_second=window_n / max(elapsed, 1e-9))
+            avg = {k: v / window_n for k, v in window.items()}
+            steps_per_second = window_n / max(elapsed, 1e-9)
+            logger.log("train", step, avg, steps_per_second=steps_per_second)
+            remaining_steps = loop.max_steps - step
+            eta_min = remaining_steps / steps_per_second / 60 if steps_per_second > 0 else float("nan")
+            metrics_str = ", ".join(f"{k}={v:.4g}" for k, v in avg.items())
+            print(f"step {step}/{loop.max_steps} ({steps_per_second:.2f} steps/s, ETA {eta_min:.1f} min) {metrics_str}", flush=True)
             window, window_n, started = {}, 0, time.perf_counter()
 
         metrics: Dict[str, float] = {}
@@ -123,6 +130,8 @@ def run_training(
                 metrics.update(validate_fn(eval_model(), step))
             model.train()
             logger.log("val", step, metrics)
+            val_str = ", ".join(f"{k}={v:.4g}" for k, v in metrics.items())
+            print(f"  val @ step {step}: {val_str}", flush=True)
         if sample_fn is not None and (step % loop.sample_every == 0 or step == loop.max_steps):
             model.eval()
             sample_metrics = sample_fn(eval_model(), step) or {}

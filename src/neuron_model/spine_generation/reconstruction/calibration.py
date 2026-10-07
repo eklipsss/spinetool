@@ -190,24 +190,29 @@ def run_calibration(
     worker,
     *,
     workers: int = 1,
+    label: str = "calibration",
 ) -> pd.DataFrame:
     """Apply ``worker(spine) -> rows`` to every spine (optionally in a process pool); failures become rows."""
     spines = list(spines)
+    total = len(spines)
     rows: List[Dict[str, Any]] = []
     if workers <= 1:
-        for spine in spines:
+        for done, spine in enumerate(spines, start=1):
             try:
                 rows.extend(worker(spine))
             except Exception as exc:  # one bad spine must not stop a long calibration run
                 rows.append({"spine_key": spine["spine_key"], "error": f"{type(exc).__name__}: {exc}"})
+            print(f"  [{label}] {done}/{total} spines done", flush=True)
     else:
-        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(worker, spine): spine for spine in spines}
-            for future, spine in futures.items():
+            for done, future in enumerate(as_completed(futures), start=1):
+                spine = futures[future]
                 try:
                     rows.extend(future.result())
                 except Exception as exc:
                     rows.append({"spine_key": spine["spine_key"], "error": f"{type(exc).__name__}: {exc}"})
+                print(f"  [{label}] {done}/{total} spines done", flush=True)
     return pd.DataFrame(rows)

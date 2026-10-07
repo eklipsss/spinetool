@@ -3,7 +3,7 @@
 Windows workstation (RTX 4090):
 
     python scripts/neuron_model/train_vae.py --config configs/neuron-model/vae/baseline.yaml \
-        "data.manifests=['O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet']" data.num_workers=8
+        "data.manifests=['O:/Datasets/Minnie65/preprocessed/manifest.parquet']" data.num_workers=8
 
 Resume: ``python scripts/neuron_model/train_vae.py --resume runs/training/neuron-model/<experiment_id>``
 """

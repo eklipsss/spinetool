@@ -7,7 +7,7 @@ Chamfer-DCR memorization against the FULL train split (local cloud cache).
     python scripts/neuron_model/evaluate_generators.py --config configs/neuron-model/evaluation/default.yaml \
         --model mogen_finetuned=runs/training/neuron-model/<id>/meshes \
         --model vae=runs/training/neuron-model/<id>/meshes \
-        "data.manifests=['O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet']"
+        "data.manifests=['O:/Datasets/Minnie65/preprocessed/manifest.parquet']"
 
 ``<model_root>`` contains ``seed_<s>/sample_<i>/generated_mesh_{raw,postprocessed}.off``
 (written by generate_mogen.py and the VAE generator). Output: one run directory under

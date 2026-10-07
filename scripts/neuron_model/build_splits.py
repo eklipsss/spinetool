@@ -3,7 +3,7 @@
 Run once on the Windows workstation after the full preprocessing:
 
     python scripts/neuron_model/build_splits.py --config configs/neuron-model/data/splits_v1.yaml \
-        "manifests=['O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet']"
+        "manifests=['O:/Datasets/Minnie65/preprocessed/manifest.parquet']"
 
 Refuses to overwrite an existing split/bbox (a split is frozen once written;
 bump ``version`` for a new one).
@@ -39,6 +39,10 @@ def main() -> None:
         [resolve_path(p) for p in cfg["manifests"]],
         require_train_eligible=cfg.get("require_train_eligible", True),
         path_mode=cfg.get("path_mode", "relative"),
+        # splits only need manifest columns (train_eligible + group keys), not the actual
+        # pointcloud/sdf files - skip load_spine_index's default per-file exists() check,
+        # which is ~2 NAS stat() calls per row and dominates runtime on a slow NAS share.
+        check_files=(),
     )
     print(f"spines: manifest={index.frame.attrs['n_manifest']} train_eligible={index.frame.attrs['n_train_eligible']} with_files={len(index)}")
     level = cfg.get("group_level") or choose_group_level(index.frame)
