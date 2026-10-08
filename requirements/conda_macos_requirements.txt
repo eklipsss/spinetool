@@ -59,6 +59,7 @@ pytorch
 matplotlib
 seaborn
 plotly
+kaleido          # static PNG export for plotly (fig.write_image) - scripts/neuron_model/render_spine_presentation_figures.py
 markdown
 
 # --- misc ---

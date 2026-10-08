@@ -1,8 +1,12 @@
 # Marching Cubes backend for the VAE SDF decoder. The grid spans the frozen
 # train bbox (data.bbox); resolution 128 for validation / fast experiments,
 # 256 for the final generation, 512 only if 256 systematically loses the neck.
+# resolution_validation=128 checked against the splits_dev_100n dev-pilot calibration
+# (25 val spines): raw_is_valid_mean=0.72, raw_chamfer_l1_mean=9.1nm, n_connected_components
+# mostly 1 (mean 1.32) - comparable to the Poisson backend on the same spines. Still UNFROZEN
+# pending a full calibration on splits_v1.
 frozen: false
-calibration_run: null
+calibration_run: runs/analysis/neuron-model/2026-10-08_051336_reconstruction-calibration
 resolution_validation: 128
 resolution_final: 256
 iso_level: 0.0
