@@ -58,10 +58,17 @@ def capture_rng_state() -> Dict[str, Any]:
 
 
 def restore_rng_state(state: Dict[str, Any]) -> None:
+    """Restore RNG state saved by :func:`capture_rng_state`.
+
+    The torch/cuda states are CPU ``ByteTensor``s by construction, but a checkpoint
+    loaded with ``map_location=<cuda device>`` moves every tensor in the payload
+    there too (``torch.load`` does not know which ones are meant to stay on CPU) -
+    move them back before handing them to the (CPU-only) RNG setters.
+    """
     import torch
 
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
+    torch.set_rng_state(state["torch"].cpu())
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+        torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda"]])
