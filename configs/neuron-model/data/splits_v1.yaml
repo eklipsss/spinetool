@@ -3,7 +3,7 @@
 #   python scripts/neuron_model/build_splits.py --config configs/neuron-model/data/splits_v1.yaml
 version: splits_v1
 seed: 20260929
-manifests: []             # e.g. ["O:/Datasets/Minnie65/preprocessed/minnie65/manifest.parquet"]
+manifests: []             # e.g. ["O:/Datasets/Minnie65/preprocessed/manifest.parquet"]
 path_mode: relative
 require_train_eligible: true
 group_level: null         # null -> highest available: animal_id > sample_id > neuron_id > branch_id
