@@ -13,4 +13,9 @@ output: data/processed/neuron-model/splits/splits_v1.parquet
 bbox:
   output: data/processed/neuron-model/splits/bbox_splits_v1.json
   margin: 100.0           # physical units (nm); same order as sdf_bbox_margin of the preprocessing
-  n_points: 8192
+  n_points: 8192          # used by source: pointcloud only
+  # sdf_bounds: exact mesh bounds from the box stored in each sdf_samples.npz (a few bytes
+  # per spine) instead of reading whole point clouds - hours vs ~a day on the NAS.
+  source: sdf_bounds
+  sdf_bbox_margin: 100.0  # MUST equal sdf.sdf_bbox_margin of the preprocessing config
+  io_threads: 32          # overlaps per-file NAS latency
