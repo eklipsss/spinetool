@@ -163,3 +163,27 @@ def test_vae_training_loop_on_fake_dataset(fake_dataset, tmp_path):
     assert meta["generation_config"]["mode"] == "prior" and meta["checkpoint_id"] == "step2"
     train_log = [json.loads(line) for line in (run.logs / "metrics_train.jsonl").read_text().splitlines()]
     assert train_log[0]["kl_weight"] == 0.0 and train_log[1]["kl_weight"] == pytest.approx(5e-4)  # warm-up by step
+
+
+def test_kl_schedule_start_and_logvar_init_and_coord_init():
+    from src.neuron_model.spine_generation.models.spine_vae.latent import GaussianLatent, kl_weight
+
+    # weight is exactly 0 before kl_start_steps, then a linear warm-up, then beta
+    assert kl_weight(0, 1e-3, 100, 50) == 0.0 and kl_weight(49, 1e-3, 100, 50) == 0.0
+    assert kl_weight(100, 1e-3, 100, 50) == pytest.approx(0.5e-3) and kl_weight(500, 1e-3, 100, 50) == pytest.approx(1e-3)
+    assert kl_weight(10, 1e-3, 100) == pytest.approx(1e-4)  # old behaviour (start_steps=0)
+
+    # a negative logvar_init starts almost deterministic: z ~ mu
+    latent = GaussianLatent(8, 4, logvar_init=-6.0)
+    z, mu, logvar = latent(torch.randn(16, 8))
+    assert torch.allclose(logvar, torch.full_like(logvar, -6.0))
+    assert (z - mu).abs().max() < 0.5
+    assert float(GaussianLatent(8, 4).logvar.bias.abs().max()) == 0.0  # default unchanged
+
+    # coord_init: the coordinate columns of the first SIREN layer get the pure-coordinate bound
+    default = SirenSDFDecoder(128, SirenConfig(hidden_dim=16, hidden_layers=2))
+    fixed = SirenSDFDecoder(128, SirenConfig(hidden_dim=16, hidden_layers=2, coord_init=True))
+    assert float(default.net[0].linear.weight[:, :3].abs().max()) <= 1 / 131 + 1e-9
+    assert float(fixed.net[0].linear.weight[:, :3].abs().max()) <= 1 / 3 + 1e-9
+    assert float(fixed.net[0].linear.weight[:, :3].abs().max()) > 0.2
+    assert float(fixed.net[0].linear.weight[:, 3:].abs().max()) <= 1 / 131 + 1e-9

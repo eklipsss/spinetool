@@ -11,13 +11,17 @@ LOGVAR_RANGE = (-20.0, 10.0)
 
 
 class GaussianLatent(nn.Module):
-    def __init__(self, in_dim: int, latent_dim: int = 128) -> None:
+    def __init__(self, in_dim: int, latent_dim: int = 128, logvar_init: float = 0.0) -> None:
+        """``logvar_init``: initial log sigma^2 of every dimension. 0 = the prior's unit variance;
+        a negative value (e.g. -6 -> sigma 0.05) starts as an almost deterministic auto-encoder,
+        so the decoder sees ``mu`` and not noise and learns to USE the latent (otherwise
+        sigma = 1 noise swamps ``mu`` and the decoder ignores z: posterior collapse)."""
         super().__init__()
         self.latent_dim = latent_dim
         self.mu = nn.Linear(in_dim, latent_dim)
         self.logvar = nn.Linear(in_dim, latent_dim)
-        nn.init.zeros_(self.logvar.weight)  # start near the prior's unit variance
-        nn.init.zeros_(self.logvar.bias)
+        nn.init.zeros_(self.logvar.weight)
+        nn.init.constant_(self.logvar.bias, float(logvar_init))
 
     def forward(self, h: torch.Tensor, *, sample: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns ``(z, mu, logvar)``; ``sample=False`` gives the deterministic ``z = mu`` (reconstruction)."""
@@ -47,11 +51,15 @@ def kl_loss(mu: torch.Tensor, logvar: torch.Tensor, free_bits: Optional[float] =
     return per_dim.sum()
 
 
-def kl_weight(step: int, beta: float, warmup_steps: int = 0) -> float:
-    """Linear KL warm-up from 0 to ``beta`` over ``warmup_steps``."""
+def kl_weight(step: int, beta: float, warmup_steps: int = 0, start_steps: int = 0) -> float:
+    """KL weight schedule: exactly 0 for the first ``start_steps`` steps (pure auto-encoder; with
+    Adam even a tiny KL weight becomes the only gradient of an encoder whose output the decoder
+    ignores, and drives mu to 0), then a linear warm-up to ``beta`` over ``warmup_steps``."""
+    if step < start_steps:
+        return 0.0
     if warmup_steps <= 0:
         return float(beta)
-    return float(beta) * min(1.0, step / float(warmup_steps))
+    return float(beta) * min(1.0, (step - start_steps) / float(warmup_steps))
 
 
 @torch.no_grad()

@@ -14,6 +14,9 @@ data:
 
 model:
   latent_dim: 128          # validate 64 / 128 / 256 after a stable baseline
+  # Posterior-collapse fix (first real run: kl_raw 26 -> 0.09, std_z = 1, active dims = 0, sdf_loss stuck at
+  # the "mean shape" plateau 0.065): start as an almost deterministic auto-encoder (sigma = exp(-6/2) = 0.05)
+  latent_logvar_init: -6.0
   encoder:
     type: pointnext
     input_points: 8192
@@ -35,14 +38,18 @@ model:
     first_omega_0: 30
     hidden_omega_0: 30
     cond_dim: 0            # reserved conditional input e(c) (0 = unconditional first version)
+    # input = [x, z] (3 + 128 columns): SIREN's U(-1/in, 1/in) would make the spatial frequencies ~43x too low
+    # and let the latent dominate the first layer -> coordinate columns get U(-1/3, 1/3) (a pure-coordinate SIREN)
+    coord_init: true
 
 loss:
   sdf: 1.0
   surface: 0.0
   eikonal: 0.0
   normal: 0.0
-  beta: 1.0e-3
-  kl_warmup_steps: 10000
+  beta: 1.0e-4             # L_sdf is a per-point mean (~0.05), KL a sum over 128 dims: beta 1e-3 already lets KL dominate
+  kl_start_steps: 2000     # KL weight is exactly 0 for the first steps (pure auto-encoder), then warms up
+  kl_warmup_steps: 10000   # ... linearly to beta over this many steps
   free_bits: null          # e.g. 0.05 nats/dim if posterior collapse shows up (active_latent_dimensions -> 0)
   sdf_loss: l1             # or smooth_l1
   smooth_l1_beta: 0.01

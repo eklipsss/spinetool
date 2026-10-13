@@ -28,16 +28,23 @@ class SirenConfig:
     hidden_omega_0: float = 30.0
     output_dim: int = 1
     cond_dim: int = 0
+    coord_init: bool = False  # first layer: coordinate columns U(-1/3, 1/3) instead of U(-1/in, 1/in), see SineLayer
 
 
 class SineLayer(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, omega_0: float, is_first: bool) -> None:
+    def __init__(self, in_dim: int, out_dim: int, omega_0: float, is_first: bool, coord_dim: Optional[int] = None) -> None:
         super().__init__()
         self.omega_0 = omega_0
         self.linear = nn.Linear(in_dim, out_dim)
         with torch.no_grad():
             bound = 1.0 / in_dim if is_first else math.sqrt(6.0 / in_dim) / omega_0
             self.linear.weight.uniform_(-bound, bound)
+            if is_first and coord_dim is not None and coord_dim < in_dim:
+                # The input is [x, z, (c)]: SIREN's U(-1/in, 1/in) is meant for the COORDINATES
+                # alone. With 3 + 128 inputs it would make the spatial frequencies ~43x too low
+                # (omega_0 / in_dim ~ 0.23 rad per unit) while the 128 latent inputs dominate the
+                # phase. Give the coordinate columns the bound of a pure-coordinate SIREN.
+                self.linear.weight[:, :coord_dim].uniform_(-1.0 / coord_dim, 1.0 / coord_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sin(self.omega_0 * self.linear(x))
@@ -48,7 +55,7 @@ class SirenSDFDecoder(nn.Module):
         super().__init__()
         self.cfg = cfg
         in_dim = coord_dim + latent_dim + cfg.cond_dim
-        layers = [SineLayer(in_dim, cfg.hidden_dim, cfg.first_omega_0, is_first=True)]
+        layers = [SineLayer(in_dim, cfg.hidden_dim, cfg.first_omega_0, is_first=True, coord_dim=coord_dim if cfg.coord_init else None)]
         layers += [SineLayer(cfg.hidden_dim, cfg.hidden_dim, cfg.hidden_omega_0, is_first=False) for _ in range(cfg.hidden_layers - 1)]
         self.net = nn.Sequential(*layers)
         self.out = nn.Linear(cfg.hidden_dim, cfg.output_dim)

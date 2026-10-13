@@ -26,6 +26,7 @@ class LossWeights:
     normal: float = 0.0
     beta: float = 1e-3
     kl_warmup_steps: int = 0
+    kl_start_steps: int = 0       # KL weight is exactly 0 until this step, then warms up
     free_bits: Optional[float] = None
     sdf_loss: str = "l1"          # "l1" or "smooth_l1"
     smooth_l1_beta: float = 0.01  # model units
