@@ -69,7 +69,16 @@ def main() -> None:
     bbox_cfg = cfg.get("bbox")
     if bbox_cfg:
         train = index.with_split(splits, "train")
-        bbox = compute_frozen_bbox(train, margin=float(bbox_cfg["margin"]), n_points=int(bbox_cfg["n_points"]), split_version=cfg["version"])
+        bbox = compute_frozen_bbox(
+            train,
+            margin=float(bbox_cfg["margin"]),
+            n_points=int(bbox_cfg["n_points"]),
+            split_version=cfg["version"],
+            source=bbox_cfg.get("source", "pointcloud"),
+            sdf_bbox_margin=float(bbox_cfg.get("sdf_bbox_margin", 100.0)),
+            io_threads=int(bbox_cfg.get("io_threads", 1)),
+            progress=True,
+        )
         bbox.save(resolve_path(bbox_cfg["output"]))
         print(f"bbox -> {resolve_path(bbox_cfg['output'])}: low={bbox.low} high={bbox.high}")
 
