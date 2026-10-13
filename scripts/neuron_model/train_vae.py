@@ -58,7 +58,7 @@ def main() -> None:
         path_mode=data_cfg.get("path_mode", "relative"),
         check_files=tuple(data_cfg.get("check_files", default_check_files)),
     )
-    index = index.with_split(load_splits(resolve_path(data_cfg["splits"])))
+    index = index.with_split(load_splits(resolve_path(data_cfg["splits"])), drop_unassigned=bool(data_cfg.get("drop_unassigned", False)))
     train_ds, val_ds = sdf_datasets(index, data_cfg)
     bbox = FrozenBBox.load(resolve_path(data_cfg["bbox"]))
     if run is None:

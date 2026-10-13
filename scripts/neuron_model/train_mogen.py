@@ -69,7 +69,7 @@ def main() -> None:
         path_mode=data_cfg.get("path_mode", "relative"),
         check_files=tuple(data_cfg.get("check_files", default_check_files)),
     )
-    index = index.with_split(load_splits(resolve_path(data_cfg["splits"])))
+    index = index.with_split(load_splits(resolve_path(data_cfg["splits"])), drop_unassigned=bool(data_cfg.get("drop_unassigned", False)))
     train_ds, val_ds = point_cloud_datasets(index, data_cfg)
     if not args.resume:
         cfg["data"]["dataset_version"] = index.dataset_version

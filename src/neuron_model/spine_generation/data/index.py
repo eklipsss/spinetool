@@ -91,13 +91,19 @@ class SpineIndex:
         wanted = set(keys)
         return SpineIndex(self.frame[self.frame["spine_key"].isin(wanted)].reset_index(drop=True), self.dataset_versions)
 
-    def with_split(self, splits: pd.DataFrame, split: Optional[str] = None) -> "SpineIndex":
-        """Attach the ``split`` column (from ``splits_v*.parquet``); optionally keep one split only."""
+    def with_split(self, splits: pd.DataFrame, split: Optional[str] = None, *, drop_unassigned: bool = False) -> "SpineIndex":
+        """Attach the ``split`` column (from ``splits_v*.parquet``); optionally keep one split only.
+
+        By default every spine of the index must have a split. ``drop_unassigned=True`` instead drops
+        spines the split does not cover - for running on an older split (e.g. the first 100 neurons)
+        against a manifest that has since grown."""
         frame = self.frame.drop(columns=["split", "group_id"], errors="ignore").merge(
             splits[["spine_key", "group_id", "split"]], on="spine_key", how="left"
         )
         missing = frame["split"].isna().sum()
-        if missing:
+        if missing and drop_unassigned:
+            frame = frame[frame["split"].notna()]
+        elif missing:
             raise ValueError(f"{missing} spines of the index have no split assignment - rebuild or version the split")
         if split is not None:
             frame = frame[frame["split"] == split]

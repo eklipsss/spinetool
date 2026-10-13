@@ -70,6 +70,12 @@ def test_save_splits_is_frozen(fake_dataset, tmp_path):
         save_splits(splits, path, version="splits_v1", info={})
     with_split = index.with_split(load_splits(path), "val")
     assert set(with_split.frame["split"]) == {"val"}
+    # a split that covers only part of the index: error by default, dropped on request
+    partial = load_splits(path).iloc[: len(index) // 2]
+    with pytest.raises(ValueError):
+        index.with_split(partial)
+    kept = index.with_split(partial, drop_unassigned=True)
+    assert 0 < len(kept) < len(index) and set(kept.frame["spine_key"]) <= set(partial["spine_key"])
 
 
 def test_pointcloud_dataset_scale_variants_and_jitter(fake_dataset):
