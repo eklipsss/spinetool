@@ -34,7 +34,10 @@ model:
     pooling: max           # or max_avg
     global_feature_dim: 512
     sampler: fps
-    norm: layer
+    # LayerNorm normalises every spine by its own channels and erases the differences BETWEEN spines (between-spine
+    # std of the pooled features 0.145 of their mean, effective rank 4.1 of 9 on real spines at init); BatchNorm keeps
+    # them (0.665, rank 7.6-7.8). The first fixes only changed the latent head; the decoder ignored z until this.
+    norm: batch
   decoder:
     type: siren_sdf
     hidden_dim: 256
@@ -58,7 +61,7 @@ loss:
   free_bits: null          # e.g. 0.05 nats/dim if posterior collapse shows up (active_latent_dimensions -> 0)
   sdf_loss: l1             # or smooth_l1
   smooth_l1_beta: 0.01
-  sdf_clamp: null
+  sdf_clamp: 0.3           # um: DeepSDF-style truncation; the uniform far-field points (|sdf| up to ~1 um) otherwise dominate the L1 loss
 
 optimizer:
   name: adamw
