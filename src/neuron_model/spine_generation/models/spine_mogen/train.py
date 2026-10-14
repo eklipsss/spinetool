@@ -67,7 +67,7 @@ def point_cloud_datasets(index: SpineIndex, data_cfg: Mapping[str, Any]) -> Tupl
     """Train (random variant + physical jitter) and val (variant 1, no jitter) datasets."""
     train_index = index.subset(index.frame.loc[index.frame["split"] == "train", "spine_key"])
     val_index = index.subset(index.frame.loc[index.frame["split"] == "val", "spine_key"])
-    common = dict(n_points=int(data_cfg["n_points"]), coord_scale=float(data_cfg["coord_scale"]), use_normals=False)
+    common = dict(n_points=int(data_cfg["n_points"]), coord_scale=float(data_cfg["coord_scale"]), use_normals=False, variants=tuple(int(v) for v in data_cfg.get("variants", (1, 2, 3, 4))))
     train = PointCloudDataset(train_index, random_variant=True, jitter_std=float(data_cfg.get("jitter_std", 0.0)), **common)
     val = PointCloudDataset(val_index, random_variant=False, jitter_std=0.0, **common) if len(val_index) else None
     return train, val

@@ -28,6 +28,7 @@ def sdf_datasets(index: SpineIndex, data_cfg: Mapping[str, Any]) -> Tuple[SDFDat
         query_counts=dict(data_cfg["query_counts"]),
         coord_scale=float(data_cfg["coord_scale"]),
         use_normals=bool(data_cfg.get("use_normals", True)),
+        variants=tuple(int(v) for v in data_cfg.get("variants", (1, 2, 3, 4))),  # a local cache may hold only some
     )
     train = SDFDataset(train_index, random_variant=True, **common)
     val = SDFDataset(val_index, random_variant=False, **common) if len(val_index) else None
