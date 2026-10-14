@@ -25,6 +25,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import os
+
+# Windows conda: torch (libomp) and MKL (libiomp5md) both load an OpenMP runtime; the first use of both (e.g. mesh
+# extraction after training, SVD) aborts the process with "OMP: Error #15". Standard workaround, Windows only.
+if sys.platform == "win32":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from src.neuron_model.spine_generation.data.bbox import FrozenBBox
 from src.neuron_model.spine_generation.data.index import load_spine_index
 from src.neuron_model.spine_generation.data.splits import load_splits
