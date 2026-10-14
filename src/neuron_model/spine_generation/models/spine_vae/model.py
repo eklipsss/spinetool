@@ -24,6 +24,7 @@ from .siren_sdf_decoder import SirenConfig, SirenSDFDecoder
 class SpineVAEConfig:
     latent_dim: int = 128
     latent_logvar_init: float = 0.0
+    latent_mu_norm: str = "none"  # "batch": standardise mu over the batch (see GaussianLatent)
     encoder: PointNeXtConfig = field(default_factory=PointNeXtConfig)
     decoder: SirenConfig = field(default_factory=SirenConfig)
 
@@ -36,7 +37,7 @@ class SpineVAEConfig:
         for key in ("stage_widths", "strides", "blocks"):
             if key in encoder:
                 encoder[key] = tuple(encoder[key])
-        return cls(latent_dim=int(values.get("latent_dim", 128)), latent_logvar_init=float(values.get("latent_logvar_init", 0.0)), encoder=PointNeXtConfig(**encoder), decoder=SirenConfig(**decoder))
+        return cls(latent_dim=int(values.get("latent_dim", 128)), latent_logvar_init=float(values.get("latent_logvar_init", 0.0)), latent_mu_norm=str(values.get("latent_mu_norm", "none")), encoder=PointNeXtConfig(**encoder), decoder=SirenConfig(**decoder))
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -47,7 +48,7 @@ class SpineVAE(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.encoder = PointNeXtEncoder(cfg.encoder)
-        self.latent = GaussianLatent(cfg.encoder.global_feature_dim, cfg.latent_dim, cfg.latent_logvar_init)
+        self.latent = GaussianLatent(cfg.encoder.global_feature_dim, cfg.latent_dim, cfg.latent_logvar_init, cfg.latent_mu_norm)
         self.decoder = SirenSDFDecoder(cfg.latent_dim, cfg.decoder)
 
     def encode(self, points: torch.Tensor, normals: Optional[torch.Tensor] = None, *, sample: bool = True):

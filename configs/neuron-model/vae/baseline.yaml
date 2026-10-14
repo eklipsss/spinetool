@@ -17,6 +17,11 @@ model:
   # Posterior-collapse fix (first real run: kl_raw 26 -> 0.09, std_z = 1, active dims = 0, sdf_loss stuck at
   # the "mean shape" plateau 0.065): start as an almost deterministic auto-encoder (sigma = exp(-6/2) = 0.05)
   latent_logvar_init: -6.0
+  # 2nd collapse cause (diagnose_vae.py, step 500 of the first fix run): std(mu) between spines = 5e-4 - the
+  # encoder's max-pooled features are nearly identical for every spine, the decoder only sees sigma = 0.05
+  # noise and ignores z (own code and another spine's code give the same loss to 4 digits). Standardising
+  # mu over the batch gives every latent dimension unit variance between spines from step 0.
+  latent_mu_norm: batch
   encoder:
     type: pointnext
     input_points: 8192

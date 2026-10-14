@@ -11,21 +11,34 @@ LOGVAR_RANGE = (-20.0, 10.0)
 
 
 class GaussianLatent(nn.Module):
-    def __init__(self, in_dim: int, latent_dim: int = 128, logvar_init: float = 0.0) -> None:
+    def __init__(self, in_dim: int, latent_dim: int = 128, logvar_init: float = 0.0, mu_norm: str = "none") -> None:
         """``logvar_init``: initial log sigma^2 of every dimension. 0 = the prior's unit variance;
         a negative value (e.g. -6 -> sigma 0.05) starts as an almost deterministic auto-encoder,
         so the decoder sees ``mu`` and not noise and learns to USE the latent (otherwise
-        sigma = 1 noise swamps ``mu`` and the decoder ignores z: posterior collapse)."""
+        sigma = 1 noise swamps ``mu`` and the decoder ignores z: posterior collapse).
+
+        ``mu_norm="batch"``: ``mu`` is standardised over the batch (BatchNorm1d without affine
+        parameters, running statistics at eval), so every latent dimension varies with unit variance
+        BETWEEN spines from the first step. Needed when the encoder's pooled features are nearly the
+        same for every input (max-pooling over thousands of points): then ``mu`` varies by ~1e-3
+        between spines, the decoder sees only noise, ignores z and the encoder gets no gradient
+        (observed on the first real run: std(mu) = 5e-4). The standardisation also puts a floor
+        under the KL term - the known remedy for KL vanishing (batch-normalised inference network)."""
         super().__init__()
         self.latent_dim = latent_dim
         self.mu = nn.Linear(in_dim, latent_dim)
         self.logvar = nn.Linear(in_dim, latent_dim)
         nn.init.zeros_(self.logvar.weight)
         nn.init.constant_(self.logvar.bias, float(logvar_init))
+        if mu_norm not in ("none", "batch"):
+            raise ValueError(f"mu_norm must be 'none' or 'batch', got {mu_norm!r}")
+        self.mu_norm = nn.BatchNorm1d(latent_dim, affine=False, eps=1e-8) if mu_norm == "batch" else None  # default eps 1e-5 > the variance (~1e-7) it must amplify
 
     def forward(self, h: torch.Tensor, *, sample: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns ``(z, mu, logvar)``; ``sample=False`` gives the deterministic ``z = mu`` (reconstruction)."""
         mu = self.mu(h)
+        if self.mu_norm is not None:
+            mu = self.mu_norm(mu)
         logvar = self.logvar(h).clamp(*LOGVAR_RANGE)
         if not sample:
             return mu, mu, logvar

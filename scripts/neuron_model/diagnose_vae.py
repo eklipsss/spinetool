@@ -20,12 +20,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# Windows conda: torch (libomp) and MKL (libiomp5md) both load an OpenMP runtime and the first SVD aborts with
+# "OMP: Error #15". Harmless for this read-only diagnostic.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import numpy as np
 import torch
@@ -73,12 +78,14 @@ def main() -> None:
     loader = make_loader(torch.utils.data.Subset(val, subset_ids.tolist()), batch_size=args.batch_size, shuffle=False, seed=args.seed, num_workers=0)
 
     sums = {mode: {t: [0.0, 0] for t in TYPES} for mode in ("real", "shuffled", "mean", "zero")}
-    mus, sizes = [], []
+    mus, sizes, feats = [], [], []
     with torch.no_grad():
         batches = []
         for batch in loader:
             batch = to_device(batch, device)
-            _, mu, _ = model.encode(batch["points"], batch.get("normals"), sample=False)
+            h = model.encoder(batch["points"], batch.get("normals") if model.cfg.encoder.use_normals else None)
+            _, mu, _ = model.latent(h, sample=False)
+            feats.append(h.cpu())
             mus.append(mu.cpu())
             pts = batch["points"]
             sizes.append((pts.max(dim=1).values - pts.min(dim=1).values).cpu())  # bbox extent per spine
@@ -119,6 +126,11 @@ def main() -> None:
         g = (mean_err("shuffled", name) - mean_err("real", name)) / max(mean_err("shuffled", name), 1e-12)
         print(f"   gain on {name:8s}: {g:.1%}")
 
+    h_all = torch.cat(feats)
+    h_std = h_all.std(dim=0)
+    print(f"\nencoder pooled features h [{h_all.shape[1]}]: std between spines mean {float(h_std.mean()):.5f}, "
+          f"mean |h| {float(h_all.abs().mean()):.4f}, ratio {float(h_std.mean() / h_all.abs().mean().clamp_min(1e-12)):.4f}"
+          "  (ratio ~0: the encoder gives the same vector for every spine)")
     std = mu_all.std(dim=0)
     print(f"\nencoder output between spines: per-dimension std of mu: mean {float(std.mean()):.4f}, max {float(std.max()):.4f}; "
           f"dims with std > 0.1: {int((std > 0.1).sum())} / {len(std)}; mean |mu| {float(mu_all.abs().mean()):.4f}")
