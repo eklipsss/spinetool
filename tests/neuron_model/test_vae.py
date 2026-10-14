@@ -187,3 +187,26 @@ def test_kl_schedule_start_and_logvar_init_and_coord_init():
     assert float(fixed.net[0].linear.weight[:, :3].abs().max()) <= 1 / 3 + 1e-9
     assert float(fixed.net[0].linear.weight[:, :3].abs().max()) > 0.2
     assert float(fixed.net[0].linear.weight[:, 3:].abs().max()) <= 1 / 131 + 1e-9
+
+
+def test_mu_batch_norm_gives_unit_variance_between_inputs():
+    from src.neuron_model.spine_generation.models.spine_vae.latent import GaussianLatent
+
+    torch.manual_seed(0)
+    # features that are nearly identical for every input (the failure seen on the first real run)
+    h = torch.randn(1, 16) * 5 + 1e-3 * torch.randn(64, 16)
+    plain = GaussianLatent(16, 6, logvar_init=-6.0)
+    normed = GaussianLatent(16, 6, logvar_init=-6.0, mu_norm="batch")
+    _, mu_plain, _ = plain(h)
+    _, mu_normed, _ = normed(h)
+    assert float(mu_plain.std(dim=0).mean()) < 0.05          # tiny variation between inputs ...
+    assert float(mu_normed.std(dim=0, unbiased=False).mean()) == pytest.approx(1.0, abs=0.1)  # ... standardised (eps 1e-8 keeps this true for a ~1e-7 variance)
+    assert float(mu_normed.mean(dim=0).abs().max()) < 2e-3   # float32 limit for an offset of ~5 with a 1e-3 variation
+    normed.eval()                                              # eval uses the running statistics, no batch dependence
+    _, single, _ = normed(h[:1], sample=False)
+    assert torch.isfinite(single).all()
+    with pytest.raises(ValueError):
+        GaussianLatent(16, 6, mu_norm="nope")
+    # config plumbing
+    cfg = SpineVAEConfig.from_mapping({"latent_dim": 6, "latent_mu_norm": "batch", "encoder": {"input_points": 256, "base_width": 8, "stage_widths": [8, 16, 32], "strides": [1, 4, 4], "blocks": [0, 1, 1], "k_neighbors": 8, "global_feature_dim": 32}})
+    assert cfg.latent_mu_norm == "batch" and SpineVAE(cfg).latent.mu_norm is not None
