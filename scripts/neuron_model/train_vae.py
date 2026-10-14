@@ -5,7 +5,7 @@ Windows workstation (RTX 4090):
     python scripts/neuron_model/train_vae.py --config configs/neuron-model/vae/baseline.yaml \
         "data.manifests=['O:/Datasets/Minnie65/preprocessed/manifest.parquet']" data.num_workers=8
 
-Resume: ``python scripts/neuron_model/train_vae.py --resume runs/training/neuron-model/<experiment_id>``
+Resume: ``python scripts/neuron_model/train_vae.py --resume runs/training/neuron-model/<experiment_id> [train.max_steps=30000 ...]``
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from src.neuron_model.spine_generation.data.datasets import make_loader
 from src.neuron_model.spine_generation.data.index import load_spine_index
 from src.neuron_model.spine_generation.data.splits import load_splits
 from src.neuron_model.spine_generation.experiment.artifacts import write_json
-from src.neuron_model.spine_generation.experiment.config import load_config, resolve_path
+from src.neuron_model.spine_generation.experiment.config import apply_overrides, load_config, resolve_path
 from src.neuron_model.spine_generation.experiment.loop import LoopConfig, run_training
 from src.neuron_model.spine_generation.experiment.run import create_run, open_run
 from src.neuron_model.spine_generation.experiment.seed import seed_everything
@@ -51,6 +51,10 @@ def main() -> None:
         parser.error("give exactly one of --config / --resume")
     run = open_run(args.resume) if args.resume else None
     cfg = run.load_config() if run else load_config(args.config, args.overrides)
+    if run and args.overrides:
+        # e.g. `--resume <run> train.validate_every=100000`: change a training setting while continuing from the checkpoint
+        # (model / data settings must stay as they were, the checkpoint does not fit another architecture)
+        cfg = apply_overrides(cfg, args.overrides)
     data_cfg = cfg["data"]
     if not data_cfg.get("manifests"):
         parser.error("set data.manifests=[...]")
