@@ -31,6 +31,7 @@ class LossWeights:
     sdf_loss: str = "l1"          # "l1" or "smooth_l1"
     smooth_l1_beta: float = 0.01  # model units
     sdf_clamp: Optional[float] = None  # DeepSDF-style truncation of |d| (model units); None = off
+    far: float = 0.0              # weight of the far-field hinge (needs data.far_queries > 0)
 
     @property
     def needs_gradient(self) -> bool:
@@ -46,6 +47,15 @@ def sdf_loss(pred: torch.Tensor, target: torch.Tensor, weights: LossWeights) -> 
     if weights.sdf_loss == "l1":
         return (pred - target).abs().mean()
     raise ValueError(f"Unknown sdf_loss {weights.sdf_loss!r}")
+
+
+def far_field_loss(pred_far: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor:
+    """One-sided: the SDF of a point outside the spine's box is at least ``lower_bound`` (> 0 only where known);
+    penalise ``pred < lower_bound``. Removes the spurious zero crossings an unsupervised decoder makes away from its shape."""
+    active = lower_bound > 0
+    if not active.any():
+        return pred_far.new_zeros(())
+    return torch.relu(lower_bound - pred_far)[active].mean()
 
 
 def surface_loss(pred: torch.Tensor, sample_type: torch.Tensor) -> torch.Tensor:
@@ -74,6 +84,8 @@ def combine(terms: Dict[str, torch.Tensor], weights: LossWeights, kl_w: float) -
     total = weights.sdf * terms["sdf_loss"] + kl_w * terms["kl_loss"]
     if weights.surface:
         total = total + weights.surface * terms["surface_loss"]
+    if weights.far and "far_loss" in terms:
+        total = total + weights.far * terms["far_loss"]
     if weights.eikonal:
         total = total + weights.eikonal * terms["eikonal_loss"]
     if weights.normal:

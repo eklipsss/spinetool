@@ -70,8 +70,8 @@ def main() -> None:
         check_files=tuple(data_cfg.get("check_files", default_check_files)),
     )
     index = index.with_split(load_splits(resolve_path(data_cfg["splits"])), drop_unassigned=bool(data_cfg.get("drop_unassigned", False)))
-    train_ds, val_ds = sdf_datasets(index, data_cfg)
     bbox = FrozenBBox.load(resolve_path(data_cfg["bbox"]))
+    train_ds, val_ds = sdf_datasets(index, data_cfg, far_bbox=(bbox.low, bbox.high))
     if run is None:
         cfg["data"]["dataset_version"] = index.dataset_version
         run = create_run(cfg, runs_root=resolve_path(cfg["runs_root"]), extra_info={"n_train": len(train_ds), "n_val": len(val_ds or []), "bbox": bbox.__dict__})

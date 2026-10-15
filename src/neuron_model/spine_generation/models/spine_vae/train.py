@@ -19,7 +19,8 @@ from .losses import LossWeights
 from .model import SpineVAE, loss_logs
 
 
-def sdf_datasets(index: SpineIndex, data_cfg: Mapping[str, Any]) -> Tuple[SDFDataset, Optional[SDFDataset]]:
+def sdf_datasets(index: SpineIndex, data_cfg: Mapping[str, Any], far_bbox=None) -> Tuple[SDFDataset, Optional[SDFDataset]]:
+    """``far_bbox`` = (low, high) of the frozen train bbox (nm); needed when ``data.far_queries`` > 0."""
     frame = index.frame
     train_index = index.subset(frame.loc[frame["split"] == "train", "spine_key"])
     val_index = index.subset(frame.loc[frame["split"] == "val", "spine_key"])
@@ -29,6 +30,9 @@ def sdf_datasets(index: SpineIndex, data_cfg: Mapping[str, Any]) -> Tuple[SDFDat
         coord_scale=float(data_cfg["coord_scale"]),
         use_normals=bool(data_cfg.get("use_normals", True)),
         variants=tuple(int(v) for v in data_cfg.get("variants", (1, 2, 3, 4))),  # a local cache may hold only some
+        far_queries=int(data_cfg.get("far_queries", 0)),
+        far_bbox=far_bbox,
+        far_clamp_nm=float(data_cfg.get("far_clamp_nm", 300.0)),
     )
     train = SDFDataset(train_index, random_variant=True, **common)
     val = SDFDataset(val_index, random_variant=False, **common) if len(val_index) else None

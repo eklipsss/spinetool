@@ -10,6 +10,12 @@ data:
   coord_scale: 1.0e-3      # nm -> um (one global factor, never per spine)
   use_normals: true
   query_counts: {surface: 1024, near: 3072, uniform: 1024}  # per spine per step, from sdf_samples.npz
+  # Far field: the decoder is supervised only inside the box of its own spine (+100 nm) but Marching Cubes runs on the
+  # frozen global bbox (5.5 x 3.7 x 3.5 um): the first long run produced meshes with 17-20 THOUSAND fragments (150-180 um^2
+  # instead of 0.5-5 um^2; 0 % valid). Random points of the global bbox outside the spine's box get a one-sided target
+  # sdf >= min(distance beyond the box, far_clamp_nm) (loss.far).
+  far_queries: 1024
+  far_clamp_nm: 300.0
   batch_size: 8
 
 model:
@@ -53,6 +59,7 @@ model:
 loss:
   sdf: 1.0
   surface: 0.0
+  far: 1.0
   eikonal: 0.0
   normal: 0.0
   beta: 1.0e-4             # L_sdf is a per-point mean (~0.05), KL a sum over 128 dims: beta 1e-3 already lets KL dominate

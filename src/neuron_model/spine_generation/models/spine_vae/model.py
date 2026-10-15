@@ -15,7 +15,7 @@ import torch
 from torch import nn
 
 from .latent import GaussianLatent, kl_loss, kl_weight, latent_statistics
-from .losses import LossWeights, combine, eikonal_loss, normal_loss, sdf_gradient, sdf_loss, surface_loss
+from .losses import LossWeights, combine, eikonal_loss, far_field_loss, normal_loss, sdf_gradient, sdf_loss, surface_loss
 from .pointnext_encoder import PointNeXtConfig, PointNeXtEncoder
 from .siren_sdf_decoder import SirenConfig, SirenSDFDecoder
 
@@ -72,6 +72,8 @@ class SpineVAE(nn.Module):
             "surface_loss": surface_loss(pred, batch["sample_type"]),
             "kl_loss": kl_loss(mu, logvar, weights.free_bits),
         }
+        if weights.far and "far_points" in batch:
+            terms["far_loss"] = far_field_loss(self.decode(batch["far_points"], z), batch["far_lower_bound"])
         if weights.needs_gradient:
             grad = sdf_gradient(pred, query)
             terms["eikonal_loss"] = eikonal_loss(grad)

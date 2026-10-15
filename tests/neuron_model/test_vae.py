@@ -210,3 +210,51 @@ def test_mu_batch_norm_gives_unit_variance_between_inputs():
     # config plumbing
     cfg = SpineVAEConfig.from_mapping({"latent_dim": 6, "latent_mu_norm": "batch", "encoder": {"input_points": 256, "base_width": 8, "stage_widths": [8, 16, 32], "strides": [1, 4, 4], "blocks": [0, 1, 1], "k_neighbors": 8, "global_feature_dim": 32}})
     assert cfg.latent_mu_norm == "batch" and SpineVAE(cfg).latent.mu_norm is not None
+
+
+def test_far_field_queries_lower_bound_and_loss(fake_dataset):
+    from src.neuron_model.spine_generation.data.datasets import SDFDataset
+    from src.neuron_model.spine_generation.models.spine_vae.losses import far_field_loss
+
+    index = load_spine_index([fake_dataset / "manifest.parquet"])
+    big = ((-5000.0, -5000.0, -5000.0), (5000.0, 5000.0, 5000.0))
+    ds = SDFDataset(index, 2048, {"surface": 8, "near": 8, "uniform": 8}, coord_scale=1e-3, far_queries=256, far_bbox=big, far_clamp_nm=300.0)
+    item = ds[0]
+    assert item["far_points"].shape == (256, 3) and item["far_lower_bound"].shape == (256,)
+    lb = item["far_lower_bound"]
+    assert float(lb.max()) <= 0.3 + 1e-6 and float(lb.min()) >= 0.0        # model units (um), clamped at 0.3
+    assert (lb > 0).any()                                                   # a box of +-5 um is far larger than the spine
+    # the lower bound is VALID: no point of the real surface lies closer than the bound
+    import torch
+
+    from src.neuron_model.spine_generation.data.datasets import load_pointcloud
+
+    surface = torch.tensor(load_pointcloud(index.frame["pointcloud_2048_path"].iloc[0], 2048, 1)["points"], dtype=torch.float32) * 1e-3
+    d = torch.cdist(item["far_points"], surface).min(dim=1).values
+    assert bool((d + 1e-4 >= lb).all())
+    # loss: zero when the prediction respects the bound, positive when it dips below, ignores unknown (bound 0) points
+    assert float(far_field_loss(lb + 0.1, lb)) == 0.0
+    assert float(far_field_loss(torch.zeros_like(lb), lb)) > 0.0
+    assert float(far_field_loss(torch.zeros(4), torch.zeros(4))) == 0.0
+    # off by default: no extra keys
+    assert "far_points" not in SDFDataset(index, 2048, {"surface": 8, "near": 8, "uniform": 8})[0]
+    with pytest.raises(ValueError):
+        SDFDataset(index, 2048, {"surface": 8}, far_queries=8)
+
+
+def test_model_trains_with_far_field_term(fake_dataset):
+    from src.neuron_model.spine_generation.data.datasets import SDFDataset
+
+    torch.manual_seed(0)
+    index = load_spine_index([fake_dataset / "manifest.parquet"])
+    ds = SDFDataset(index, 2048, {"surface": 8, "near": 8, "uniform": 8}, coord_scale=1e-3, far_queries=32, far_bbox=((-4000.0,) * 3, (4000.0,) * 3))
+    batch = next(iter(make_loader(ds, batch_size=2, shuffle=False, seed=0)))
+    cfg = SpineVAEConfig(latent_dim=4, encoder=PointNeXtConfig(input_points=2048, base_width=8, stage_widths=(8, 16), strides=(4, 4), blocks=(0, 1), k_neighbors=4, global_feature_dim=8, sampler="random"), decoder=SirenConfig(hidden_dim=16, hidden_layers=2))
+    model = SpineVAE(cfg)
+    weights = LossWeights(far=1.0, sdf_clamp=0.3)
+    terms = model.compute_losses(batch, weights, 0)
+    assert "far_loss" in terms and float(terms["far_loss"]) >= 0.0
+    base = LossWeights(sdf_clamp=0.3)
+    assert float(model.compute_losses(batch, base, 0)["total_loss"]) != float(terms["total_loss"]) or float(terms["far_loss"]) == 0.0
+    terms["total_loss"].backward()   # the far term has a gradient path through the decoder
+    assert any(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in model.decoder.parameters())

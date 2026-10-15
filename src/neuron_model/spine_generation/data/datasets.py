@@ -114,7 +114,17 @@ class SDFDataset:
         random_variant: bool = True,
         coord_scale: float = 1.0,
         use_normals: bool = True,
+        far_queries: int = 0,
+        far_bbox: Optional[Sequence[Sequence[float]]] = None,
+        far_clamp_nm: float = 300.0,
+        far_slack_nm: float = 20.0,
     ) -> None:
+        self.far_queries = int(far_queries)
+        self.far_bbox = None if far_bbox is None else (np.asarray(far_bbox[0], dtype=np.float64), np.asarray(far_bbox[1], dtype=np.float64))
+        self.far_clamp_nm = float(far_clamp_nm)
+        self.far_slack_nm = float(far_slack_nm)
+        if self.far_queries and self.far_bbox is None:
+            raise ValueError("far_queries > 0 needs far_bbox (the frozen train bbox, nm)")
         self.pointclouds = PointCloudDataset(
             index,
             encoder_points,
@@ -138,6 +148,30 @@ class SDFDataset:
     def __len__(self) -> int:
         return len(self.pointclouds)
 
+    def _far_field(self, query_points: np.ndarray, sample_type: np.ndarray) -> Dict[str, Any]:
+        """Points uniform in the GLOBAL (frozen) bbox with a LOWER bound of their signed distance.
+
+        The decoder is only supervised inside the box of its own spine (+100 nm): the uniform samples of
+        ``sdf_samples.npz`` live there. Marching Cubes runs on the much larger global bbox, where an
+        unsupervised decoder crosses zero thousands of times (tens of thousands of fragments). A point
+        outside the spine's box is at least ``max_axis(excess over the box)`` from the surface; the box is
+        taken from the surface samples of the file (minus a small slack, so the bound stays valid).
+        Targets are lower bounds only (hinge), nothing is claimed about the exact distance.
+        """
+        import torch
+
+        surface = query_points[sample_type == SAMPLE_SURFACE]
+        low = surface.min(axis=0) - self.far_slack_nm
+        high = surface.max(axis=0) + self.far_slack_nm
+        g_low, g_high = self.far_bbox
+        p = g_low + np.random.rand(self.far_queries, 3) * (g_high - g_low)
+        excess = np.maximum(np.maximum(low - p, p - high), 0.0)
+        bound = np.minimum(excess.max(axis=1), self.far_clamp_nm)
+        return {
+            "far_points": torch.from_numpy(p.astype(np.float32)) * self.coord_scale,
+            "far_lower_bound": torch.from_numpy(bound.astype(np.float32)) * self.coord_scale,
+        }
+
     def __getitem__(self, i: int) -> Dict[str, Any]:
         import torch
 
@@ -157,6 +191,8 @@ class SDFDataset:
                 pick = pool[:count]
             chosen.append(pick)
         idx = np.concatenate(chosen)
+        if self.far_queries:
+            item.update(self._far_field(np.asarray(sdf["query_points"], dtype=np.float64), sample_type))
         normals = np.asarray(sdf["surface_normals"], dtype=np.float32)[idx]
         has_normal = np.isfinite(normals).all(axis=1)
         normals[~has_normal] = 0.0

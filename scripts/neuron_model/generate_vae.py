@@ -16,7 +16,10 @@ MoGen counterpart):
 Output layout is the one ``evaluate_generators.py`` reads (same as ``generate_mogen.py``):
 
     prior          <run>/meshes/seed_<s>/sample_<i>/generated_mesh_{raw,postprocessed}.off, ...
-    reconstruction <run>/meshes_reconstruction/seed_<s>/sample_<i>/...  (+ the real spine_key in the metadata)
+    reconstruction <run>/meshes_reconstruction/seed_<s>/sample_<i>/...  (+ the real spine_key in the metadata; with
+                   --crop-to-spine: meshes_reconstruction_crop/, see the option)
+    reconstruction also writes reconstruction_metrics.json per sample: Chamfer / Hausdorff-95 / F-score (nm) of the
+    generated surface against the REAL point cloud of that spine
 
     python scripts/neuron_model/evaluate_generators.py --config configs/neuron-model/evaluation/default.yaml \
         --model vae=runs/training/neuron-model/<id>/meshes  "data.manifests=[...]"
@@ -60,7 +63,8 @@ from src.neuron_model.spine_generation.reconstruction.mesh_validation import agg
 
 
 def _reconstruction_latents(model, args, cfg, device):
-    """``(z [n, D], spine_keys)``: encoder means of ``n`` random real spines of ``--split``."""
+    """``(z [n, D], spine_keys, real_clouds [n, N, 3] in nm)``: encoder means of ``n`` random real spines of ``--split``
+    and their real surface point clouds (the reference for ``--crop-to-spine`` and the reconstruction metrics)."""
     from src.neuron_model.spine_generation.data.datasets import PointCloudDataset
     from src.neuron_model.spine_generation.data.index import load_spine_index
     from src.neuron_model.spine_generation.data.splits import load_splits
@@ -75,7 +79,7 @@ def _reconstruction_latents(model, args, cfg, device):
     rng = np.random.default_rng(args.seed)
     chosen = index.subset(index.frame["spine_key"].iloc[rng.permutation(len(index))[: args.n_samples]])
     dataset = PointCloudDataset(chosen, int(data["n_points"]), random_variant=False, coord_scale=float(data["coord_scale"]), use_normals=bool(data.get("use_normals", True)))
-    latents, keys = [], []
+    latents, keys, clouds = [], [], []
     for i in range(len(dataset)):
         item = dataset[i]
         normals = item.get("normals")
@@ -83,7 +87,8 @@ def _reconstruction_latents(model, args, cfg, device):
             _, mu, _ = model.encode(item["points"][None].to(device), None if normals is None else normals[None].to(device), sample=False)
         latents.append(mu[0].cpu().numpy())
         keys.append(item["spine_key"])
-    return np.stack(latents), keys
+        clouds.append(item["points"].numpy().astype(np.float64) / float(data["coord_scale"]))
+    return np.stack(latents), keys, clouds
 
 
 def main() -> None:
@@ -96,6 +101,9 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=1.0, help="prior mode: z = temperature * N(0, I); <1 stays closer to the data manifold (less diverse)")
     parser.add_argument("--resolution", type=int, help="marching-cubes grid (default: resolution_final of the reconstruction config, 256)")
     parser.add_argument("--no-postprocess", action="store_true")
+    parser.add_argument("--crop-to-spine", action="store_true", help="reconstruction mode, DIAGNOSTIC: extract the mesh only in the box of the real spine (+ --crop-margin) instead of the frozen train bbox. "
+                        "The decoder is supervised only inside the box of its own spine; outside it is unconstrained and Marching Cubes returns thousands of fragments there")
+    parser.add_argument("--crop-margin", type=float, default=150.0, help="nm, margin of the --crop-to-spine box")
     parser.add_argument("--check-self-intersections", action="store_true", help="slow; the spec's validity report includes it")
     # reconstruction mode
     parser.add_argument("--split", default="test", help="reconstruction mode: split to draw real spines from")
@@ -120,23 +128,32 @@ def main() -> None:
     resolution = int(args.resolution or mc_cfg["resolution_final"])
     postprocess_cfg = None if args.no_postprocess else mc_cfg["postprocess"]
 
+    if args.crop_to_spine and args.mode != "reconstruction":
+        parser.error("--crop-to-spine needs --mode reconstruction (a prior sample has no spine to take the box from)")
+    real_clouds = None
     if args.mode == "prior":
         z_all = (args.temperature * model.sample_prior(args.n_samples, generator=torch.Generator().manual_seed(args.seed), device="cpu")).numpy()
         keys = [None] * len(z_all)
         out_root = run.meshes
     else:
-        z_all, keys = _reconstruction_latents(model, args, cfg, device)
-        out_root = run.root / "meshes_reconstruction"
+        z_all, keys, real_clouds = _reconstruction_latents(model, args, cfg, device)
+        out_root = run.root / ("meshes_reconstruction_crop" if args.crop_to_spine else "meshes_reconstruction")
     tag = f"seed_{args.seed}"
     writer = SampleWriter(out_root)
     print(f"{args.mode}: {len(z_all)} samples, grid {resolution}^3, checkpoint {checkpoint_id} -> {out_root / tag}", flush=True)
 
     from tqdm.auto import tqdm
 
-    raw_reports, post_reports = [], []
+    from src.neuron_model.spine_generation.evaluation.geometry_metrics import chamfer_metrics, sample_surface
+
+    raw_reports, post_reports, recon_rows = [], [], []
     for i, (z, key) in enumerate(tqdm(list(zip(z_all, keys)), desc=args.mode)):
+        box = (bbox.low, bbox.high)
+        if args.crop_to_spine:
+            cloud = real_clouds[i]
+            box = (tuple((cloud.min(axis=0) - args.crop_margin).tolist()), tuple((cloud.max(axis=0) + args.crop_margin).tolist()))
         result = latent_to_mesh(
-            model, z, bbox=(bbox.low, bbox.high), resolution=resolution, coord_scale=coord_scale, device=device,
+            model, z, bbox=box, resolution=resolution, coord_scale=coord_scale, device=device,
             chunk_size=int(mc_cfg.get("chunk_size", 262_144)), iso_level=float(mc_cfg.get("iso_level", 0.0)),
             postprocess_cfg=postprocess_cfg, check_self_intersections=args.check_self_intersections,
         )
@@ -144,7 +161,18 @@ def main() -> None:
             "mode": args.mode, "resolution": resolution, "coord_scale": coord_scale, "temperature": args.temperature if args.mode == "prior" else None,
             "spine_key": key, "split": args.split if args.mode == "reconstruction" else None, "generation_seed": args.seed,
         }
+        config["bbox_nm"] = {"low": list(box[0]), "high": list(box[1]), "cropped_to_spine": bool(args.crop_to_spine)}
         write_vae_sample(writer, tag, i, z, result, seed=args.seed, checkpoint_id=checkpoint_id, generation_config=config)
+        if real_clouds is not None:  # reconstruction vs the REAL surface (point cloud of the preprocessed spine), nm
+            row = {"sample": i, "spine_key": key}
+            for kind in ("raw", "postprocessed"):
+                mesh = result["mesh_raw"] if kind == "raw" else result["mesh_postprocessed"]
+                if mesh is None or len(mesh.faces) == 0:
+                    continue
+                m = chamfer_metrics(sample_surface(mesh, 8192, seed=i), real_clouds[i], f_score_thresholds=(10.0, 25.0, 50.0))
+                row.update({f"{kind}_{k}": v for k, v in m.items()})
+            recon_rows.append(row)
+            write_json(writer.sample_dir(tag, i) / "reconstruction_metrics.json", row)
         raw_reports.append(result["validation_raw"])
         post_reports.append(result["validation_postprocessed"])
 
@@ -158,6 +186,13 @@ def main() -> None:
         "validity_raw": aggregate_validity(raw_reports),
         "validity_postprocessed": aggregate_validity(post_reports),
     }
+    if recon_rows:
+        table = pd.DataFrame(recon_rows)
+        table.to_parquet(out_root / tag / "reconstruction_metrics.parquet", index=False)
+        summary["reconstruction_vs_real_nm"] = {
+            f"{kind}_{k}_median": float(table[f"{kind}_{k}"].median())
+            for kind in ("raw", "postprocessed") for k in ("chamfer_l1", "hausdorff_95", "f_score@25", "f_score@50") if f"{kind}_{k}" in table
+        }
     write_json(out_root / tag / "generation_summary.json", summary)
     pd.DataFrame(raw_reports).to_parquet(out_root / tag / "validation_raw.parquet", index=False)
     print(json.dumps(summary, indent=2, default=str))
