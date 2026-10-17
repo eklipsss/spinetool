@@ -69,7 +69,13 @@ def main() -> None:
 
     index = load_spine_index([resolve_path(p) for p in data_cfg["manifests"]], path_mode=data_cfg.get("path_mode", "relative"), check_files=())
     index = index.with_split(load_splits(resolve_path(data_cfg["splits"])), drop_unassigned=bool(data_cfg.get("drop_unassigned", False)))
-    _, val = sdf_datasets(index, data_cfg)
+    far_bbox = None
+    if data_cfg.get("far_queries"):
+        from src.neuron_model.spine_generation.data.bbox import FrozenBBox
+
+        bb = FrozenBBox.load(resolve_path(data_cfg["bbox"]))
+        far_bbox = (bb.low, bb.high)
+    _, val = sdf_datasets(index, data_cfg, far_bbox=far_bbox)
     if val is None:
         raise SystemExit("no validation spines")
     n = min(args.n_spines, len(val))
@@ -105,6 +111,23 @@ def main() -> None:
                     mask = batch["sample_type"] == code
                     sums[mode][name][0] += float(err[mask].sum())
                     sums[mode][name][1] += int(mask.sum())
+
+    # alignment of the SDF gradient with the mesh normal on surface samples (the normal loss is 1 - cos)
+    from src.neuron_model.spine_generation.models.spine_vae.losses import sdf_gradient
+
+    cos_all, gnorm_all = [], []
+    for batch, mu in batches:
+        with torch.enable_grad():
+            q = batch["query_points"].detach().requires_grad_(True)
+            g = sdf_gradient(model.decode(q, mu), q).detach()
+        mask = batch["query_has_normal"] & (batch["sample_type"] == SAMPLE_SURFACE)
+        cos_all.append(torch.nn.functional.cosine_similarity(g[mask], batch["query_normals"][mask], dim=-1).cpu())
+        gnorm_all.append(g[mask].norm(dim=-1).cpu())
+    cos = torch.cat(cos_all).numpy()
+    gn = torch.cat(gnorm_all).numpy()
+    print("gradient vs mesh normal on surface samples: mean cos %.3f; cos>0.9: %.1f%%, 0.5..0.9: %.1f%%, |cos|<0.5: %.1f%%, cos<-0.5: %.1f%%"
+          % (cos.mean(), 100 * (cos > 0.9).mean(), 100 * ((cos > 0.5) & (cos <= 0.9)).mean(), 100 * (np.abs(cos) < 0.5).mean(), 100 * (cos < -0.5).mean()))
+    print("|grad| on surface samples: median %.3f, 5%%-95%%: %.3f..%.3f" % (np.median(gn), np.percentile(gn, 5), np.percentile(gn, 95)))
 
     def mean_err(mode, name):
         total, count = sums[mode][name]
