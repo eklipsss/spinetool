@@ -41,6 +41,14 @@ def build_payloads(cfg: BranchPreprocessingConfig, neurons: List[str]) -> List[D
     midpoints = load_soma_midpoints(cfg)
     config_hash = cfg.config_hash()
     spine_groups = {n: g for n, g in spines.groupby("neuron_id")} if len(spines) else {}
+    missing = sorted(set(map(str, neurons)) - set(map(str, spine_groups)))
+    if missing:
+        # without S verdicts every segment is 'unknown': counts and positions are undefined and the branch is not
+        # eligible for P (T is not affected). Usually the S preprocessing has not reached these neurons yet.
+        print(f"[branches] WARNING: {len(missing)} of {len(neurons)} neurons have no rows in the S manifest ({cfg.s_root}); "
+              f"their spines will be 'unknown' (S preprocessing not finished?). First: {missing[:5]}", flush=True)
+    status_known = spines["status"].isin(["valid", "invalid"]).mean() if len(spines) and "status" in spines.columns else 0.0
+    print(f"[branches] S tables: {len(spines)} spine rows for {len(spine_groups)} neurons, false-spine verdict known for {status_known:.1%}", flush=True)
     keep_cols = ["limb_id", "branch_id", "spine_id", "status", "seal_status", "attachment_ambiguous", "attachment_method", "attachment_region_path", "origin_global", "attachment_loop_area", "attachment_cap_area"]
     payloads = []
     for neuron_id, group in members.groupby("neuron_id"):

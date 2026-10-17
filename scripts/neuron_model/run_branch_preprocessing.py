@@ -1,14 +1,16 @@
 """Branch preprocessing for modules T and P (docs/neuron-model/tp-branch-preprocessing.md).
 
-Windows, full Minnie65 (outputs to <raw-data-root>/<dataset>/preprocessed_branches by default):
+Windows, full Minnie65. The output is small (a few GB) -> write it to the LOCAL disk (fast small-file writes; the fit
+scripts then read it locally); the input (~160 GB of meshes) is read from the NAS once. No --splits: the split is
+attached at fit time (``data.splits=...``), the frozen splits_v1 needs the finished S preprocessing.
 
-    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets \
-        --metadata-root datasets --splits data/processed/neuron-model/splits/splits_v1.parquet --workers 8
+    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets --metadata-root O:/Datasets \
+        --output-root C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches --workers 8 --io-threads 8
 
 One neuron first (pilot, with timing):
 
-    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets --metadata-root datasets \
-        --neuron-id 864691134886335738
+    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets --metadata-root O:/Datasets \
+        --output-root C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches --neuron-id 864691134886335738
 
 mac (local 3-neuron sample; a few branches only - project rule):
 

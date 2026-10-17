@@ -129,6 +129,42 @@ def main() -> None:
           % (cos.mean(), 100 * (cos > 0.9).mean(), 100 * ((cos > 0.5) & (cos <= 0.9)).mean(), 100 * (np.abs(cos) < 0.5).mean(), 100 * (cos < -0.5).mean()))
     print("|grad| on surface samples: median %.3f, 5%%-95%%: %.3f..%.3f" % (np.median(gn), np.percentile(gn, 5), np.percentile(gn, 95)))
 
+    # SDF profile along the (verified) mesh normal through surface samples, -40..+100 nm (short inward: necks are
+    # ~100 nm thick). A clean field is ~t there: ONE zero crossing near t = 0, monotone, slope 1. Ripples of the
+    # decoder between the training samples show up as extra crossings / non-monotone profiles; a smooth but shifted
+    # surface as a large crossing offset.
+    scale = float(data_cfg["coord_scale"])
+    t_nm = np.arange(-40.0, 100.0 + 1e-9, 2.0)
+    t = torch.as_tensor(t_nm * scale, dtype=torch.float32, device=device)
+    n_cross, monotone, slope, offset, dev = [], [], [], [], []
+    with torch.no_grad():
+        for batch, mu in batches:
+            mask = batch["query_has_normal"] & (batch["sample_type"] == SAMPLE_SURFACE)
+            for b in range(mask.shape[0]):
+                idx = torch.nonzero(mask[b]).flatten()[:32]
+                if len(idx) == 0:
+                    continue
+                p, nrm = batch["query_points"][b, idx], batch["query_normals"][b, idx]
+                nrm = nrm / nrm.norm(dim=-1, keepdim=True)
+                pts = p[:, None, :] + t[None, :, None] * nrm[:, None, :]
+                f = model.decode(pts.reshape(1, -1, 3), mu[b:b + 1]).reshape(len(idx), -1).float().cpu().numpy() / scale  # nm
+                for row in f:
+                    sgn = np.sign(row)
+                    cross = np.flatnonzero(sgn[:-1] * sgn[1:] < 0)
+                    n_cross.append(len(cross))
+                    monotone.append(bool(np.all(np.diff(row) > 0)))
+                    slope.append(float(np.median(np.diff(row) / 2.0)))
+                    if len(cross):
+                        c = cross[np.argmin(np.abs(t_nm[cross]))]
+                        offset.append(float(t_nm[c] - row[c] * (t_nm[c + 1] - t_nm[c]) / (row[c + 1] - row[c])))
+                    inner = np.abs(t_nm) <= 40.0
+                    dev.append(float(np.sqrt(np.mean((row[inner] - t_nm[inner]) ** 2))))
+    n_cross = np.array(n_cross)
+    print("SDF along the normal (-40..+100 nm) at %d surface points: zero crossings 1: %.1f%%, 0: %.1f%%, >=2: %.1f%%; monotone %.1f%%"
+          % (len(n_cross), 100 * (n_cross == 1).mean(), 100 * (n_cross == 0).mean(), 100 * (n_cross >= 2).mean(), 100 * np.mean(monotone)))
+    print("   slope median %.2f (1 = distance); |crossing offset| median %.0f nm, 90%% %.0f nm; RMS(f - t) within +-40 nm: median %.0f nm"
+          % (np.median(slope), np.median(np.abs(offset)) if offset else float("nan"), np.percentile(np.abs(offset), 90) if offset else float("nan"), np.median(dev)))
+
     def mean_err(mode, name):
         total, count = sums[mode][name]
         return total / max(count, 1)

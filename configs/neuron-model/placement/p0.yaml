@@ -1,0 +1,23 @@
+# P0 (count + positions, p-module-technical-spec.md sections 4-6). CPU, minutes. Units: nm.
+#   python scripts/neuron_model/fit_p0.py --config configs/neuron-model/placement/p0.yaml data.branches_root=C:/.../preprocessed_branches
+seed: 20260929
+runs_root: runs/training/neuron-model
+name: p0
+
+data:
+  branches_root: null
+  pack_dir: data/interim/neuron-model/branch_pack/minnie65   # shared with T0
+  splits: null
+  io_threads: 16
+  train_splits: [train]
+  val_splits: [val]
+
+model:
+  families: [poisson, nb, zinb, hurdle]
+  exposures: [length, area]
+  random_effects: [false, true]
+  n_basis: 5
+  smooth_penalty: 1.0
+  max_iter: 300
+  position_use: [radius, kappa, soma, end]
+  d_min_quantile_percent: 1.0

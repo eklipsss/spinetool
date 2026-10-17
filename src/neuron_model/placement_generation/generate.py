@@ -82,3 +82,27 @@ def generate_placements(
             "seed": seed,
         })
     return out
+
+
+def covariates_from_trunk(trunk: Dict[str, Any], request: Dict[str, Any], neuron: str):
+    """Count covariates computed on a (generated or real) trunk record; ``request`` carries the conditions,
+    ``is_terminal`` and (optionally) ``soma_distance_start_nm`` - quantities T does not generate."""
+    from .covariates import BranchCovariates
+
+    s, r, gamma = np.asarray(trunk["s"], float), np.asarray(trunk["radius"], float), np.asarray(trunk["gamma"], float)
+    length = float(s[-1])
+    d0 = request.get("soma_distance_start_nm")
+    chord = float(np.linalg.norm(gamma[-1] - gamma[0]))
+    return BranchCovariates(neuron, -1, length, float(np.trapezoid(2 * np.pi * r, s)), float(np.trapezoid(r, s) / max(length, 1e-9)),
+                            None if d0 is None else float(d0) + 0.5 * length, length / max(chord, 1e-9), bool(request.get("is_terminal", False)),
+                            request.get("species"), request.get("cell_type_binary"), request.get("compartment"))
+
+
+def pack_records(trunks: Sequence[Dict[str, Any]], fields: Sequence[str] = ("s", "gamma", "radius", "normal", "binormal", "tangent")) -> Dict[str, np.ndarray]:
+    """Concatenate trunk records into flat arrays + offsets (one file for a whole generated set, not one per branch)."""
+    n = np.array([len(t["s"]) for t in trunks], dtype=np.int64)
+    out = {"offsets": np.r_[0, np.cumsum(n)].astype(np.int64)}
+    for f in fields:
+        if all(f in t for t in trunks):
+            out[f] = np.concatenate([np.asarray(t[f]) for t in trunks]) if trunks else np.zeros(0)
+    return out

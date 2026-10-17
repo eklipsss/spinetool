@@ -2,7 +2,8 @@
 
 Run after ``run_branch_preprocessing.py`` with the same paths:
 
-    python scripts/neuron_model/audit_branch_reconstruction.py --raw-data-root O:/Datasets --metadata-root datasets --per-stratum 25
+    python scripts/neuron_model/audit_branch_reconstruction.py --raw-data-root O:/Datasets --metadata-root O:/Datasets \
+        --output-root C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches --per-stratum 25
 
 Writes ``<output_root>/audit/reconstruction_circle.parquet`` (per branch) and ``..._summary.json``.
 """
