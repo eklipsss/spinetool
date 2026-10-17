@@ -47,6 +47,24 @@ def local_gradient_cos(path: Path, radius: float, max_surface: int, rng: np.rand
     return out
 
 
+def distance_ratio(path: Path, lo: float = 30.0, hi: float = 150.0):
+    """|sdf(q)| / (distance from q to the nearest stored SURFACE sample) for near-surface samples with lo <= |sdf| <= hi.
+
+    For a true distance field the ratio is <= 1 and close to 1 (the nearest stored surface sample is a little farther
+    than the true closest surface point). A ratio well below 1 means the stored SDF is not a Euclidean distance (wrong
+    scale / units / sign mixing), and the eikonal term (|grad| = 1) then contradicts the SDF targets."""
+    z = np.load(path)
+    q = np.asarray(z["query_points"], dtype=float)
+    s = np.asarray(z["sdf"], dtype=float)
+    t = np.asarray(z["sample_type"])
+    surf = q[t == 0]
+    near = (t == 1) & (np.abs(s) >= lo) & (np.abs(s) <= hi)
+    if len(surf) < 100 or not near.any():
+        return np.zeros(0), np.zeros(0)
+    d, _ = cKDTree(surf).query(q[near])
+    return np.abs(s[near]) / np.maximum(d, 1e-9), s[near]
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", type=Path, required=True)
@@ -69,6 +87,15 @@ def main() -> None:
     print("cos(data gradient, stored normal): mean %.3f; >0.9: %.1f%%, 0.5..0.9: %.1f%%, |cos|<0.5: %.1f%%, <-0.5: %.1f%%"
           % (cos.mean(), 100 * (cos > 0.9).mean(), 100 * ((cos > 0.5) & (cos <= 0.9)).mean(), 100 * (np.abs(cos) < 0.5).mean(), 100 * (cos < -0.5).mean()))
     print("|data gradient| median %.2f (1.0 for a clean distance field), 5%%-95%%: %.2f..%.2f" % (np.median(gn), np.percentile(gn, 5), np.percentile(gn, 95)))
+    ratios, values = zip(*[distance_ratio(f) for f in files])
+    ratio, value = np.concatenate(ratios), np.concatenate(values)
+    if len(ratio):
+        print("|sdf| / distance to the nearest surface sample (near samples, 30..150 nm): median %.3f, 5%%-95%%: %.3f..%.3f, >1.01: %.1f%%  (true distance: <= 1, ~0.9-1)"
+              % (np.median(ratio), np.percentile(ratio, 5), np.percentile(ratio, 95), 100 * (ratio > 1.01).mean()))
+        for sign, name in ((1, "outside (sdf > 0)"), (-1, "inside  (sdf < 0)")):
+            m = np.sign(value) == sign
+            if m.any():
+                print("   %s: n %d, median ratio %.3f" % (name, int(m.sum()), np.median(ratio[m])))
 
 
 if __name__ == "__main__":

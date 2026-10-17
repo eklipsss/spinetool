@@ -164,6 +164,11 @@ def main() -> None:
           % (len(n_cross), 100 * (n_cross == 1).mean(), 100 * (n_cross == 0).mean(), 100 * (n_cross >= 2).mean(), 100 * np.mean(monotone)))
     print("   slope median %.2f (1 = distance); |crossing offset| median %.0f nm, 90%% %.0f nm; RMS(f - t) within +-40 nm: median %.0f nm"
           % (np.median(slope), np.median(np.abs(offset)) if offset else float("nan"), np.percentile(np.abs(offset), 90) if offset else float("nan"), np.median(dev)))
+    if offset:
+        off = np.array(offset)
+        # > 0: the model surface lies OUTSIDE the real one (spine inflated); < 0: inside (spine shrunk, thin necks vanish)
+        print("   signed crossing offset (model surface - real, along the outward normal): median %+.0f nm, 10%%..90%%: %+.0f..%+.0f nm; inside: %.1f%%"
+              % (np.median(off), np.percentile(off, 10), np.percentile(off, 90), 100 * (off < 0).mean()))
 
     def mean_err(mode, name):
         total, count = sums[mode][name]
