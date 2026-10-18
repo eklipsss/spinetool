@@ -1,0 +1,16 @@
+# Model C with the geometric regularisers ON FROM STEP 0 (the working recipe, 2026-10-18).
+# Same 50 validation spines, step 30 000 (cache of 15 000 train spines, splits_dev_100n):
+#   regularisers switched on at step 30 000 of a baseline run (eikonal/normal 0.1 -> 1.0 -> 0.3): valid raw meshes 4 %,
+#     Chamfer-L1 255 nm, F@50 0.35 - the decoder had learnt a rippled field (cos(grad, normal) 0.17) and the late
+#     regularisers only traded surface accuracy for smoothness;
+#   this config from step 0: valid raw meshes 74 %, single component 74 %, Chamfer-L1 45 nm, HD95 126 nm, F@50 0.69,
+#     cos(grad, normal) 0.80, latent no longer one-dimensional (top PC 26 % instead of 88 %).
+defaults: [baseline.yaml]
+name: vae-reg
+
+data:
+  batch_size: 16           # BatchNorm in the encoder and over mu needs >= 16
+
+loss:
+  eikonal: 0.1
+  normal: 0.3
