@@ -72,8 +72,13 @@ def run_training(
     step = 0
     if resume and checkpoints.exists("latest"):
         payload = checkpoints.load("latest", map_location=device)
-        load_state_dicts(payload["state"], model=model, optimizer=optimizer, ema=ema, scheduler=scheduler, scaler=scaler)
+        has_scheduler = scheduler is not None and "scheduler" in payload["state"]
+        load_state_dicts(payload["state"], model=model, optimizer=optimizer, ema=ema, scheduler=scheduler if has_scheduler else None, scaler=scaler)
         step = int(payload["step"])
+        if scheduler is not None and not has_scheduler:
+            # a schedule added on resume (the checkpoint was trained without one): start it at the current step
+            for _ in range(step):
+                scheduler.step()
         for stream in ("train", "val", "samples"):
             logger.truncate_after(stream, step)
 

@@ -36,7 +36,7 @@ from src.neuron_model.spine_generation.experiment.config import apply_overrides,
 from src.neuron_model.spine_generation.experiment.loop import LoopConfig, run_training
 from src.neuron_model.spine_generation.experiment.run import create_run, open_run
 from src.neuron_model.spine_generation.experiment.seed import seed_everything
-from src.neuron_model.spine_generation.experiment.training import count_parameters, get_device
+from src.neuron_model.spine_generation.experiment.training import count_parameters, get_device, make_lr_scheduler
 from src.neuron_model.spine_generation.models.spine_vae.model import SpineVAE, SpineVAEConfig
 from src.neuron_model.spine_generation.models.spine_vae.train import loss_weights, make_loss_fn, make_sample_fn, make_validate_fn, sdf_datasets
 
@@ -83,6 +83,8 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["optimizer"]["lr"]), weight_decay=float(cfg["optimizer"].get("weight_decay", 0.0)))
     weights = loss_weights(cfg["loss"])
     train_cfg = cfg["train"]
+    # optimizer.schedule: e.g. "optimizer.schedule={type: cosine, min_lr: 1.0e-5}" (default: constant lr)
+    scheduler = make_lr_scheduler(optimizer, cfg["optimizer"].get("schedule"), int(train_cfg["max_steps"]))
     sampling = cfg["sampling"]
     mc_cfg = load_config(resolve_path(cfg["reconstruction"]["marching_cubes_config"]))
     loader = make_loader(train_ds, batch_size=int(data_cfg["batch_size"]), shuffle=True, seed=int(cfg["seed"]), num_workers=int(data_cfg.get("num_workers", 0)), drop_last=True)
@@ -94,6 +96,7 @@ def main() -> None:
         loader,
         make_loss_fn(weights, device),
         device=device,
+        scheduler=scheduler,
         validate_fn=make_validate_fn(val_ds, weights, device, batch_size=int(data_cfg["batch_size"]), seed=int(cfg["seed"]), max_batches=train_cfg.get("n_val_batches")),
         sample_fn=make_sample_fn(
             run.meshes,

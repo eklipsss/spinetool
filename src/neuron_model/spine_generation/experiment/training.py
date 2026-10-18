@@ -145,3 +145,29 @@ def infinite(loader: Iterable) -> Iterator:
 
 def count_parameters(model, trainable_only: bool = True) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad or not trainable_only)
+
+
+def make_lr_scheduler(optimizer, schedule, max_steps: int):
+    """LR schedule from ``optimizer.schedule`` of a config: None / {type: constant} -> no scheduler;
+    {type: cosine, warmup_steps: W, min_lr: m, total_steps: T (default: train.max_steps)} -> linear warm-up over W
+    steps, then cosine decay from the base lr to ``min_lr`` at step T (constant ``min_lr`` after T)."""
+    import math
+
+    import torch
+
+    if not schedule or str(schedule.get("type", "constant")) == "constant":
+        return None
+    if str(schedule["type"]) != "cosine":
+        raise ValueError(f"unknown lr schedule {schedule['type']!r}")
+    base = float(optimizer.param_groups[0]["lr"])
+    floor = float(schedule.get("min_lr", 0.0)) / base
+    warm = int(schedule.get("warmup_steps", 0))
+    total = int(schedule.get("total_steps") or max_steps)
+
+    def factor(step: int) -> float:
+        if step < warm:
+            return (step + 1) / warm
+        p = min(1.0, (step - warm) / max(1, total - warm))
+        return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * p))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
