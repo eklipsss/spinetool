@@ -76,6 +76,7 @@ class BranchPreprocessingConfig:
     # spines
     end_clamp_factor: float = 0.5
     position_outlier_factor: float = 0.75
+    position_outlier_floor_nm: float = 0.0  # absolute floor of |dist_perp - r| limit max(factor * r, floor); the yaml uses 200 nm
     # eligibility
     length_min_t_nm: float = 5000.0
     length_max_t_nm: float = 255500.0

@@ -31,7 +31,8 @@ centerline:
                                    # (interpolates the fitting noise). On 2 real branches: h=1000 -> RMS to the
                                    # centres 0.5-0.6 r, twist <= 1.2e-6/nm, round trip 0.1-0.2 um; 2000 -> ~1 r off.
   radius_smoothing_nm: 1000.0
-  spline_rms_factor: 0.75          # QC: RMS distance of the smoothed line to the reliable centres <= 0.75 r_med
+  spline_rms_factor: 0.75          # QC: RMS distance of the smoothed line to the reliable centres <= max(0.75 r_med, floor)
+  spline_rms_floor_nm: 200.0       # the centre noise (~70-140 nm) does not scale with r: with 0.75 r alone 56 of 94 branches of the pilot neuron failed (13 with 200)
   min_reliable_sections: 5
   long_gap_nm: 3000.0
 
@@ -46,13 +47,14 @@ joining_and_soma:
 
 spines:
   end_clamp_factor: 0.5            # projection beyond an end by > 0.5 r -> projects_to_end (not counted in N)
-  position_outlier_factor: 0.75    # | |v_perp| - r(s) | > 0.75 r(s) -> position_outlier (counted, no position)
+  position_outlier_factor: 0.75    # | |v_perp| - r(s) | > max(0.75 r(s), floor) -> position_outlier (counted, no position)
+  position_outlier_floor_nm: 0.0   # set from the pilot (summarize_branches.py, per-spine block): the line is ~140 nm off the centres on thin branches
 
 eligibility:                       # initial values, to be refined by the audit
   length_min_t_nm: 5000.0
   length_max_t_nm: 255500.0
   length_min_p_nm: 2000.0
-  invalid_section_fraction_max: 0.2
+  invalid_section_fraction_max: 0.4   # pilot neuron, T-eligible of 94 ok branches: 0.2 -> 32, 0.3 -> 55, 0.4 -> 63, 0.5 -> 65 (the gain flattens)
   radius_min_nm: 80.0
   radius_max_nm: 1500.0
   trim_max_nm: 2000.0

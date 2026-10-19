@@ -25,6 +25,31 @@ def _bins(frame: pd.DataFrame, column: str, edges, label: str) -> None:
     print(f"  {label}: " + ", ".join(f"{k}: {v}" for k, v in cut.value_counts().sort_index().items() if v))
 
 
+def _spine_summary(root: Path, neuron_id, branches: pd.DataFrame) -> None:
+    path = (root / neuron_id / "branch_spines.parquet") if neuron_id else root / "branch_spines.parquet"
+    if not path.exists():
+        return
+    sp = pd.read_parquet(path)
+    sp = sp[sp["status"] == "valid"]
+    if not len(sp) or "dist_perp_minus_radius" not in sp.columns:
+        return
+    r = sp.merge(branches[["limb_id", "merged_branch_id", "radius_median_nm"]], on=["limb_id", "merged_branch_id"], how="left")
+    r = r[r["dist_perp_minus_radius"].notna()]
+    print(f"\n== valid spines with a computed position: {len(r)} ({int(sp['has_position'].fillna(False).sum())} have has_position) ==")
+    print("  outlier limit now: |distance to the line - r| > 0.75 r  (the line deviates from the section centres by ~140 nm on thin branches)")
+    for name, m in (("r < 120 nm", r["radius_median_nm"] < 120), ("120 <= r < 200 nm", (r["radius_median_nm"] >= 120) & (r["radius_median_nm"] < 200)), ("r >= 200 nm", r["radius_median_nm"] >= 200)):
+        x = r[m]
+        if not len(x):
+            continue
+        d = x["dist_perp_minus_radius"].astype(float)
+        out = x["position_outlier"].fillna(False).astype(bool).mean() if "position_outlier" in x.columns else float("nan")
+        end = x["projects_to_end"].fillna(False).astype(bool).mean() if "projects_to_end" in x.columns else float("nan")
+        print(f"  {name:18s} {len(x):4d} spines: |dist - r| median {d.abs().median():.0f} nm (10-90 %: {d.abs().quantile(0.1):.0f}-{d.abs().quantile(0.9):.0f}); signed median {d.median():+.0f} nm; position_outlier {out:.0%}; projects_to_end {end:.0%}")
+        for floor in (150.0, 200.0, 300.0):
+            lim = np.maximum(0.75 * x["radius_median_nm"].astype(float), floor)
+            print(f"      with a floor of {floor:.0f} nm: outliers {np.mean(d.abs() > lim):.0%}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=Path, required=True)
@@ -38,6 +63,7 @@ def main() -> None:
         if flag in b.columns:
             print(f"{flag}: {int(b[flag].fillna(False).sum())} of {len(b)} ({int((b['status'] == 'ok').sum())} with status ok)")
 
+    _spine_summary(args.root, args.neuron_id, b)
     ok = b[b["status"] == "ok"]
     print(f"\n== status ok: {len(ok)} branches; why NOT eligible for T (a branch can fail several checks) ==")
     reasons = Counter()

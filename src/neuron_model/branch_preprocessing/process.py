@@ -402,7 +402,7 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
         dist_perp = np.linalg.norm(proj.v_perp, axis=1)
         for n, (i, source) in enumerate(owners):
             clamped = bool(proj.at_end[n] != 0 and proj.beyond[n] > cfg.end_clamp_factor * r_at[n])
-            outlier = bool(abs(dist_perp[n] - r_at[n]) > cfg.position_outlier_factor * r_at[n])
+            outlier = bool(abs(dist_perp[n] - r_at[n]) > max(cfg.position_outlier_factor * r_at[n], cfg.position_outlier_floor_nm))
             info = segments[i]["info"]
             spine_rows[i].update(
                 has_position=not clamped and not outlier,

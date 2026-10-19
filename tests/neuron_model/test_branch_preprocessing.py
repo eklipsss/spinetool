@@ -220,3 +220,19 @@ def test_reapply_eligibility_changes_flags_without_reprocessing(mini):
     tight = dataclasses.replace(cfg, spline_rms_factor=1e-3)
     assert reapply_eligibility(tight, write=False)["train_eligible_T"] == 0
     assert reapply_eligibility(dataclasses.replace(tight, spline_rms_floor_nm=100.0), write=False)["train_eligible_T"] == 1
+
+
+def test_position_outlier_floor(mini):
+    import dataclasses
+
+    cfg = mini["cfg"]
+    strict = dataclasses.replace(cfg, position_outlier_factor=0.0, output_root=mini["tmp"] / "out_strict")
+    run(strict)
+    spines = pd.read_parquet(strict.out_root / "branch_spines.parquet")
+    pos = spines[(spines["status"] == "valid") & spines["s"].notna()]
+    assert len(pos) and pos["position_outlier"].all() and not pos["has_position"].any()  # limit 0 nm: every spine is an outlier
+    floor = dataclasses.replace(strict, position_outlier_floor_nm=1000.0, output_root=mini["tmp"] / "out_floor", force=True)
+    run(floor)
+    spines = pd.read_parquet(floor.out_root / "branch_spines.parquet")
+    pos = spines[(spines["status"] == "valid") & spines["s"].notna()]
+    assert not pos["position_outlier"].any() and pos["has_position"].all()
