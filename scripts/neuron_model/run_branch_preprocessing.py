@@ -53,6 +53,7 @@ def main() -> None:
     parser.add_argument("--splits", type=Path, help="splits_*.parquet: adds the split of each branch (by neuron)")
     parser.add_argument("--neuron-id", action="append", dest="neuron_ids")
     parser.add_argument("--limit-neurons", type=int)
+    parser.add_argument("--only-s-neurons", action="store_true", help="only neurons present in the S manifest (S preprocessing finished for them)")
     parser.add_argument("--merged-branch-id", action="append", type=int, dest="merged_branch_ids", help="small checks: only these merged branches")
     parser.add_argument("--limit-branches", type=int, help="small checks: first N merged branches of each neuron")
     parser.add_argument("--workers", type=int, default=1)
@@ -72,6 +73,7 @@ def main() -> None:
             "splits": args.splits.resolve() if args.splits else None,
             "neuron_ids": args.neuron_ids,
             "limit_neurons": args.limit_neurons,
+            "only_s_neurons": args.only_s_neurons or None,
             "merged_branch_ids": args.merged_branch_ids,
             "limit_branches": args.limit_branches,
             "workers": args.workers,

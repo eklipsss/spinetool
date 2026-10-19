@@ -165,3 +165,23 @@ def test_branch_subset_is_not_marked_done(mini):
     assert json.loads((cfg.out_root / NEURON / "_done.json").read_text())["partial"] is True
     cfg.merged_branch_ids = None
     assert run(cfg)["processed"] == 1  # a partial neuron is processed again in a full run
+
+
+def test_only_s_neurons_skips_neurons_without_s_rows(mini):
+    import dataclasses
+
+    from src.neuron_model.branch_preprocessing.inputs import available_neurons, load_members
+
+    cfg = mini["cfg"]
+    members = load_members(cfg)
+    assert available_neurons(cfg, members) == [NEURON]
+    # a second neuron that exists in the raw data and the mapping but has no rows in the S manifest
+    (cfg.dataset_root / "100000000000000002").mkdir()
+    extra = members.copy()
+    extra["neuron_id"] = "100000000000000002"
+    import pandas as pd
+
+    members2 = pd.concat([members, extra], ignore_index=True)
+    assert sorted(available_neurons(cfg, members2)) == [NEURON, "100000000000000002"]
+    only = dataclasses.replace(cfg, only_s_neurons=True)
+    assert available_neurons(only, members2) == [NEURON]

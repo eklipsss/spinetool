@@ -17,7 +17,7 @@ ALGORITHM_VERSION = "branch-preprocessing-v1"
 # fields that change the result (enter the config hash); paths / parallelism do not
 _RUNTIME_FIELDS = {
     "raw_data_root", "metadata_root", "s_preprocessed_root", "output_root", "splits",
-    "neuron_ids", "limit_neurons", "workers", "io_threads", "force", "merged_branch_ids", "limit_branches",
+    "neuron_ids", "limit_neurons", "workers", "io_threads", "force", "merged_branch_ids", "limit_branches", "only_s_neurons",
 }
 
 
@@ -31,6 +31,7 @@ class BranchPreprocessingConfig:
     splits: Optional[Path] = None  # splits_*.parquet; the split of a branch is the split of its neuron
     neuron_ids: Optional[List[str]] = None
     limit_neurons: Optional[int] = None
+    only_s_neurons: bool = False  # only neurons present in the S manifest (the S preprocessing may not have reached the others)
     merged_branch_ids: Optional[List[int]] = None  # debugging / small checks: only these merged branches
     limit_branches: Optional[int] = None  # debugging / small checks: first N merged branches of each neuron
     workers: int = 1

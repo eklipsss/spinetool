@@ -145,6 +145,10 @@ def available_neurons(cfg: BranchPreprocessingConfig, members: pd.DataFrame) -> 
     root = cfg.dataset_root
     present = {entry.name for entry in os.scandir(root) if entry.is_dir()} if root.is_dir() else set()
     neurons = sorted(set(members["neuron_id"]) & present)
+    if cfg.only_s_neurons:
+        manifest = Path(cfg.s_root) / "manifest.parquet"
+        in_s = set(_read_columns(manifest, ["neuron_id"])["neuron_id"].astype(str)) if manifest.exists() else set()
+        neurons = [n for n in neurons if n in in_s]
     if cfg.neuron_ids:
         wanted = {str(n) for n in cfg.neuron_ids}
         neurons = [n for n in neurons if n in wanted]
