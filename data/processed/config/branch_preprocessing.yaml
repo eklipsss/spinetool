@@ -2,7 +2,7 @@
 # All lengths in nanometres. Paths/parallelism are CLI flags (scripts/neuron_model/run_branch_preprocessing.py);
 # only the algorithm parameters below enter the config hash (a neuron is redone when they change).
 #
-# Windows (full Minnie65): --raw-data-root O:\Datasets --metadata-root O:\Datasets --output-root C:\... --workers 8
+# Windows (full Minnie65): --raw-data-root O:\Datasets --metadata-root <repo>\datasets --output-root C:\... --workers 8
 #   input ~220 MB per neuron (branch meshes + spine meshes + limb skeletons) -> ~160 GB from the NAS,
 #   i.e. the run is bound by the NAS read throughput (~4 MB/s measured): plan for one night.
 #   Output (npz + parquet) is small (a few GB): put it on the LOCAL disk (--output-root C:/...), not on the NAS
