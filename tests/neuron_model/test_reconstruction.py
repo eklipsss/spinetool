@@ -87,7 +87,12 @@ def test_screened_poisson_reconstructs_sphere_with_estimated_normals():
     report = validate_mesh(mesh)
     assert report["is_watertight"] and report["n_connected_components"] == 1 and report["genus"] == 0
     metrics = compare_meshes(mesh, sphere, n_points=4096)
-    assert metrics["chamfer_l1"] < 0.02  # radius 1
+    # Chamfer between two 4096-point samples is never 0: two independent samplings of the SAME unit sphere already
+    # give ~0.0277 (mean nearest-neighbour spacing / 2). The reconstruction must stay within 15 % of that floor.
+    from src.neuron_model.spine_generation.evaluation.geometry_metrics import chamfer_metrics, sample_surface
+
+    floor = chamfer_metrics(sample_surface(sphere, 4096, seed=1), sample_surface(sphere, 4096, seed=2))["chamfer_l1"]
+    assert metrics["chamfer_l1"] < 1.15 * floor
     assert metrics["volume_rel_diff"] == pytest.approx(0.0, abs=0.03)
 
 
