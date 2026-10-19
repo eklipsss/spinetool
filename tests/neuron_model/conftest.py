@@ -1,7 +1,14 @@
 import functools
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+# Windows conda: torch (libomp) and MKL (libiomp5md) both load an OpenMP runtime; the first BLAS call after both are
+# loaded aborts the whole pytest process ("Fatal Python error: Aborted"). Same workaround as the scripts; must be set
+# before numpy / torch are imported.
+if sys.platform == "win32":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import numpy as np
 import pandas as pd

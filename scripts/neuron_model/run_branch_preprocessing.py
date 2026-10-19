@@ -4,12 +4,12 @@ Windows, full Minnie65. The output is small (a few GB) -> write it to the LOCAL 
 scripts then read it locally); the input (~160 GB of meshes) is read from the NAS once. No --splits: the split is
 attached at fit time (``data.splits=...``), the frozen splits_v1 needs the finished S preprocessing.
 
-    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets --metadata-root O:/Datasets \
+    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets --metadata-root datasets \
         --output-root C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches --workers 8 --io-threads 8
 
 One neuron first (pilot, with timing):
 
-    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets --metadata-root O:/Datasets \
+    python scripts/neuron_model/run_branch_preprocessing.py --raw-data-root O:/Datasets --metadata-root datasets \
         --output-root C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches --neuron-id 864691134886335738
 
 mac (local 3-neuron sample; a few branches only - project rule):
