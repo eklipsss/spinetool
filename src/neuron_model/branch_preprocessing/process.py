@@ -475,7 +475,7 @@ def _finalize_eligibility(cfg: BranchPreprocessingConfig, row: Dict[str, Any]) -
     qc_merge = ok and row.get("merge_max_gap_nm", 0.0) <= cfg.join_distance_nm and bool(row.get("skeleton_topology_ok", False))
     qc_cross = ok and row.get("section_invalid_fraction", 1.0) <= cfg.invalid_section_fraction_max
     qc_centerline = ok and row.get("longest_gap_nm", float("inf")) <= cfg.long_gap_nm and (
-        row.get("centerline_rms_to_centers_nm", float("inf")) <= cfg.spline_rms_factor * (r_med or float("nan"))
+        row.get("centerline_rms_to_centers_nm", float("inf")) <= max(cfg.spline_rms_factor * (r_med or float("nan")), cfg.spline_rms_floor_nm)
     )
     qc_frame = ok and row.get("twist_max_per_nm", float("inf")) <= cfg.twist_tolerance_per_nm
     qc_tube = ok and not row.get("tube_self_contact", True) and row.get("max_r_kappa", float("inf")) < 1.0

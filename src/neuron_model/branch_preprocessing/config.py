@@ -14,6 +14,12 @@ from typing import Any, Dict, List, Mapping, Optional
 
 ALGORITHM_VERSION = "branch-preprocessing-v1"
 
+# eligibility thresholds act only on quantities that are stored in branches.parquet: changing them does NOT redo the
+# geometry (``reapply_eligibility`` recomputes the flags from the tables), so they stay out of the algorithm hash
+_ELIGIBILITY_FIELDS = {
+    "length_min_t_nm", "length_max_t_nm", "invalid_section_fraction_max", "radius_min_nm", "radius_max_nm", "trim_max_nm",
+    "unknown_fraction_max", "position_fraction_min", "spline_rms_factor", "spline_rms_floor_nm", "long_gap_nm", "twist_tolerance_per_nm",
+}
 # fields that change the result (enter the config hash); paths / parallelism do not
 _RUNTIME_FIELDS = {
     "raw_data_root", "metadata_root", "s_preprocessed_root", "output_root", "splits",
@@ -55,7 +61,8 @@ class BranchPreprocessingConfig:
     outside_mesh_check: bool = True
     centerline_smoothing_nm: float = 1000.0  # equivalent kernel width of the centreline smoothing spline
     radius_smoothing_nm: float = 1000.0
-    spline_rms_factor: float = 0.75  # QC: RMS distance of the smoothed line to the reliable centres <= 0.75 r_med
+    spline_rms_factor: float = 0.75  # QC: RMS distance of the smoothed line to the reliable centres <= max(factor * r_med, floor)
+    spline_rms_floor_nm: float = 0.0  # absolute floor of that limit (thin branches: the centre noise does not scale with r)
     min_reliable_sections: int = 5
     long_gap_nm: float = 3000.0
     # grid, frame
@@ -96,7 +103,7 @@ class BranchPreprocessingConfig:
         return Path(self.output_root) if self.output_root else self.dataset_root / "preprocessed_branches"
 
     def config_hash(self) -> str:
-        payload = {k: v for k, v in asdict(self).items() if k not in _RUNTIME_FIELDS and k != "extra"}
+        payload = {k: v for k, v in asdict(self).items() if k not in _RUNTIME_FIELDS and k not in _ELIGIBILITY_FIELDS and k != "extra"}
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
     def to_dict(self) -> Dict[str, Any]:

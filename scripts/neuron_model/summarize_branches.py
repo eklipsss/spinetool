@@ -86,6 +86,22 @@ def main() -> None:
             if col in ok.columns and ok[col].notna().any():
                 v = ok[col].astype(float)
                 print(f"  {col:30s} {v.median():.4g}  ({v.quantile(0.1):.4g} .. {v.quantile(0.9):.4g})  {note}")
+        flag_cols = [c for c in ok.columns if c.startswith("sections_")]
+        if flag_cols and "n_sections" in ok.columns:
+            total = float(ok["n_sections"].sum())
+            print("  section flags among ALL sections of ok branches (a section may carry several): "
+                  + ", ".join(f"{c[len('sections_'):]} {ok[c].fillna(0).sum() / total:.0%}" for c in flag_cols) + f"  ({int(total)} sections)")
+            # radius classes: thin branches have sparse mesh vertices -> few points per section
+            r = ok["radius_median_nm"].astype(float)
+            for name, m in (("r < 120 nm", r < 120), ("120 <= r < 200 nm", (r >= 120) & (r < 200)), ("r >= 200 nm", r >= 200)):
+                sub = ok[m]
+                if len(sub):
+                    tot = float(sub["n_sections"].sum())
+                    inv = sub["section_invalid_fraction"].astype(float)
+                    rms = sub["centerline_rms_to_centers_nm"].astype(float)
+                    print(f"  {name:18s} {len(sub):3d} branches: invalid sections median {inv.median():.2f}; centreline rms median {rms.median():.0f} nm; "
+                          f"few_points {sub['sections_few_points'].fillna(0).sum() / tot:.0%}, outside_mesh {sub['sections_outside_mesh'].fillna(0).sum() / tot:.0%}, "
+                          f"kink {sub['sections_kink'].fillna(0).sum() / tot:.0%}; eligible T {int(sub['train_eligible_T'].fillna(False).sum())}")
         if "n_spines_in_range" in ok.columns:
             print(f"  spines per branch: median {ok['n_spines_in_range'].median():.0f}, branches without spines {(ok['n_spines_in_range'] == 0).mean():.0%}")
         if "tube_self_contact" in ok.columns:

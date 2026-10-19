@@ -185,3 +185,38 @@ def test_only_s_neurons_skips_neurons_without_s_rows(mini):
     assert sorted(available_neurons(cfg, members2)) == [NEURON, "100000000000000002"]
     only = dataclasses.replace(cfg, only_s_neurons=True)
     assert available_neurons(only, members2) == [NEURON]
+
+
+def test_reapply_eligibility_changes_flags_without_reprocessing(mini):
+    import dataclasses
+
+    from src.neuron_model.branch_preprocessing import reapply_eligibility
+
+    cfg = mini["cfg"]
+    run(cfg)
+    marker = cfg.out_root / NEURON / "_done.json"
+    stamp = marker.stat().st_mtime_ns
+    base = pd.read_parquet(cfg.out_root / "branches.parquet").set_index("merged_branch_id")
+    assert bool(base.loc[0, "train_eligible_T"]) and not bool(base.loc[0, "train_eligible_P"])  # P: 25 % unknown segments, 2 of 3 spines positioned
+
+    # the eligibility thresholds are not part of the geometry hash
+    assert dataclasses.replace(cfg, unknown_fraction_max=0.5, position_fraction_min=0.5, radius_max_nm=200.0).config_hash() == cfg.config_hash()
+
+    dry = reapply_eligibility(dataclasses.replace(cfg, unknown_fraction_max=0.5, position_fraction_min=0.5), write=False)
+    assert dry["train_eligible_P"] == 1 and dry["train_eligible_T"] == 1
+    assert not bool(pd.read_parquet(cfg.out_root / "branches.parquet").set_index("merged_branch_id").loc[0, "train_eligible_P"])  # nothing written
+
+    res = reapply_eligibility(dataclasses.replace(cfg, unknown_fraction_max=0.5, position_fraction_min=0.5, radius_max_nm=200.0))
+    after = pd.read_parquet(cfg.out_root / "branches.parquet").set_index("merged_branch_id")
+    assert bool(after.loc[0, "train_eligible_P"]) is False  # radius 300 nm > 200: radius_range
+    assert "radius_range" in after.loc[0, "qc_reason"] and res["train_eligible_T"] == 0
+    res = reapply_eligibility(dataclasses.replace(cfg, unknown_fraction_max=0.5, position_fraction_min=0.5))
+    after = pd.read_parquet(cfg.out_root / "branches.parquet").set_index("merged_branch_id")
+    assert bool(after.loc[0, "train_eligible_P"]) and bool(after.loc[0, "train_eligible_T"])
+    assert marker.stat().st_mtime_ns == stamp and run(cfg)["processed"] == 0  # the geometry is not recomputed
+    assert after.loc[2, "status"] == "too_short" and not bool(after.loc[2, "train_eligible_T"])
+
+    # the absolute floor of the centreline limit
+    tight = dataclasses.replace(cfg, spline_rms_factor=1e-3)
+    assert reapply_eligibility(tight, write=False)["train_eligible_T"] == 0
+    assert reapply_eligibility(dataclasses.replace(tight, spline_rms_floor_nm=100.0), write=False)["train_eligible_T"] == 1
