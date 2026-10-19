@@ -21,6 +21,7 @@ from src.neuron_model.branch_geometry import (
     smoothed_tangents,
     tube_mesh,
     tube_self_contact,
+    ellipse_tube_mesh,
 )
 
 
@@ -252,3 +253,38 @@ def test_adaptive_smoothing_keeps_a_wiggly_thin_line_inside_the_tube():
     # at most max_nodes nodes
     capped = centerline_geometry(centres, radii, smoothing_nm=h, radius_smoothing_nm=1000.0, node_step_nm=250.0, straight_fraction=0.02, max_nodes=40)
     assert len(capped["nodes"]) <= 40
+
+
+def test_flattened_tube_recovers_ellipse_profile_and_beats_the_circle():
+    """A tube with an elliptic section (a = 300, b = 160 nm, major axis turning slowly in the RMF): the section ellipses and
+    the node profile recover a, b and the angle; the elliptic tube describes the surface far better than the round one."""
+    from scipy.spatial import cKDTree
+
+    from src.neuron_model.branch_preprocessing.process import centerline_geometry
+
+    s = np.linspace(0.0, 12000.0, 1201)
+    axis = resample_polyline(np.column_stack([s, 600.0 * np.sin(np.pi * s / 12000.0), np.zeros_like(s)]), 25.0)
+    t = np.gradient(axis, axis=0)
+    t /= np.linalg.norm(t, axis=1, keepdims=True)
+    t, e1, e2 = rotation_minimizing_frames(axis, t, initial_normal(axis, t[0], 0.02)[0])
+    m = len(axis)
+    true_angle = 0.4 + 0.3 * np.linspace(0.0, 1.0, m)
+    v, f = ellipse_tube_mesh(axis, np.full(m, 300.0), np.full(m, 160.0), true_angle, e1, e2, n_theta=48)
+    g = resample_polyline(axis, 500.0)
+    sec = fit_sections(g, smoothed_tangents(g, 3), v, slab=150.0, max_r=1200.0, cluster_eps=150.0, robust_k=0.35, min_points=10, fit_ellipse=True)
+    ok = np.isfinite(sec.ellipse_a)
+    assert ok.mean() > 0.9
+    assert np.median(sec.ellipse_a[ok]) == pytest.approx(300.0, rel=0.05) and np.median(sec.ellipse_b[ok]) == pytest.approx(160.0, rel=0.08)
+    line = centerline_geometry(sec.centers[ok], sec.radii[ok], smoothing_nm=1000.0, radius_smoothing_nm=1000.0, node_step_nm=500.0,
+                               straight_fraction=0.02, ellipse=(sec.ellipse_a[ok], sec.ellipse_b[ok], sec.ellipse_major[ok]))
+    assert np.median(line["ellipse_b"] / line["ellipse_a"]) == pytest.approx(160.0 / 300.0, rel=0.1)
+    # the angle is measured in the line's own RMF: compare tubes rather than angles (frames may differ by a rotation)
+    import trimesh
+
+    surface = lambda vv, ff: cKDTree(trimesh.Trimesh(vv, ff, process=False).sample(40000, seed=0))  # dense points of the tube
+    tv, tf = tube_mesh(line["gamma"], line["radius"], line["e1"], line["e2"], n_theta=32, caps=False)
+    ev, ef = ellipse_tube_mesh(line["gamma"], line["ellipse_a"], line["ellipse_b"], line["ellipse_angle"], line["e1"], line["e2"], n_theta=32)
+    inner = (np.linalg.norm(v - axis[0], axis=1) > 800) & (np.linalg.norm(v - axis[-1], axis=1) > 800)
+    d_circle = surface(tv, tf).query(v[inner])[0]
+    d_ellipse = surface(ev, ef).query(v[inner])[0]
+    assert np.median(d_ellipse) < 0.4 * np.median(d_circle)

@@ -187,8 +187,12 @@ def adaptive_node_step_nm(cfg: BranchPreprocessingConfig, smoothing_nm: float) -
     return float(cfg.node_step_nm)
 
 
-def centerline_geometry(centers, radii, *, smoothing_nm: float, radius_smoothing_nm: float, node_step_nm: float, straight_fraction: float, max_nodes: int = 512) -> Dict[str, Any]:
-    """Reliable section centres (ordered) -> smoothed line, node grid, radius profile, RMF, bending, round trip."""
+def centerline_geometry(centers, radii, *, smoothing_nm: float, radius_smoothing_nm: float, node_step_nm: float, straight_fraction: float, max_nodes: int = 512,
+                        ellipse: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None) -> Dict[str, Any]:
+    """Reliable section centres (ordered) -> smoothed line, node grid, radius profile, RMF, bending, round trip.
+
+    ``ellipse`` = (a, b, major-axis unit vectors [n,3]) of the same sections (NaN where no ellipse): adds the node profiles
+    ``ellipse_a``, ``ellipse_b`` and ``ellipse_angle`` (angle of the major axis in the RMF, from e1 towards e2, in (-pi/2, pi/2])."""
     from scipy.spatial import cKDTree
 
     centerline = bg.smooth_centerline(centers, smoothing_nm=smoothing_nm)
@@ -215,11 +219,46 @@ def centerline_geometry(centers, radii, *, smoothing_nm: float, radius_smoothing
     k1, k2, twist = bg.bending_from_frames(t_nodes, e1, e2, ds_b)
     frame0 = np.stack([t_nodes[0], e1[0], e2[0]], axis=1)
     rebuilt, _ = bg.integrate_bending(k1, k2, ds_b, gamma[0], frame0)
-    return {
+    out = {
         "centerline": centerline, "length": length, "longest_gap": float(gaps.max()) if len(gaps) else float("nan"),
         "nodes": nodes, "step": ds_b, "radius": radius, "gamma": gamma, "tangent": t_nodes, "e1": e1, "e2": e2,
         "frame_reference": reference, "kappa1": k1, "kappa2": k2, "twist": twist, "rebuilt": rebuilt,
+        "ellipse_a": None, "ellipse_b": None, "ellipse_angle": None, "ellipse_valid_fraction": 0.0,
     }
+    if ellipse is not None:
+        out.update(_ellipse_profile(centerline.s[idx], ellipse, nodes, e1, e2, radius_smoothing_nm))
+    return out
+
+
+def _ellipse_profile(s_c: np.ndarray, ellipse, nodes: np.ndarray, e1: np.ndarray, e2: np.ndarray, smoothing_nm: float) -> Dict[str, Any]:
+    """Section ellipses -> smoothed a(s), b(s) and the major-axis angle in the RMF at the nodes (doubled-angle smoothing: an
+    ellipse is symmetric under a rotation by pi). Fewer than 5 valid sections -> no profile (None)."""
+    a, b, major = (np.asarray(x, dtype=float) for x in ellipse)
+    valid = np.isfinite(a) & np.isfinite(b) & np.isfinite(major).all(axis=1)
+    res: Dict[str, Any] = {"ellipse_valid_fraction": float(valid.mean()) if len(a) else 0.0}
+    if valid.sum() < 5:
+        return res
+    s_v, a_v, b_v, m_v = s_c[valid], a[valid], b[valid], major[valid]
+    e1_s = np.column_stack([np.interp(s_v, nodes, e1[:, k]) for k in range(3)])
+    e2_s = np.column_stack([np.interp(s_v, nodes, e2[:, k]) for k in range(3)])
+    phi = np.arctan2((m_v * e2_s).sum(1), (m_v * e1_s).sum(1))
+    c2, s2 = np.cos(2 * phi), np.sin(2 * phi)
+    order = np.argsort(s_v)
+    s_v, a_v, b_v, c2, s2 = s_v[order], a_v[order], b_v[order], c2[order], s2[order]
+    keep = np.r_[True, np.diff(s_v) > 1e-6]
+    s_v, a_v, b_v, c2, s2 = s_v[keep], a_v[keep], b_v[keep], c2[keep], s2[keep]
+    if len(s_v) < 5:
+        return res
+    at = np.clip(nodes, s_v[0], s_v[-1])
+    sm = lambda y: bg.smooth_series(s_v, y, smoothing_nm)(at)
+    a_n, b_n = np.clip(sm(a_v), 1.0, None), np.clip(sm(b_v), 1.0, None)
+    ang = 0.5 * np.arctan2(sm(s2), sm(c2))
+    swap = b_n > a_n  # keep a >= b: swapping the axes turns the major direction by pi/2
+    a_n[swap], b_n[swap] = b_n[swap].copy(), a_n[swap].copy()
+    ang[swap] = ang[swap] + np.pi / 2
+    ang = (ang + np.pi / 2) % np.pi - np.pi / 2
+    res.update(ellipse_a=a_n, ellipse_b=b_n, ellipse_angle=ang)
+    return res
 
 
 def line_inside_fraction(gamma: np.ndarray, triangles: np.ndarray, *, margin: float) -> float:
@@ -333,7 +372,7 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
     from scipy.spatial import cKDTree
 
     tree = cKDTree(shaft) if len(shaft) else None
-    kwargs = dict(slab=cfg.slab_half_thickness_nm, cluster_eps=cfg.cluster_eps_nm, robust_k=cfg.robust_k, min_points=cfg.min_section_points, tree=tree)
+    kwargs = dict(slab=cfg.slab_half_thickness_nm, cluster_eps=cfg.cluster_eps_nm, robust_k=cfg.robust_k, min_points=cfg.min_section_points, tree=tree, fit_ellipse=cfg.fit_ellipse)
     sections = bg.fit_sections(g, tangents, shaft, max_r=cfg.max_section_radius_nm, **kwargs)
     max_r_used = cfg.max_section_radius_nm
     if cfg.adaptive_max_radius_factor and np.isfinite(sections.radii).any():
@@ -371,6 +410,8 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
         geometry_dir / "branch_sections.npz",
         points=sections.points, tangents=sections.tangents, centers=sections.centers, radii=sections.radii,
         n_points=sections.n_points, flags=flags,
+        **({"ellipse_center": sections.ellipse_center, "ellipse_a": sections.ellipse_a, "ellipse_b": sections.ellipse_b, "ellipse_major": sections.ellipse_major}
+           if sections.ellipse_a is not None else {}),
     )
     if reliable.sum() < cfg.min_reliable_sections:
         row["status"] = STATUS_NO_CENTERLINE
@@ -387,7 +428,15 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
     line = centerline_geometry(
         sections.centers[reliable], sections.radii[reliable], smoothing_nm=smoothing, radius_smoothing_nm=max(cfg.radius_smoothing_nm, smoothing),
         node_step_nm=adaptive_node_step_nm(cfg, smoothing), straight_fraction=cfg.straight_fraction, max_nodes=cfg.max_nodes,
+        ellipse=(sections.ellipse_a[reliable], sections.ellipse_b[reliable], sections.ellipse_major[reliable]) if sections.ellipse_a is not None else None,
     )
+    row["ellipse_valid_fraction"] = line["ellipse_valid_fraction"]
+    if line["ellipse_a"] is not None:
+        ratio = line["ellipse_b"] / line["ellipse_a"]
+        row["ellipse_ratio_median"] = float(np.median(ratio))
+        row["ellipse_a_median_nm"] = float(np.median(line["ellipse_a"]))
+        row["ellipse_b_median_nm"] = float(np.median(line["ellipse_b"]))
+        row["ellipse_req_median_nm"] = float(np.median(np.sqrt(line["ellipse_a"] * line["ellipse_b"])))
     centerline, length = line["centerline"], line["length"]
     row["length_nm"] = length
     row["centerline_rms_to_centers_nm"] = centerline.rms_to_centers
@@ -489,6 +538,7 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
         s=nodes, gamma=gamma, radius=radius, frame_tangent=t_nodes, frame_e1=e1, frame_e2=e2,
         kappa1=kappa1_nodes, kappa2=kappa2_nodes, skeleton=polyline, skeleton_offset=offset,
         skeleton_offset_relative=_safe_ratio(offset, sections.radii),
+        **({"ellipse_a": line["ellipse_a"], "ellipse_b": line["ellipse_b"], "ellipse_angle": line["ellipse_angle"]} if line["ellipse_a"] is not None else {}),
     )
     row["geometry_path"] = str(geometry_path)
     _finalize_eligibility(cfg, row)
@@ -532,7 +582,9 @@ def _finalize_eligibility(cfg: BranchPreprocessingConfig, row: Dict[str, Any]) -
     qc_centerline = ok and row.get("longest_gap_nm", float("inf")) <= cfg.long_gap_nm and (
         row.get("centerline_rms_to_centers_nm", float("inf")) <= max(cfg.spline_rms_factor * (r_med or float("nan")), cfg.spline_rms_floor_nm)
     ) and row.get("centerline_inside_fraction", 1.0) >= cfg.centerline_inside_min
-    qc_frame = ok and row.get("twist_max_per_nm", float("inf")) <= cfg.twist_tolerance_per_nm
+    # the double-reflection RMF leaves a discretisation twist ~0.05 kappa^2 * step (synthetic check): with the adaptive
+    # smoothing kappa of thin branches reaches ~2e-3 /nm and the twist ~4e-5 /nm, so the limit is relative to kappa_max
+    qc_frame = ok and row.get("twist_max_per_nm", float("inf")) <= max(cfg.twist_tolerance_per_nm, cfg.twist_relative_max * row.get("kappa_max", 0.0))
     qc_tube = ok and not row.get("tube_self_contact", True) and row.get("max_r_kappa", float("inf")) < 1.0
     qc_soma = ok and row.get("soma_distance_start_nm") is not None and not row.get("soma_distance_mismatch")
     in_range = row.get("n_spines_in_range")

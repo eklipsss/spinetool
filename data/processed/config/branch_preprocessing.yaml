@@ -19,6 +19,7 @@ centerline:
   adaptive_max_radius_factor: 4.5  # 2nd pass with max(1200, 4.5 r_med) for thick branches (NOT verified yet; 0 = off)
   cluster_eps_nm: 150.0
   robust_k: 0.35
+  fit_ellipse: true                # ellipse per section + a(s), b(s), angle(s) at the nodes (audit 2026-10-20: the round tube is 0.67 r off)
   min_section_points: 10
   large_radius_factor: 1.5
   kink_factor: 0.5
@@ -34,7 +35,9 @@ centerline:
   # ADAPTIVE width (2026-10-20): h = clip(factor * r_med, min, centerline_smoothing_nm). Thin dendrites (r ~ 120 nm) wind on a
   # sub-micron scale comparable to r (seen by our sections AND by the CGAL skeleton): with h = 1000 nm the line was inside the
   # mesh at ~28 % of the points, with h = 250 nm at ~77 % (scripts/neuron_model/study_centerline_smoothing.py, 10 local thin
-  # branches). factor 2 is PROVISIONAL - set it from the study on ~10 neurons (Windows). 0 = the fixed width above.
+  # branches). Chosen on 10 neurons x 120 branches (Windows, 2026-10-20), medians of 'line inside the mesh' / 'round-tube error / r':
+  #   r < 150 nm:  h 1000 -> 0.32 / 0.48,  k 2 -> 0.84 / 0.28;   150-250 nm: 0.58 / 0.42 -> 0.91 / 0.29;   >= 250 nm: 0.96 / 0.26 -> 1.00 / 0.21
+  # (k 3 / k 4 are worse for thin and middle branches). 0 = the fixed width above.
   centerline_smoothing_factor: 2.0
   centerline_smoothing_min_nm: 250.0
   radius_smoothing_nm: 1000.0
@@ -52,6 +55,8 @@ grid_and_frame:
   max_nodes: 512                   # T representation M_MAX: longer branches get a proportionally larger step
   straight_fraction: 0.02          # bend reference unless the max deviation from the chord < 2 % of L
   twist_tolerance_per_nm: 1.0e-5   # numerical twist of the discrete RMF; ~1e-6/nm at h = 1000 nm
+  twist_relative_max: 0.1          # limit max(tolerance, 0.1 kappa_max): the discretisation twist is ~0.05 kappa^2 step, with the adaptive
+                                   # smoothing thin branches reach kappa ~2e-3 /nm -> twist ~4e-5 /nm (301 of 1779 ok branches failed the absolute limit)
 
 joining_and_soma:
   join_distance_nm: 500.0
@@ -71,5 +76,5 @@ eligibility:                       # initial values, to be refined by the audit
   radius_max_nm: 1500.0
   trim_max_nm: 2000.0
   unknown_fraction_max: 0.1
-  centerline_inside_min: 0.0       # QC: share of the node polyline inside the mesh (row centerline_inside_fraction); set from the study
+  centerline_inside_min: 0.7       # QC: share of the node polyline inside the mesh. 10 neurons: T-eligible 984 (0.6) / 967 (0.7) / 886 (0.8)
   position_fraction_min: 0.9

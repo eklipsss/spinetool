@@ -133,6 +133,88 @@ def robust_fit_circle_2d(xy: np.ndarray, k: float = 0.35, iterations: int = 5, m
     return center, radius
 
 
+def fit_ellipse_2d(xy: np.ndarray) -> Optional[Tuple[np.ndarray, float, float, np.ndarray]]:
+    """Direct least-squares ellipse (Fitzgibbon et al. 1999, numerically stable form of Halir & Flusser 1998).
+
+    Returns (centre [2], a, b, major-axis unit vector [2]) with a >= b, or None if the conic is not an ellipse."""
+    if len(xy) < 6:
+        return None
+    m = xy.mean(axis=0)
+    sc = float(np.sqrt(((xy - m) ** 2).sum(axis=1).mean())) or 1.0
+    x, y = ((xy - m) / sc).T
+    d1 = np.c_[x * x, x * y, y * y]
+    d2 = np.c_[x, y, np.ones_like(x)]
+    s1, s2, s3 = d1.T @ d1, d1.T @ d2, d2.T @ d2
+    try:
+        t = -np.linalg.solve(s3, s2.T)
+        mm = s1 + s2 @ t
+        mm = np.array([mm[2] / 2.0, -mm[1], mm[0] / 2.0])
+        w, v = np.linalg.eig(mm)
+    except np.linalg.LinAlgError:
+        return None
+    v = np.real(v)
+    cond = 4.0 * v[0] * v[2] - v[1] ** 2
+    ok = np.flatnonzero(cond > 0)
+    if len(ok) == 0:
+        return None
+    a1 = v[:, ok[0]]
+    A, B, C = a1
+    D, E, F = t @ a1
+    q = np.array([[A, B / 2.0], [B / 2.0, C]])
+    try:
+        c = np.linalg.solve(2.0 * q, -np.array([D, E]))
+    except np.linalg.LinAlgError:
+        return None
+    f0 = float(c @ q @ c + D * c[0] + E * c[1] + F)
+    lam, vec = np.linalg.eigh(q)
+    if not (np.all(lam * -f0 > 0)):
+        return None
+    axes = np.sqrt(-f0 / lam)  # semi-axes along the eigenvectors
+    i_major = int(np.argmax(axes))
+    a, b = float(axes[i_major]) * sc, float(axes[1 - i_major]) * sc
+    return m + sc * c, a, b, vec[:, i_major] / np.linalg.norm(vec[:, i_major])
+
+
+def ellipse_radial_residual(xy: np.ndarray, center: np.ndarray, a: float, b: float, major: np.ndarray) -> np.ndarray:
+    """|p - c| minus the ellipse radius in the direction of p (an approximation of the geometric distance)."""
+    d = xy - center
+    u = d @ major
+    w = d @ np.array([-major[1], major[0]])
+    psi = np.arctan2(w, u)
+    r_e = a * b / np.sqrt((b * np.cos(psi)) ** 2 + (a * np.sin(psi)) ** 2)
+    return np.linalg.norm(d, axis=1) - r_e
+
+
+def robust_fit_ellipse_2d(xy: np.ndarray, circle_center: np.ndarray, circle_r: float, k: float = 0.35, iterations: int = 4, min_points: int = 10,
+                          min_ratio: float = 0.2, max_a_factor: float = 2.5, k_init: float = 0.6) -> Optional[Tuple[np.ndarray, float, float, np.ndarray]]:
+    """Ellipse fit started from the robust circle: points farther than ``k_init * r`` from the circle are dropped first (spine
+    necks / bases; looser than the circle's own ``k``, otherwise the ends of the minor axis of a flattened section are lost
+    too), then the ellipse is refitted without points farther than ``k * sqrt(a b)`` from it. Rejected (None) when b / a <
+    ``min_ratio``, a > ``max_a_factor * r`` or the centre is more than r from the circle centre (partial arcs)."""
+    # start from ALL points of the fragment (a circle-based trim would drop the ends of the minor axis of a flattened
+    # section: the robust circle of such a section converges to the major-axis arcs), protrusions are removed by the
+    # ellipse residual below; ``k_init`` only guards against far outliers (> (1 + k_init) r from the circle centre)
+    keep = np.linalg.norm(xy - circle_center, axis=1) < (1.0 + k_init) * circle_r
+    if keep.sum() < min_points:
+        return None
+    fit = fit_ellipse_2d(xy[keep])
+    for _ in range(iterations):
+        if fit is None:
+            return None
+        c, a, b, major = fit
+        new = np.abs(ellipse_radial_residual(xy, c, a, b, major)) < k * math.sqrt(a * b)
+        if new.sum() < min_points or (new == keep).all():
+            break
+        keep = new
+        fit = fit_ellipse_2d(xy[keep])
+    if fit is None:
+        return None
+    c, a, b, major = fit
+    if not (np.isfinite(a) and np.isfinite(b)) or b <= 0 or b / a < min_ratio or a > max_a_factor * circle_r or np.linalg.norm(c - circle_center) > circle_r:
+        return None
+    return fit
+
+
 def nearest_cluster(xy: np.ndarray, eps: float) -> np.ndarray:
     """Mask of the eps-connected fragment of the slice points containing the point nearest to the origin."""
     from scipy.sparse import coo_matrix
@@ -156,6 +238,10 @@ class Sections:
     centers: np.ndarray  # [m,3] (NaN where no fit)
     radii: np.ndarray  # [m] (NaN where no fit)
     n_points: np.ndarray  # [m] points of the kept fragment
+    ellipse_center: Optional[np.ndarray] = None  # [m,3] (NaN where no ellipse); only with fit_sections(fit_ellipse=True)
+    ellipse_a: Optional[np.ndarray] = None  # [m] semi-major axis, nm
+    ellipse_b: Optional[np.ndarray] = None  # [m] semi-minor axis, nm
+    ellipse_major: Optional[np.ndarray] = None  # [m,3] unit vector of the major axis (in the section plane)
 
 
 def fit_sections(
@@ -169,8 +255,9 @@ def fit_sections(
     robust_k: float,
     min_points: int,
     tree=None,
+    fit_ellipse: bool = False,
 ) -> Sections:
-    """Circle fit of every cross-section (see module docstring)."""
+    """Circle fit of every cross-section (see module docstring); with ``fit_ellipse`` also an ellipse (flattened sections)."""
     from scipy.spatial import cKDTree
 
     shaft_vertices = np.asarray(shaft_vertices, dtype=float)
@@ -178,8 +265,9 @@ def fit_sections(
     centers = np.full((m, 3), np.nan)
     radii = np.full(m, np.nan)
     npts = np.zeros(m, dtype=np.int64)
+    ell = (np.full((m, 3), np.nan), np.full(m, np.nan), np.full(m, np.nan), np.full((m, 3), np.nan)) if fit_ellipse else (None, None, None, None)
     if len(shaft_vertices) == 0:
-        return Sections(points, tangents, centers, radii, npts)
+        return Sections(points, tangents, centers, radii, npts, *ell)
     tree = tree if tree is not None else cKDTree(shaft_vertices)
     reach = math.sqrt(slab * slab + max_r * max_r)
     candidates = tree.query_ball_point(points, r=reach)
@@ -203,7 +291,14 @@ def fit_sections(
         c2, r = robust_fit_circle_2d(xy, robust_k, min_points=min_points)
         centers[j] = g + c2[0] * ea + c2[1] * eb
         radii[j] = r
-    return Sections(points, tangents, centers, radii, npts)
+        if fit_ellipse:
+            e = robust_fit_ellipse_2d(xy, c2, r, robust_k, min_points=min_points)
+            if e is not None:
+                ce, a, b, major = e
+                ell[0][j] = g + ce[0] * ea + ce[1] * eb
+                ell[1][j], ell[2][j] = a, b
+                ell[3][j] = major[0] * ea + major[1] * eb
+    return Sections(points, tangents, centers, radii, npts, *ell)
 
 
 def flag_sections(
@@ -543,3 +638,21 @@ def tube_mesh(gamma: np.ndarray, radius: np.ndarray, e1: np.ndarray, e2: np.ndar
     if vol < 0:
         faces = faces[:, ::-1]
     return verts, faces
+
+def ellipse_tube_mesh(gamma: np.ndarray, a: np.ndarray, b: np.ndarray, angle: np.ndarray, e1: np.ndarray, e2: np.ndarray, n_theta: int = 32) -> Tuple[np.ndarray, np.ndarray]:
+    """Elliptic tube X(s, th) = gamma + a cos(th) u + b sin(th) v, u = cos(phi) e1 + sin(phi) e2, v = -sin(phi) e1 + cos(phi) e2
+    (phi = ``angle`` of the major axis in the RMF), no caps."""
+    u = np.cos(angle)[:, None] * e1 + np.sin(angle)[:, None] * e2
+    v = -np.sin(angle)[:, None] * e1 + np.cos(angle)[:, None] * e2
+    th = np.linspace(0.0, 2 * np.pi, n_theta, endpoint=False)
+    ring = (a[:, None, None] * np.cos(th)[None, :, None] * u[:, None, :] + b[:, None, None] * np.sin(th)[None, :, None] * v[:, None, :])
+    verts = (gamma[:, None, :] + ring).reshape(-1, 3)
+    m = len(gamma)
+    faces = []
+    for j in range(m - 1):
+        for k in range(n_theta):
+            a0, a1 = j * n_theta + k, j * n_theta + (k + 1) % n_theta
+            b0, b1 = a0 + n_theta, a1 + n_theta
+            faces.append((a0, a1, b1))
+            faces.append((a0, b1, b0))
+    return verts, np.asarray(faces, dtype=np.int64)

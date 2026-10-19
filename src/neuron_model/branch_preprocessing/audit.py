@@ -76,9 +76,38 @@ def audit_branch(cfg: BranchPreprocessingConfig, row: pd.Series, spine_info: Dic
     tube_pts = _sample_triangles(tv, tf, n_points, rng)
     d1, _ = cKDTree(tube_pts).query(shaft_pts)
     d2, _ = cKDTree(shaft_pts).query(tube_pts)
+    # core of the trunk: shaft points within 1.75 r_med of the centreline. Farther points are protrusions the tube cannot
+    # represent by design (unsegmented spines / stubs, false spines kept in the shaft, bits of the neighbouring branch)
+    d_line, _ = cKDTree(dense).query(shaft_pts)
+    core = d_line < 1.75 * r_med
     chamfer_sq = float(np.mean(d1**2) + np.mean(d2**2))
     a_shaft, a_tube = _area(vertices, shaft_faces), _area(tv, tf)
+    ellipse = {}
+    if "ellipse_a" in geom.files:
+        ev, ef = bg.ellipse_tube_mesh(gamma[inner], geom["ellipse_a"][inner], geom["ellipse_b"][inner], geom["ellipse_angle"][inner], e1[inner], e2[inner], n_theta=32)
+        ell_pts = _sample_triangles(ev, ef, n_points, rng)
+        e1d, _ = cKDTree(ell_pts).query(shaft_pts)
+        e2d, _ = cKDTree(shaft_pts).query(ell_pts)
+        ecd = float(np.mean(e1d**2) + np.mean(e2d**2))
+        a_ell = _area(ev, ef)
+        ellipse = {
+            "ellipse_chamfer_rms_nm": float(np.sqrt(ecd / 2.0)),
+            "ellipse_chamfer_rms_over_r": float(np.sqrt(ecd / 2.0) / r_med),
+            "ellipse_chamfer_l1_nm": float(0.5 * (e1d.mean() + e2d.mean())),
+            "ellipse_hd95_nm": float(max(np.percentile(e1d, 95), np.percentile(e2d, 95))),
+            "ellipse_area_rel_error": float(abs(a_ell - a_shaft) / a_shaft) if a_shaft > 0 else float("nan"),
+            "ellipse_ratio_median": float(np.median(geom["ellipse_b"] / geom["ellipse_a"])),
+            # the median distance from the shaft to each tube, split: d1 = shaft -> tube (the tube misses the surface)
+            "circle_shaft_to_tube_median_nm": float(np.median(d1)),
+            "ellipse_shaft_to_tube_median_nm": float(np.median(e1d)),
+            "ellipse_shaft_to_tube_p90_over_r": float(np.percentile(e1d, 90) / r_med),
+            "ellipse_tube_to_shaft_p90_over_r": float(np.percentile(e2d, 90) / r_med),
+            "ellipse_shaft_to_tube_rms_trim95_over_r": float(np.sqrt(np.mean(np.sort(e1d**2)[: int(0.95 * len(e1d))])) / r_med),
+            "ellipse_core_shaft_to_tube_median_over_r": float(np.median(e1d[core]) / r_med) if core.any() else float("nan"),
+            "ellipse_core_shaft_to_tube_rms_over_r": float(np.sqrt(np.mean(e1d[core] ** 2)) / r_med) if core.any() else float("nan"),
+        }
     return {
+        **ellipse,
         "status": "ok",
         "r_med_nm": r_med,
         "length_nm": length,
@@ -90,6 +119,17 @@ def audit_branch(cfg: BranchPreprocessingConfig, row: pd.Series, spine_info: Dic
         "area_tube_nm2": a_tube,
         "area_rel_error": float(abs(a_tube - a_shaft) / a_shaft) if a_shaft > 0 else float("nan"),
         "chamfer_rms_over_r": float(np.sqrt(chamfer_sq / 2.0) / r_med),
+        # the two directions separately: shaft -> tube (does the tube reach every part of the surface? protrusions, false
+        # spines kept in the shaft, flattened sections) and tube -> shaft (does the tube cover places without surface? the
+        # holes left by the removed spines, cut ends)
+        "shaft_to_tube_median_over_r": float(np.median(d1) / r_med),
+        "shaft_to_tube_p90_over_r": float(np.percentile(d1, 90) / r_med),
+        "tube_to_shaft_median_over_r": float(np.median(d2) / r_med),
+        "tube_to_shaft_p90_over_r": float(np.percentile(d2, 90) / r_med),
+        "shaft_to_tube_rms_trim95_over_r": float(np.sqrt(np.mean(np.sort(d1**2)[: int(0.95 * len(d1))])) / r_med),
+        "protrusion_area_fraction": float(1.0 - core.mean()),
+        "core_shaft_to_tube_median_over_r": float(np.median(d1[core]) / r_med) if core.any() else float("nan"),
+        "core_shaft_to_tube_rms_over_r": float(np.sqrt(np.mean(d1[core] ** 2)) / r_med) if core.any() else float("nan"),
     }
 
 
@@ -132,5 +172,28 @@ def run_audit(cfg: BranchPreprocessingConfig, *, per_stratum: int = 25, seed: in
             median_area_rel_error=float(ok["area_rel_error"].median()),
             acceptance_median_le_quarter_r=bool(ok["chamfer_rms_over_r"].median() <= 0.25),
         )
+        for col in ("shaft_to_tube_median_over_r", "shaft_to_tube_p90_over_r", "tube_to_shaft_median_over_r", "tube_to_shaft_p90_over_r", "shaft_to_tube_rms_trim95_over_r",
+                    "protrusion_area_fraction", "core_shaft_to_tube_median_over_r", "core_shaft_to_tube_rms_over_r",
+                    "ellipse_core_shaft_to_tube_median_over_r", "ellipse_core_shaft_to_tube_rms_over_r"):
+            if col in ok.columns:
+                summary[f"median_{col}"] = float(ok[col].median())
+        if "ellipse_chamfer_rms_over_r" in ok.columns:
+            e = ok[ok["ellipse_chamfer_rms_over_r"].notna()]
+            summary.update(
+                n_with_ellipse=int(len(e)),
+                ellipse_median_chamfer_rms_nm=float(e["ellipse_chamfer_rms_nm"].median()),
+                ellipse_median_chamfer_rms_over_r=float(e["ellipse_chamfer_rms_over_r"].median()),
+                ellipse_fraction_chamfer_rms_le_quarter_r=float((e["ellipse_chamfer_rms_over_r"] <= 0.25).mean()),
+                ellipse_median_hd95_nm=float(e["ellipse_hd95_nm"].median()),
+                ellipse_median_area_rel_error=float(e["ellipse_area_rel_error"].median()),
+                ellipse_ratio_b_over_a_median=float(e["ellipse_ratio_median"].median()),
+                circle_median_chamfer_rms_over_r_same_branches=float(e["chamfer_rms_over_r"].median()),
+                median_shaft_to_tube_nm_circle=float(e["circle_shaft_to_tube_median_nm"].median()),
+                median_shaft_to_tube_nm_ellipse=float(e["ellipse_shaft_to_tube_median_nm"].median()),
+                ellipse_median_shaft_to_tube_p90_over_r=float(e["ellipse_shaft_to_tube_p90_over_r"].median()),
+                ellipse_median_tube_to_shaft_p90_over_r=float(e["ellipse_tube_to_shaft_p90_over_r"].median()),
+                ellipse_median_shaft_to_tube_rms_trim95_over_r=float(e["ellipse_shaft_to_tube_rms_trim95_over_r"].median()),
+                ellipse_acceptance_median_le_quarter_r=bool(e["ellipse_chamfer_rms_over_r"].median() <= 0.25),
+            )
     (out_dir / "reconstruction_circle_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary

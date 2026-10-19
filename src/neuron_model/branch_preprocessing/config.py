@@ -19,7 +19,7 @@ ALGORITHM_VERSION = "branch-preprocessing-v1"
 _ELIGIBILITY_FIELDS = {
     "length_min_t_nm", "length_max_t_nm", "invalid_section_fraction_max", "radius_min_nm", "radius_max_nm", "trim_max_nm",
     "unknown_fraction_max", "position_fraction_min", "spline_rms_factor", "spline_rms_floor_nm", "long_gap_nm", "twist_tolerance_per_nm",
-    "centerline_inside_min",
+    "centerline_inside_min", "twist_relative_max",
 }
 # fields that change the result (enter the config hash); paths / parallelism do not
 _RUNTIME_FIELDS = {
@@ -55,6 +55,7 @@ class BranchPreprocessingConfig:
     adaptive_max_radius_factor: float = 4.5  # second pass with max(1200, 4.5 r_med); 0 disables
     cluster_eps_nm: float = 150.0
     robust_k: float = 0.35
+    fit_ellipse: bool = False  # also fit an ellipse per section (flattened sections); profiles a, b, angle at the nodes
     min_section_points: int = 10
     large_radius_factor: float = 1.5
     kink_factor: float = 0.5
@@ -76,6 +77,7 @@ class BranchPreprocessingConfig:
     max_nodes: int = 512  # the T representation (M_MAX): long branches get a larger step
     straight_fraction: float = 0.02
     twist_tolerance_per_nm: float = 1e-5
+    twist_relative_max: float = 0.1  # QC: twist <= max(tolerance, 0.1 kappa_max); the RMF discretisation twist is ~0.05 kappa^2 step
     # member joining / soma
     join_distance_nm: float = 500.0
     soma_mismatch_fraction: float = 0.2
