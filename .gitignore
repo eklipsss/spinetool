@@ -160,3 +160,5 @@ data/processed/*
 /runs/
 /models/checkpoints/
 /spinetool_staging/
+
+/cache/
