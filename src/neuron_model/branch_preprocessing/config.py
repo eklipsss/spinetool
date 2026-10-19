@@ -57,6 +57,7 @@ class BranchPreprocessingConfig:
     min_section_points: int = 10
     large_radius_factor: float = 1.5
     kink_factor: float = 0.5
+    kink_floor_nm: float = 0.0  # absolute floor of the kink limit max(kink_factor * r, floor); the yaml uses 150 nm
     end_distance_factor: float = 2.0
     outside_mesh_check: bool = True
     centerline_smoothing_nm: float = 1000.0  # equivalent kernel width of the centreline smoothing spline

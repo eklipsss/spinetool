@@ -284,6 +284,7 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
         min_points=cfg.min_section_points,
         large_radius_factor=cfg.large_radius_factor,
         kink_factor=cfg.kink_factor,
+        kink_floor_nm=cfg.kink_floor_nm,
         end_distance_factor=cfg.end_distance_factor,
         inside=inside,
     )

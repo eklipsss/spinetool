@@ -22,6 +22,9 @@ centerline:
   min_section_points: 10
   large_radius_factor: 1.5
   kink_factor: 0.5
+  kink_floor_nm: 150.0             # the deviation of a centre from its neighbours' midpoint is ~70-90 nm (median) at ANY radius (voxel
+                                   # quantisation of the segmentation, 40 nm in z): a limit 0.5 r alone flagged 65-70 % of the sections
+                                   # of branches with r < 200 nm, none of those branches was usable. With 150 nm: 14-19 % in every class.
   end_distance_factor: 2.0         # sections closer than 2 r_med to an end are unreliable (branching region)
   outside_mesh_check: true
   centerline_smoothing_nm: 1000.0  # smoothing-spline kernel width (lam = h^4 / spacing). GCV picks lam ~ 0 here

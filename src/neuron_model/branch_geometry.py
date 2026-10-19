@@ -214,8 +214,13 @@ def flag_sections(
     kink_factor: float,
     end_distance_factor: float,
     inside: Optional[np.ndarray] = None,
+    kink_floor_nm: float = 0.0,
 ) -> Tuple[np.ndarray, float]:
-    """Bit flags per section (0 = reliable) and the branch median radius ``r_med``."""
+    """Bit flags per section (0 = reliable) and the branch median radius ``r_med``.
+
+    A centre is a kink when it is farther than ``max(kink_factor * r_med, kink_floor_nm)`` from the midpoint of its
+    neighbours: the noise of the centres (mesh roughness, ~60-90 nm on Minnie65) does not scale with the radius, so a
+    limit proportional to r alone flags most sections of thin branches."""
     m = len(sections.radii)
     flags = np.zeros(m, dtype=np.int64)
     fitted = np.isfinite(sections.radii)
@@ -232,7 +237,7 @@ def flag_sections(
         a, j, b = fitted_idx[k - 1], fitted_idx[k], fitted_idx[k + 1]
         dev[k] = np.linalg.norm(sections.centers[j] - 0.5 * (sections.centers[a] + sections.centers[b]))
     for k in range(1, len(fitted_idx) - 1):
-        if dev[k] > kink_factor * r_med and dev[k] >= dev[k - 1] and dev[k] >= dev[k + 1]:
+        if dev[k] > max(kink_factor * r_med, kink_floor_nm) and dev[k] >= dev[k - 1] and dev[k] >= dev[k + 1]:
             flags[fitted_idx[k]] |= FLAG_KINK
     if inside is not None:
         flags[fitted & ~np.asarray(inside, dtype=bool)] |= FLAG_OUTSIDE_MESH

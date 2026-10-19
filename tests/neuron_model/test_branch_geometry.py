@@ -8,6 +8,8 @@ from src.neuron_model.branch_geometry import (
     bending_from_frames,
     fit_sections,
     flag_sections,
+    FLAG_KINK,
+    Sections,
     initial_normal,
     integrate_bending,
     match_vertices,
@@ -196,3 +198,18 @@ def test_tube_mesh_closed_outward_and_self_contact():
     hn, hds = node_grid(float(hs[-1]), 200.0)
     hg = np.column_stack([np.interp(hn, hs, hel[:, k]) for k in range(3)])
     assert tube_self_contact(hg, np.full(len(hn), 300.0), hn, hds)[0]
+
+
+def test_kink_limit_has_an_absolute_floor():
+    n = 12
+    centers = np.column_stack([np.arange(n) * 500.0, np.zeros(n), np.zeros(n)])
+    centers[6, 1] = 80.0  # one centre displaced by 80 nm (the midpoint deviation of its own: 80 nm)
+    sec = Sections(points=centers.copy(), tangents=np.tile([1.0, 0.0, 0.0], (n, 1)), centers=centers, radii=np.full(n, 100.0), n_points=np.full(n, 50))
+    kw = dict(min_points=10, large_radius_factor=1.5, kink_factor=0.5, end_distance_factor=0.0)
+    flags, _ = flag_sections(sec, **kw)
+    assert flags[6] & FLAG_KINK  # 80 nm > 0.5 * 100 nm
+    flags, _ = flag_sections(sec, kink_floor_nm=150.0, **kw)
+    assert not (flags & FLAG_KINK).any()  # 80 nm < 150 nm: noise level of the centres, not a kink
+    sec.centers[6, 1] = 400.0
+    flags, _ = flag_sections(sec, kink_floor_nm=150.0, **kw)
+    assert flags[6] & FLAG_KINK
