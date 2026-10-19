@@ -22,22 +22,34 @@ centerline:
   min_section_points: 10
   large_radius_factor: 1.5
   kink_factor: 0.5
-  kink_floor_nm: 150.0             # the deviation of a centre from its neighbours' midpoint is ~70-90 nm (median) at ANY radius (voxel
-                                   # quantisation of the segmentation, 40 nm in z): a limit 0.5 r alone flagged 65-70 % of the sections
-                                   # of branches with r < 200 nm, none of those branches was usable. With 150 nm: 14-19 % in every class.
+  kink_floor_nm: 150.0             # the deviation of a centre from its neighbours' midpoint is ~70-90 nm (median) at ANY radius: a limit
+                                   # 0.5 r alone flagged 65-70 % of the sections of branches with r < 200 nm (none usable). With 150 nm:
+                                   # 14-19 % in every class. NOT only measurement noise: the independent CGAL skeleton shows the same
+                                   # sub-micron wiggles of thin dendrites (scripts/neuron_model/compare_centerline_cgal.py, CLAUDE.md).
   end_distance_factor: 2.0         # sections closer than 2 r_med to an end are unreliable (branching region)
   outside_mesh_check: true
   centerline_smoothing_nm: 1000.0  # smoothing-spline kernel width (lam = h^4 / spacing). GCV picks lam ~ 0 here
                                    # (interpolates the fitting noise). On 2 real branches: h=1000 -> RMS to the
                                    # centres 0.5-0.6 r, twist <= 1.2e-6/nm, round trip 0.1-0.2 um; 2000 -> ~1 r off.
+  # ADAPTIVE width (2026-10-20): h = clip(factor * r_med, min, centerline_smoothing_nm). Thin dendrites (r ~ 120 nm) wind on a
+  # sub-micron scale comparable to r (seen by our sections AND by the CGAL skeleton): with h = 1000 nm the line was inside the
+  # mesh at ~28 % of the points, with h = 250 nm at ~77 % (scripts/neuron_model/study_centerline_smoothing.py, 10 local thin
+  # branches). factor 2 is PROVISIONAL - set it from the study on ~10 neurons (Windows). 0 = the fixed width above.
+  centerline_smoothing_factor: 2.0
+  centerline_smoothing_min_nm: 250.0
   radius_smoothing_nm: 1000.0
   spline_rms_factor: 0.75          # QC: RMS distance of the smoothed line to the reliable centres <= max(0.75 r_med, floor)
-  spline_rms_floor_nm: 200.0       # the centre noise (~70-140 nm) does not scale with r: with 0.75 r alone 56 of 94 branches of the pilot neuron failed (13 with 200)
+  spline_rms_floor_nm: 200.0       # the deviation of the smoothed line from the centres (~70-140 nm) does not scale with r: with 0.75 r alone
+                                   # 56 of 94 branches of the pilot neuron failed (13 with 200). CAUTION: on thin branches (r ~ 120 nm) a line smoothed over
+                                   # 1 um leaves the tube most of the time (see CLAUDE.md, CGAL comparison): this limit admits them
   min_reliable_sections: 5
   long_gap_nm: 3000.0
 
 grid_and_frame:
-  node_step_nm: 500.0              # M = ceil(L / 500 nm) + 1 nodes, exact length
+  node_step_nm: 500.0              # M = ceil(L / step) + 1 nodes, exact length; the maximum when adaptive
+  node_step_per_smoothing: 0.5     # step = clip(0.5 h, node_step_min_nm, node_step_nm): the nodes must resolve what the line keeps
+  node_step_min_nm: 250.0          # (thin branches: 250 nm, thick: 500 nm); 0 = the fixed step above
+  max_nodes: 512                   # T representation M_MAX: longer branches get a proportionally larger step
   straight_fraction: 0.02          # bend reference unless the max deviation from the chord < 2 % of L
   twist_tolerance_per_nm: 1.0e-5   # numerical twist of the discrete RMF; ~1e-6/nm at h = 1000 nm
 
@@ -59,4 +71,5 @@ eligibility:                       # initial values, to be refined by the audit
   radius_max_nm: 1500.0
   trim_max_nm: 2000.0
   unknown_fraction_max: 0.1
+  centerline_inside_min: 0.0       # QC: share of the node polyline inside the mesh (row centerline_inside_fraction); set from the study
   position_fraction_min: 0.9

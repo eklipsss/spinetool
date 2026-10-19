@@ -19,6 +19,7 @@ ALGORITHM_VERSION = "branch-preprocessing-v1"
 _ELIGIBILITY_FIELDS = {
     "length_min_t_nm", "length_max_t_nm", "invalid_section_fraction_max", "radius_min_nm", "radius_max_nm", "trim_max_nm",
     "unknown_fraction_max", "position_fraction_min", "spline_rms_factor", "spline_rms_floor_nm", "long_gap_nm", "twist_tolerance_per_nm",
+    "centerline_inside_min",
 }
 # fields that change the result (enter the config hash); paths / parallelism do not
 _RUNTIME_FIELDS = {
@@ -60,14 +61,19 @@ class BranchPreprocessingConfig:
     kink_floor_nm: float = 0.0  # absolute floor of the kink limit max(kink_factor * r, floor); the yaml uses 150 nm
     end_distance_factor: float = 2.0
     outside_mesh_check: bool = True
-    centerline_smoothing_nm: float = 1000.0  # equivalent kernel width of the centreline smoothing spline
+    centerline_smoothing_nm: float = 1000.0  # equivalent kernel width of the centreline smoothing spline (the maximum when adaptive)
+    centerline_smoothing_factor: float = 0.0  # > 0: adaptive width clip(factor * r_med, min, centerline_smoothing_nm); 0 = fixed
+    centerline_smoothing_min_nm: float = 250.0
     radius_smoothing_nm: float = 1000.0
     spline_rms_factor: float = 0.75  # QC: RMS distance of the smoothed line to the reliable centres <= max(factor * r_med, floor)
     spline_rms_floor_nm: float = 0.0  # absolute floor of that limit (thin branches: the centre noise does not scale with r)
     min_reliable_sections: int = 5
     long_gap_nm: float = 3000.0
     # grid, frame
-    node_step_nm: float = 500.0
+    node_step_nm: float = 500.0  # node spacing (the maximum when adaptive)
+    node_step_per_smoothing: float = 0.0  # > 0: node step clip(f * smoothing, node_step_min_nm, node_step_nm); 0 = fixed
+    node_step_min_nm: float = 250.0
+    max_nodes: int = 512  # the T representation (M_MAX): long branches get a larger step
     straight_fraction: float = 0.02
     twist_tolerance_per_nm: float = 1e-5
     # member joining / soma
@@ -86,6 +92,7 @@ class BranchPreprocessingConfig:
     radius_max_nm: float = 1500.0
     trim_max_nm: float = 2000.0
     unknown_fraction_max: float = 0.1
+    centerline_inside_min: float = 0.0  # QC: fraction of the node polyline inside the branch mesh (0 = not checked)
     position_fraction_min: float = 0.9
 
     algorithm_version: str = ALGORITHM_VERSION

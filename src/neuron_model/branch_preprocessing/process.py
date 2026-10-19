@@ -166,6 +166,76 @@ def load_branch_surface(cfg: BranchPreprocessingConfig, member_dirs: Dict[int, P
 
 
 # ---------------------------------------------------------------------------
+# centreline geometry (shared with scripts/neuron_model/study_centerline_smoothing.py)
+# ---------------------------------------------------------------------------
+
+
+def adaptive_smoothing_nm(cfg: BranchPreprocessingConfig, r_med: float) -> float:
+    """Width of the centreline smoothing: fixed ``centerline_smoothing_nm``, or with ``centerline_smoothing_factor`` > 0
+    clip(factor * r_med, centerline_smoothing_min_nm, centerline_smoothing_nm): thin dendrites wind on a sub-micron scale
+    comparable to their radius, a 1 um smoothing takes the line out of the tube."""
+    if cfg.centerline_smoothing_factor and np.isfinite(r_med):
+        return float(np.clip(cfg.centerline_smoothing_factor * r_med, cfg.centerline_smoothing_min_nm, cfg.centerline_smoothing_nm))
+    return float(cfg.centerline_smoothing_nm)
+
+
+def adaptive_node_step_nm(cfg: BranchPreprocessingConfig, smoothing_nm: float) -> float:
+    """Node spacing: fixed ``node_step_nm``, or with ``node_step_per_smoothing`` > 0 clip(f * smoothing, node_step_min_nm,
+    node_step_nm) so that the nodes resolve what the smoothed line still contains."""
+    if cfg.node_step_per_smoothing:
+        return float(np.clip(cfg.node_step_per_smoothing * smoothing_nm, cfg.node_step_min_nm, cfg.node_step_nm))
+    return float(cfg.node_step_nm)
+
+
+def centerline_geometry(centers, radii, *, smoothing_nm: float, radius_smoothing_nm: float, node_step_nm: float, straight_fraction: float, max_nodes: int = 512) -> Dict[str, Any]:
+    """Reliable section centres (ordered) -> smoothed line, node grid, radius profile, RMF, bending, round trip."""
+    from scipy.spatial import cKDTree
+
+    centerline = bg.smooth_centerline(centers, smoothing_nm=smoothing_nm)
+    length = centerline.length
+    dense_tree = cKDTree(centerline.dense)
+    _, idx = dense_tree.query(centers)
+    s_rel = centerline.s[idx]
+    order = np.argsort(s_rel)
+    s_rel, r_rel = s_rel[order], np.asarray(radii)[order]
+    keep = np.r_[True, np.diff(s_rel) > 1e-6]
+    s_rel, r_rel = s_rel[keep], r_rel[keep]
+    gaps = np.diff(np.r_[0.0, s_rel, length])
+    step = max(float(node_step_nm), length / max(max_nodes - 1, 1))  # at most max_nodes nodes (the T representation)
+    nodes, ds_b = bg.node_grid(length, step)
+    if len(s_rel) >= 5:
+        radius = bg.smooth_series(s_rel, r_rel, radius_smoothing_nm)(np.clip(nodes, s_rel[0], s_rel[-1]))
+    else:
+        radius = np.interp(nodes, s_rel, r_rel)
+    radius = np.clip(radius, 0.5 * float(r_rel.min()), None)
+    gamma = centerline.at(nodes)
+    t_nodes = centerline.tangent_at(nodes)
+    e1_0, reference = bg.initial_normal(gamma, t_nodes[0], straight_fraction)
+    t_nodes, e1, e2 = bg.rotation_minimizing_frames(gamma, t_nodes, e1_0)
+    k1, k2, twist = bg.bending_from_frames(t_nodes, e1, e2, ds_b)
+    frame0 = np.stack([t_nodes[0], e1[0], e2[0]], axis=1)
+    rebuilt, _ = bg.integrate_bending(k1, k2, ds_b, gamma[0], frame0)
+    return {
+        "centerline": centerline, "length": length, "longest_gap": float(gaps.max()) if len(gaps) else float("nan"),
+        "nodes": nodes, "step": ds_b, "radius": radius, "gamma": gamma, "tangent": t_nodes, "e1": e1, "e2": e2,
+        "frame_reference": reference, "kappa1": k1, "kappa2": k2, "twist": twist, "rebuilt": rebuilt,
+    }
+
+
+def line_inside_fraction(gamma: np.ndarray, triangles: np.ndarray, *, margin: float) -> float:
+    """Fraction of the node polyline (nodes + midpoints, ends within ``margin`` excluded) inside the branch mesh
+    (winding number > 0.5; the mesh is open only at the cut ends, which the margin keeps away from)."""
+    from ..spine_sampling import winding_numbers
+
+    pts = np.vstack([gamma, 0.5 * (gamma[1:] + gamma[:-1])])
+    s = np.r_[bg.arclength(gamma), 0.5 * (bg.arclength(gamma)[1:] + bg.arclength(gamma)[:-1])]
+    inner = (s > margin) & (s < s.max() - margin)
+    if inner.sum() < 3:
+        inner = np.ones(len(pts), dtype=bool)
+    return float((winding_numbers(pts[inner], triangles) > 0.5).mean())
+
+
+# ---------------------------------------------------------------------------
 # one merged branch
 # ---------------------------------------------------------------------------
 
@@ -312,37 +382,21 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
     row["trim_start_nm"] = float(s_init[first])
     row["trim_end_nm"] = float(s_init[-1] - s_init[last])
 
-    centerline = bg.smooth_centerline(sections.centers[reliable], smoothing_nm=cfg.centerline_smoothing_nm)
-    length = centerline.length
+    r_med_fit = float(r_med) if r_med is not None and np.isfinite(r_med) else float(np.nanmedian(sections.radii[reliable]))
+    smoothing = adaptive_smoothing_nm(cfg, r_med_fit)
+    line = centerline_geometry(
+        sections.centers[reliable], sections.radii[reliable], smoothing_nm=smoothing, radius_smoothing_nm=max(cfg.radius_smoothing_nm, smoothing),
+        node_step_nm=adaptive_node_step_nm(cfg, smoothing), straight_fraction=cfg.straight_fraction, max_nodes=cfg.max_nodes,
+    )
+    centerline, length = line["centerline"], line["length"]
     row["length_nm"] = length
     row["centerline_rms_to_centers_nm"] = centerline.rms_to_centers
-
-    # radius profile along the smoothed centreline
-    dense_tree = cKDTree(centerline.dense)
-    _, idx = dense_tree.query(sections.centers[reliable])
-    s_rel = centerline.s[idx]
-    order = np.argsort(s_rel)
-    s_rel, r_rel = s_rel[order], sections.radii[reliable][order]
-    keep = np.r_[True, np.diff(s_rel) > 1e-6]
-    s_rel, r_rel = s_rel[keep], r_rel[keep]
-    gaps = np.diff(np.r_[0.0, s_rel, length])
-    row["longest_gap_nm"] = float(gaps.max()) if len(gaps) else float("nan")
-
-    nodes, ds_b = bg.node_grid(length, cfg.node_step_nm)
-    if len(s_rel) >= 5:
-        radius = bg.smooth_series(s_rel, r_rel, cfg.radius_smoothing_nm)(np.clip(nodes, s_rel[0], s_rel[-1]))
-    else:
-        radius = np.interp(nodes, s_rel, r_rel)
-    radius = np.clip(radius, 0.5 * float(r_rel.min()), None)
-    gamma = centerline.at(nodes)
-    t_nodes = centerline.tangent_at(nodes)
-
-    # ---- B3: RMF and bending -------------------------------------------------------------
-    e1_0, reference = bg.initial_normal(gamma, t_nodes[0], cfg.straight_fraction)
-    t_nodes, e1, e2 = bg.rotation_minimizing_frames(gamma, t_nodes, e1_0)
-    k1, k2, twist = bg.bending_from_frames(t_nodes, e1, e2, ds_b)
-    frame0 = np.stack([t_nodes[0], e1[0], e2[0]], axis=1)
-    rebuilt, _ = bg.integrate_bending(k1, k2, ds_b, gamma[0], frame0)
+    row["centerline_smoothing_used_nm"] = float(smoothing)
+    row["longest_gap_nm"] = line["longest_gap"]
+    nodes, ds_b, radius, gamma = line["nodes"], line["step"], line["radius"], line["gamma"]
+    t_nodes, e1, e2, reference = line["tangent"], line["e1"], line["e2"], line["frame_reference"]
+    k1, k2, twist, rebuilt = line["kappa1"], line["kappa2"], line["twist"], line["rebuilt"]
+    row["centerline_inside_fraction"] = line_inside_fraction(gamma, vertices[faces], margin=cfg.end_distance_factor * r_med_fit)
     kappa = np.hypot(k1, k2)
     contact, margin = bg.tube_self_contact(gamma, radius, nodes, ds_b)
     r_mid = 0.5 * (radius[:-1] + radius[1:])
@@ -477,7 +531,7 @@ def _finalize_eligibility(cfg: BranchPreprocessingConfig, row: Dict[str, Any]) -
     qc_cross = ok and row.get("section_invalid_fraction", 1.0) <= cfg.invalid_section_fraction_max
     qc_centerline = ok and row.get("longest_gap_nm", float("inf")) <= cfg.long_gap_nm and (
         row.get("centerline_rms_to_centers_nm", float("inf")) <= max(cfg.spline_rms_factor * (r_med or float("nan")), cfg.spline_rms_floor_nm)
-    )
+    ) and row.get("centerline_inside_fraction", 1.0) >= cfg.centerline_inside_min
     qc_frame = ok and row.get("twist_max_per_nm", float("inf")) <= cfg.twist_tolerance_per_nm
     qc_tube = ok and not row.get("tube_self_contact", True) and row.get("max_r_kappa", float("inf")) < 1.0
     qc_soma = ok and row.get("soma_distance_start_nm") is not None and not row.get("soma_distance_mismatch")

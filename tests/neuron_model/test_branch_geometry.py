@@ -213,3 +213,42 @@ def test_kink_limit_has_an_absolute_floor():
     sec.centers[6, 1] = 400.0
     flags, _ = flag_sections(sec, kink_floor_nm=150.0, **kw)
     assert flags[6] & FLAG_KINK
+
+
+def test_adaptive_smoothing_keeps_a_wiggly_thin_line_inside_the_tube():
+    """A thin dendrite (r = 110 nm) winding with a 150 nm amplitude every 1.6 um: a 1 um smoothing cuts the bends and
+    leaves the tube, an adaptive width ~2.5 r follows them (the effect seen on real thin Minnie65 branches)."""
+    import dataclasses
+
+    from src.neuron_model.branch_preprocessing import BranchPreprocessingConfig
+    from src.neuron_model.branch_preprocessing.process import adaptive_node_step_nm, adaptive_smoothing_nm, centerline_geometry, line_inside_fraction
+
+    s = np.linspace(0.0, 16000.0, 1601)
+    axis = np.column_stack([s, 150.0 * np.sin(2 * np.pi * s / 1600.0), 60.0 * np.cos(2 * np.pi * s / 2300.0)])
+    axis = resample_polyline(axis, 10.0)
+    t = np.gradient(axis, axis=0)
+    t /= np.linalg.norm(t, axis=1, keepdims=True)
+    t, e1, e2 = rotation_minimizing_frames(axis, t, initial_normal(axis, t[0], 0.02)[0])
+    r = 110.0
+    v, f = tube_mesh(axis, np.full(len(axis), r), e1, e2, n_theta=24, caps=True)
+    rng = np.random.default_rng(0)
+    centres = resample_polyline(axis, 500.0)  # one section every 500 nm
+    centres = centres + rng.normal(0.0, 15.0, centres.shape)
+    radii = np.full(len(centres), r)
+    cfg = BranchPreprocessingConfig()
+    fixed = centerline_geometry(centres, radii, smoothing_nm=1000.0, radius_smoothing_nm=1000.0, node_step_nm=500.0, straight_fraction=0.02)
+    acfg = dataclasses.replace(cfg, centerline_smoothing_factor=2.5, node_step_per_smoothing=0.5)
+    h = adaptive_smoothing_nm(acfg, r)
+    assert h == 275.0 and adaptive_node_step_nm(acfg, h) == 250.0
+    assert adaptive_smoothing_nm(acfg, 600.0) == 1000.0 and adaptive_smoothing_nm(cfg, 110.0) == 1000.0  # clipped / fixed by default
+    adapt = centerline_geometry(centres, radii, smoothing_nm=h, radius_smoothing_nm=1000.0, node_step_nm=adaptive_node_step_nm(acfg, h), straight_fraction=0.02)
+    tri = v[f]
+    inside_fixed = line_inside_fraction(fixed["gamma"], tri, margin=220.0)
+    inside_adapt = line_inside_fraction(adapt["gamma"], tri, margin=220.0)
+    assert inside_fixed < 0.65 and inside_adapt > 0.95
+    # the adaptive line resolves the bends: its node step is 250 nm and the bending -> curve round trip stays within
+    # 1 % of the length (the drift accumulates along the branch: ~75 nm over 16 um here)
+    assert adapt["step"] <= 250.0 + 1e-9 and np.max(np.linalg.norm(adapt["rebuilt"] - adapt["gamma"], axis=1)) < 0.01 * adapt["length"]
+    # at most max_nodes nodes
+    capped = centerline_geometry(centres, radii, smoothing_nm=h, radius_smoothing_nm=1000.0, node_step_nm=250.0, straight_fraction=0.02, max_nodes=40)
+    assert len(capped["nodes"]) <= 40
