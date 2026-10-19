@@ -75,6 +75,21 @@ def main() -> None:
         reasons["length < 5 um (T only)"] = int(short)
     for k, v in reasons.most_common():
         print(f"  {k:28s} {v}")
+    if "qc_centerline" in ok.columns:
+        # 'centerline' = gap OR rms OR the line leaves the mesh: which one
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from src.neuron_model.branch_preprocessing import load_config
+        cfg = load_config(Path(__file__).resolve().parents[2] / "data/processed/config/branch_preprocessing.yaml", {})
+        bad = ok[~ok["qc_centerline"].fillna(False).astype(bool)]
+        r = bad["radius_median_nm"].astype(float)
+        parts = {
+            f"longest_gap > {cfg.long_gap_nm:.0f} nm": int((bad["longest_gap_nm"].astype(float) > cfg.long_gap_nm).sum()),
+            f"rms > max({cfg.spline_rms_factor} r, {cfg.spline_rms_floor_nm:.0f} nm)": int((bad["centerline_rms_to_centers_nm"].astype(float) > np.maximum(cfg.spline_rms_factor * r, cfg.spline_rms_floor_nm)).sum()),
+        }
+        if "centerline_inside_fraction" in bad.columns:
+            parts[f"inside < {cfg.centerline_inside_min}"] = int((bad["centerline_inside_fraction"].astype(float) < cfg.centerline_inside_min).sum())
+        print("  centerline failures by part (yaml thresholds):", parts)
     only = ok[~ok["train_eligible_T"].fillna(False).astype(bool)]
     if len(only) and "qc_reason" in only.columns:
         single = only["qc_reason"].fillna("").map(lambda s: s.split(";")[0] if s and ";" not in s else None).dropna().value_counts()
