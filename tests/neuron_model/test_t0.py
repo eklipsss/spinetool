@@ -208,3 +208,31 @@ def test_t0_tilt_mode_round_trip(tmp_path):
     b = loaded.sample(req, np.random.default_rng(1))[0]
     assert len(a["kappa1"]) == len(a["log_radius"]) - 1 == 120
     assert np.allclose(a["kappa1"], b["kappa1"]) and np.allclose(a["log_radius"], b["log_radius"])
+
+
+def test_direction_model_recovers_branch_amplitudes():
+    """Branches differ in how much they bend (random amplitude, thinner bends more): the per-branch amplitude is
+    recovered and the generated bending of a TYPICAL branch matches (a pooled amplitude overestimates it)."""
+    from src.neuron_model.trunk_generation.models.direction import Amplitude, DirectionModel, DirectionParams
+
+    rng = np.random.default_rng(11)
+    true = DirectionModel(DirectionParams(5000.0, 3.0e-5, 2000.0), Amplitude(math.log(3.0e-5), beta=-1.0, tau=0.5))
+    enc = DesignEncoder.fit([5000.0, 100000.0])
+    branches, real_rms = [], []
+    for i in range(300):
+        length = float(np.exp(rng.uniform(math.log(15000.0), math.log(80000.0))))
+        r = float(np.exp(rng.uniform(math.log(150.0), math.log(600.0))))
+        n = int(length // 500.0) + 1
+        k1, k2 = true.sample_bending(n, 500.0, "g", rng, radius_nm=r)
+        real_rms.append(np.sqrt(np.mean(k1**2 + k2**2)))
+        branches.append(T0Branch(k1, k2, np.full(n, math.log(r)), 500.0, enc.row("mouse", "excitatory", "apical", length), "g"))
+    fitted = DirectionModel().fit(branches, min_group=10_000)
+    a = fitted.amplitude
+    assert a.beta == pytest.approx(-1.0, abs=0.25)
+    assert a.tau == pytest.approx(0.5, abs=0.15)
+    assert 0.6 < math.exp(a.alpha) / 3.0e-5 < 1.6
+    gen_rms = []
+    for b in branches:
+        k1, k2 = fitted.sample_bending(b.n_nodes, 500.0, "g", rng, radius_nm=float(np.exp(b.log_radius[0])))
+        gen_rms.append(np.sqrt(np.mean(k1**2 + k2**2)))
+    assert np.median(gen_rms) == pytest.approx(np.median(real_rms), rel=0.2)

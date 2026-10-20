@@ -446,7 +446,7 @@ class T0Model:
             log_mean = self.mean.sample_log_mean(m["design"], m["n_nodes"], rng)
             k = m["n_nodes"] - 1
             if self.direction is not None:
-                kappa1, kappa2 = self.direction.sample_bending(m["n_nodes"], m["step"], m["group"], rng)
+                kappa1, kappa2 = self.direction.sample_bending(m["n_nodes"], m["step"], m["group"], rng, radius_nm=float(np.exp(np.median(log_mean))))
             else:
                 kappa1, kappa2 = mu[i, 0] + z[i, :k, 0], mu[i, 1] + z[i, :k, 1]
             out.append({

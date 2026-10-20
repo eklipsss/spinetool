@@ -8,13 +8,17 @@ Model (per transverse component, isotropic, nodes ``step`` apart). ``tilt`` = ta
 tangent and the axis, as a 2-vector in the plane normal to the axis (axis = chord direction of the branch)::
 
     tilt_{j+1} = exp(-step / L_d) tilt_j + step * g_j          (restoring to the axis over the length L_d)
-    g_{j+1}    = exp(-step / l_g) g_j + N(0, s_g^2 (1 - exp(-2 step / l_g)))   (smooth turning rate, OU)
+    g_{j+1}    = exp(-step / l_g) g_j + N(0, s_b^2 (1 - exp(-2 step / l_g)))   (smooth turning rate, OU)
 
-With L_d = inf it is the old model (g ~ the bending). The transform tilt -> g has a constant Jacobian, so the exact
-AR(1) likelihood of g ranks the restoring lengths L_d (profile over a grid); s_g, l_g by maximum likelihood.
-Generation: stationary start (burn-in), tangents t = normalize(tilt, 1) in an axis frame, then the bending of the
-minimal (twist-free) rotations between consecutive tangents expressed in the transported frame - the same
-(kappa1, kappa2) convention as ``branch_geometry.integrate_bending``, so the rest of T0 is unchanged. Units: nm.
+``s_b`` is the turning amplitude OF THE BRANCH (random effect): log s_b ~ N(alpha + alpha_group + beta log(r_b / 300 nm),
+tau^2), r_b = median radius. A single pooled amplitude is set by the most bent branches (it is the mean square over
+all nodes) and makes the typical branch too bent and the turning memory too short (first real fit: kappa_rms x2.7,
+kappa autocorrelation at 1 um 0.17 vs 0.51). L_d and l_g are shared; the per-branch variance is profiled out of the
+exact AR(1) likelihood of g (closed form), L_d over a grid, l_g by a 1-D search. The transform tilt -> g has a
+constant Jacobian, so the likelihoods of different L_d are comparable. With L_d = inf it is the old model.
+Generation: s_b drawn for the branch, stationary start (burn-in), tangents t = normalize(tilt, 1) in an axis frame,
+then the bending of the minimal (twist-free) rotations between consecutive tangents expressed in the transported frame
+- the same (kappa1, kappa2) convention as ``branch_geometry.integrate_bending``, so the rest of T0 is unchanged. Units: nm.
 """
 
 from __future__ import annotations
@@ -58,38 +62,39 @@ def drive_series(tilt: np.ndarray, step: float, restore_nm: float) -> np.ndarray
     return (tilt[1:] - a * tilt[:-1]) / step
 
 
-def _ar1_nll(params: np.ndarray, g: np.ndarray, mask: np.ndarray, step: np.ndarray) -> float:
-    """Negative exact log-likelihood of isotropic 2-D AR(1) chains (stationary start). g [B,n,2], mask [B,n]."""
-    log_s, log_l = params
-    s2 = math.exp(2.0 * log_s)
-    phi = np.exp(-step / math.exp(log_l))[:, None]  # [B,1]
-    q = np.maximum(s2 * (1.0 - phi**2), 1e-300)
-    first = (g[:, 0] ** 2).sum(-1) / s2 + 2.0 * math.log(s2)
-    resid = g[:, 1:] - phi[:, :, None] * g[:, :-1]
-    trans = (resid**2).sum(-1) / q + 2.0 * np.log(q)
+MIN_DRIVES = 8  # branches with fewer turning-rate values do not inform the per-branch amplitude
+R_REF_NM = 300.0
+
+
+def _branch_sums(g: np.ndarray, mask: np.ndarray, step: np.ndarray, length_nm: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per branch: S_b (scaled sum of squares), n_b (number of g values), q_b = 1 - phi^2."""
+    phi = np.exp(-step / length_nm)
+    q = np.maximum(1.0 - phi**2, 1e-12)
+    first = (g[:, 0] ** 2).sum(-1) * mask[:, 0]
+    resid = g[:, 1:] - phi[:, None, None] * g[:, :-1]
     m = mask[:, 1:] * mask[:, :-1]
-    return 0.5 * float((first * mask[:, 0]).sum() + (trans * m).sum())
+    s = first + ((resid**2).sum(-1) * m).sum(-1) / q
+    return s, mask.sum(-1), q
 
 
-def _fit_ar1(g: np.ndarray, mask: np.ndarray, step: np.ndarray) -> Tuple[float, float, float]:
-    """(s_g, l_g, nll) by L-BFGS on (log s, log l)."""
-    from scipy.optimize import minimize
+def _profile_nll(length_nm: float, g: np.ndarray, mask: np.ndarray, step: np.ndarray) -> float:
+    """Exact AR(1) NLL of isotropic 2-D chains with the per-branch variance maximised out."""
+    s, n, q = _branch_sums(g, mask, step, length_nm)
+    s = np.maximum(s, 1e-300)
+    return 0.5 * float((2.0 * n + 2.0 * n * np.log(s / (2.0 * n)) + 2.0 * (n - 1.0) * np.log(q)).sum())
 
-    v = g[mask.astype(bool)]
-    s0 = max(float(np.sqrt(np.mean(v**2))), 1e-12)
-    best = None
-    for l0 in (500.0, 2000.0, 8000.0):
-        res = minimize(_ar1_nll, np.array([math.log(s0), math.log(l0)]), args=(g, mask, step), method="L-BFGS-B",
-                       bounds=[(math.log(s0) - 5, math.log(s0) + 5), (math.log(50.0), math.log(1e6))])
-        if best is None or res.fun < best.fun:
-            best = res
-    return math.exp(best.x[0]), math.exp(best.x[1]), float(best.fun)
+
+def _fit_length(g: np.ndarray, mask: np.ndarray, step: np.ndarray) -> Tuple[float, float]:
+    from scipy.optimize import minimize_scalar
+
+    res = minimize_scalar(lambda x: _profile_nll(math.exp(x), g, mask, step), bounds=(math.log(50.0), math.log(1e6)), method="bounded")
+    return math.exp(float(res.x)), float(res.fun)
 
 
 @dataclass
 class DirectionParams:
-    restore_nm: float  # L_d (inf = no restoring)
-    drive_std: float   # s_g, 1/nm
+    restore_nm: float       # L_d (inf = no restoring)
+    drive_std: float        # typical s_b (alpha, branch of radius R_REF_NM), 1/nm
     drive_length_nm: float  # l_g
 
     def to_dict(self) -> Dict[str, float]:
@@ -101,10 +106,35 @@ class DirectionParams:
 
 
 @dataclass
+class Amplitude:
+    """log s_b = alpha + groups[g] + beta * log(r_b / R_REF_NM) + tau * N(0, 1)."""
+
+    alpha: float
+    beta: float = 0.0
+    tau: float = 0.0
+    groups: Dict[str, float] = field(default_factory=dict)
+
+    def mean_log(self, group: str, radius_nm: Optional[float]) -> float:
+        r = R_REF_NM if radius_nm is None or not np.isfinite(radius_nm) or radius_nm <= 0 else float(radius_nm)
+        return self.alpha + self.groups.get(group, 0.0) + self.beta * math.log(r / R_REF_NM)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"alpha": self.alpha, "beta": self.beta, "tau": self.tau, "groups": dict(self.groups)}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Amplitude":
+        return cls(float(d["alpha"]), float(d.get("beta", 0.0)), float(d.get("tau", 0.0)), {k: float(v) for k, v in d.get("groups", {}).items()})
+
+
+@dataclass
 class DirectionModel:
     pooled: Optional[DirectionParams] = None
-    groups: Dict[str, DirectionParams] = field(default_factory=dict)
-    profile: Dict[str, float] = field(default_factory=dict)  # restoring length -> nll per node (pooled)
+    amplitude: Optional[Amplitude] = None
+    profile: Dict[str, float] = field(default_factory=dict)  # restoring length -> nll per value (pooled)
+
+    @property
+    def groups(self) -> Dict[str, float]:
+        return self.amplitude.groups if self.amplitude is not None else {}
 
     @staticmethod
     def _arrays(tilts: Sequence[np.ndarray], steps: Sequence[float], restore_nm: float):
@@ -118,66 +148,81 @@ class DirectionModel:
         return g, mask, np.asarray(steps, dtype=float)
 
     def fit(self, branches: Sequence[Any], *, min_group: int = 50, restore_grid: Sequence[float] = RESTORE_GRID_NM) -> "DirectionModel":
-        """``branches``: T0Branch-like (kappa1, kappa2, step, group)."""
-        tilts, steps, groups = [], [], []
+        """``branches``: T0Branch-like (kappa1, kappa2, log_radius, step, group)."""
+        tilts, steps, groups, radii = [], [], [], []
         for b in branches:
-            if b.n_nodes < 3:
+            if b.n_nodes < MIN_DRIVES + 1:
                 continue
             gamma, t = node_tangents(b.kappa1, b.kappa2, b.step)
             tilts.append(tilt_series(gamma, t))
             steps.append(float(b.step))
             groups.append(b.group)
-        n_nodes = sum(len(t) - 1 for t in tilts)
+            radii.append(float(np.median(np.exp(b.log_radius))))
+        if not tilts:
+            raise ValueError(f"no branch with at least {MIN_DRIVES + 1} nodes")
+        n_values = sum(len(t) - 1 for t in tilts)
         best = None
         for restore in restore_grid:
             g, mask, step = self._arrays(tilts, steps, restore)
-            s, l, nll = _fit_ar1(g, mask, step)
-            self.profile[str(restore)] = nll / max(n_nodes, 1)
+            length, nll = _fit_length(g, mask, step)
+            self.profile[str(restore)] = nll / n_values
             if best is None or nll < best[0]:
-                best = (nll, DirectionParams(float(restore), s, l))
-        self.pooled = best[1]
+                best = (nll, restore, length)
+        _, restore, length = best
+        g, mask, step = self._arrays(tilts, steps, restore)
+        s, n, _ = _branch_sums(g, mask, step, length)
+        y = 0.5 * np.log(np.maximum(s, 1e-300) / (2.0 * n))  # log of the per-branch amplitude
+        x = np.log(np.asarray(radii) / R_REF_NM)
+        w = n / n.sum()
+        design = np.column_stack([np.ones_like(x), x])
+        coef = np.linalg.lstsq(design * np.sqrt(w)[:, None], y * np.sqrt(w), rcond=None)[0]
+        resid = y - design @ coef
         groups_arr = np.asarray(groups)
+        offsets = {}
         for name in np.unique(groups_arr):
-            idx = np.flatnonzero(groups_arr == name)
-            if len(idx) < min_group:
-                continue
-            g, mask, step = self._arrays([tilts[i] for i in idx], [steps[i] for i in idx], self.pooled.restore_nm)
-            s, l, _ = _fit_ar1(g, mask, step)
-            self.groups[str(name)] = DirectionParams(self.pooled.restore_nm, s, l)
+            m = groups_arr == name
+            if m.sum() >= min_group:
+                offsets[str(name)] = float(np.average(resid[m], weights=n[m]))
+                resid[m] -= offsets[str(name)]
+        # spread of the true amplitudes = spread of the estimates minus their sampling noise (var log s_hat ~ 1 / (4 n))
+        tau2 = float(np.average(resid**2, weights=n)) - float(np.average(1.0 / (4.0 * n), weights=n))
+        self.amplitude = Amplitude(float(coef[0]), float(coef[1]), math.sqrt(max(tau2, 0.0025)), offsets)
+        self.pooled = DirectionParams(float(restore), math.exp(float(coef[0])), float(length))
         return self
 
-    def params_for(self, group: str) -> DirectionParams:
-        return self.groups.get(group, self.pooled)
-
-    def sample_tilt(self, n_nodes: int, step: float, group: str, rng: np.random.Generator) -> np.ndarray:
-        """[n_nodes,2] tilt from the stationary regime (burn-in)."""
-        p = self.params_for(group)
+    def sample_tilt(self, n_nodes: int, step: float, group: str, rng: np.random.Generator, radius_nm: Optional[float] = None) -> np.ndarray:
+        """[n_nodes,2] tilt from the stationary regime (burn-in), with an amplitude drawn for this branch."""
+        p = self.pooled
+        amp = self.amplitude or Amplitude(math.log(p.drive_std))
+        s_b = math.exp(amp.mean_log(group, radius_nm) + amp.tau * rng.standard_normal())
         a = 1.0 if math.isinf(p.restore_nm) else math.exp(-step / p.restore_nm)
         phi = math.exp(-step / p.drive_length_nm)
-        sd = p.drive_std * math.sqrt(max(1.0 - phi**2, 0.0))
+        sd = s_b * math.sqrt(max(1.0 - phi**2, 0.0))
         burn = 0 if math.isinf(p.restore_nm) else min(int(math.ceil(5.0 * max(p.restore_nm, p.drive_length_nm) / step)), 5000)
         total = burn + n_nodes
         tilt = np.zeros((total, 2))
-        g = rng.normal(0.0, p.drive_std, 2)
+        g = rng.normal(0.0, s_b, 2)
         eps = rng.normal(0.0, sd, (total, 2))
         for j in range(total - 1):
             tilt[j + 1] = a * tilt[j] + step * g
             g = phi * g + eps[j]
         return tilt[burn:]
 
-    def sample_bending(self, n_nodes: int, step: float, group: str, rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
+    def sample_bending(self, n_nodes: int, step: float, group: str, rng: np.random.Generator, radius_nm: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
         """(kappa1, kappa2) [n_nodes-1] of a trunk with the sampled tilt (twist-free transport of the frame)."""
-        tilt = self.sample_tilt(n_nodes, step, group, rng)
+        tilt = self.sample_tilt(n_nodes, step, group, rng, radius_nm)
         t = np.column_stack([tilt, np.ones(len(tilt))])
         t /= np.linalg.norm(t, axis=1, keepdims=True)
         return bending_from_tangents(t, step)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"pooled": self.pooled.to_dict(), "groups": {g: p.to_dict() for g, p in self.groups.items()}, "profile": self.profile}
+        return {"pooled": self.pooled.to_dict(), "amplitude": self.amplitude.to_dict() if self.amplitude else None,
+                "groups": dict(self.groups), "profile": self.profile}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DirectionModel":
-        return cls(DirectionParams.from_dict(d["pooled"]), {g: DirectionParams.from_dict(p) for g, p in d["groups"].items()}, dict(d.get("profile", {})))
+        amp = d.get("amplitude")
+        return cls(DirectionParams.from_dict(d["pooled"]), Amplitude.from_dict(amp) if amp else None, dict(d.get("profile", {})))
 
 
 def bending_from_tangents(t: np.ndarray, step: float) -> Tuple[np.ndarray, np.ndarray]:

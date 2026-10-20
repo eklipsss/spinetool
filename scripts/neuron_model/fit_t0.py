@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -70,9 +71,11 @@ def main() -> None:
     (run.root / "report.json").write_text(json.dumps(result["report"], indent=2, default=float), encoding="utf-8")
     if result["report"].get("direction"):
         p = result["report"]["direction"]["pooled"]
+        a = result["report"]["direction"].get("amplitude") or {}
         rest = "inf (no restoring)" if p["restore_nm"] is None else f"{p['restore_nm'] / 1000.0:g} um"
-        print(f"[t0] direction: restoring length L_d {rest}, turning rate std {p['drive_std'] * 1000.0:.3g} /um, its correlation length {p['drive_length_nm'] / 1000.0:.3g} um; "
-              f"groups {list(result['report']['direction']['groups'])}", flush=True)
+        print(f"[t0] direction: restoring length L_d {rest}, turning-rate memory {p['drive_length_nm'] / 1000.0:.3g} um; "
+              f"turning amplitude of a branch with r = 300 nm {p['drive_std'] * 1000.0:.3g} /um, x r^{a.get('beta', 0.0):.2f}, "
+              f"spread between branches x/: {math.exp(a.get('tau', 0.0)):.2f}; group offsets {({k: round(v, 2) for k, v in a.get('groups', {}).items()})}", flush=True)
     print(f"[t0] chosen: {result['chosen']}; noise floor W1/std {result['report']['noise_floor_mean_w1_rel']:.3f}; run -> {run.root}", flush=True)
 
 
