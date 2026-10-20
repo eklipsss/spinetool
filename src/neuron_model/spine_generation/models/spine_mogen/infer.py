@@ -32,6 +32,7 @@ def generate_point_clouds(
     device,
     batch_size: int = 8,
     cond=None,
+    log=None,
 ) -> np.ndarray:
     """``[n_samples, n_points, 3]`` in PHYSICAL units (model output / coord_scale).
 
@@ -47,6 +48,8 @@ def generate_point_clouds(
         noise = torch.stack([torch.randn(n_points, 3, generator=torch.Generator().manual_seed(seed * 1_000_003 + i)) for i in idx]).to(device)
         points = sample_midpoint(model, noise, n_steps=n_steps, schedule=schedule, cond=cond)
         out.append((points / coord_scale).cpu().numpy())
+        if log is not None:
+            log(f"point clouds {idx.stop}/{n_samples}")
     return np.concatenate(out, axis=0)
 
 

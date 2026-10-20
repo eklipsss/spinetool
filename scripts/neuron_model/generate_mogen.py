@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -78,6 +79,12 @@ def main() -> None:
 
     device = get_device(cfg.get("device", "auto"))
     model.to(device)
+    print(f"output {out_root}; device {device}", flush=True)
+    started = time.perf_counter()
+
+    def log(message: str) -> None:
+        print(f"[{time.perf_counter() - started:7.0f} s] {message}", flush=True)
+
     flow = cfg["flow"]
     steps = int(args.steps or flow["inference_steps"])
     inference_config = {
@@ -100,6 +107,7 @@ def main() -> None:
         seed=args.seed,
         device=device,
         batch_size=args.batch_size,
+        log=log,
     )
     rec_cfg = load_config(resolve_path(cfg["reconstruction"]["poisson_config"]))
     poisson = PoissonParams.from_mapping(rec_cfg["poisson"])
@@ -113,6 +121,8 @@ def main() -> None:
         if reconstruction is not None:
             raw_reports.append(reconstruction["validation_raw"])
             post_reports.append(reconstruction["validation_postprocessed"])
+        if (i + 1) % 10 == 0 or i + 1 == len(points):
+            log(f"meshes {i + 1}/{len(points)}")
     summary = {
         "n_samples": args.n_samples,
         "inference_config": inference_config,
