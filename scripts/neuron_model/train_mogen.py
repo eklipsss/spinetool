@@ -35,7 +35,7 @@ from src.neuron_model.spine_generation.experiment.config import load_config, res
 from src.neuron_model.spine_generation.experiment.loop import LoopConfig, run_training
 from src.neuron_model.spine_generation.experiment.run import create_run, open_run
 from src.neuron_model.spine_generation.experiment.seed import seed_everything
-from src.neuron_model.spine_generation.experiment.training import count_parameters, get_device
+from src.neuron_model.spine_generation.experiment.training import count_parameters, get_device, make_lr_scheduler
 from src.neuron_model.spine_generation.models.spine_mogen.train import (
     build_model,
     make_loss_fn,
@@ -87,6 +87,9 @@ def main() -> None:
     print(f"run {run.root}\ndevice {device}; params {count_parameters(model):,}; train {len(train_ds)} / val {len(val_ds or [])}")
     optimizer = make_optimizer(model, cfg["optimizer"])
     train_cfg = cfg["train"]
+    # optimizer.schedule: e.g. "optimizer.schedule={type: cosine, min_lr: 1.0e-5}" (default: constant lr); on --resume of a
+    # run without one it starts at the current step (loop.run_training)
+    scheduler = make_lr_scheduler(optimizer, cfg["optimizer"].get("schedule"), int(train_cfg["max_steps"]))
     loader = make_loader(train_ds, batch_size=int(data_cfg["batch_size"]), shuffle=True, seed=int(cfg["seed"]), num_workers=int(data_cfg.get("num_workers", 0)), drop_last=True)
     loop = LoopConfig.from_mapping({**train_cfg, "precision": cfg.get("precision")})
     result = run_training(
@@ -97,6 +100,7 @@ def main() -> None:
         loader,
         make_loss_fn(cfg["flow"], device),
         device=device,
+        scheduler=scheduler,
         validate_fn=make_validate_fn(val_ds, cfg["flow"], device, batch_size=int(data_cfg["batch_size"]), seed=int(cfg["seed"]), max_batches=train_cfg.get("n_val_batches")),
         sample_fn=make_sample_fn(run.samples, cfg["flow"], data_cfg, device, n_samples=int(train_cfg.get("n_samples", 4)), seed=int(cfg["seed"])),
         resume=bool(args.resume),

@@ -30,7 +30,7 @@ model:
     n_heads: 8
     k_nn: 16
     coord_dim: 3
-    cond_dim: null        # set from the exported checkpoint (Dense_0 input width) - scratch must use the same value
+    cond_dim: 22          # = Dense_0 input width of mouse_mixed (export_mogen_weights.py); scratch must use the same value
 
 flow:
   time_schedule: mogen_cosine      # = cosine_2.0 of mouse_mixed; do not change before the baseline is reproduced
