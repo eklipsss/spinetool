@@ -44,6 +44,7 @@ class AssemblyConfig:
     penetration_tol_nm: float = 20.0      # body vertex deeper than this inside the trunk -> penetrates_trunk
     max_penetration_fraction: float = 0.0
     collision_volume_nm3: float = 1000.0  # overlap of two spines above this -> collides (10 nm cube)
+    simplify_tolerance_nm: float = 0.1    # degenerate (zero-area) triangles after the union -> Manifold.simplify with this tolerance
     on_failure: str = "resample"          # resample | drop
     max_tries: int = 5
     seed: int = 0
@@ -169,11 +170,22 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
         spine_rows.append(row)
 
     union = m3d.Manifold.batch_boolean([trunk_mf] + [m for m, _ in accepted], m3d.OpType.Add) if accepted else trunk_mf
-    out = union.to_mesh64()
-    verts = np.asarray(out.vert_properties, dtype=np.float64)[:, :3] + origin
-    faces = np.asarray(out.tri_verts, dtype=np.int64)
-    mesh = trimesh.Trimesh(verts, faces, process=False)
+
+    def export(mf):
+        out = mf.to_mesh64()
+        v = np.asarray(out.vert_properties, dtype=np.float64)[:, :3] + origin
+        f = np.asarray(out.tri_verts, dtype=np.int64)
+        return v, f, trimesh.Trimesh(v, f, process=False)
+
+    verts, faces, mesh = export(union)
     areas = mesh.area_faces
+    n_degenerate_raw = int((areas < 1e-6).sum())
+    if n_degenerate_raw and cfg.simplify_tolerance_nm > 0:
+        # slivers where two surfaces nearly touch: collapse edges shorter than the tolerance (keeps the mesh manifold)
+        union = union.simplify(float(cfg.simplify_tolerance_nm))
+        verts, faces, mesh = export(union)
+        areas = mesh.area_faces
+    branch["n_degenerate_faces_before_simplify"] = n_degenerate_raw
     n_placed = sum(r["status"] == "placed" for r in spine_rows)
     branch.update(
         status="ok", reason=None, n_spines_placed=int(n_placed), n_spines_dropped=int(len(spine_rows) - n_placed),

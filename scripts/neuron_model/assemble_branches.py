@@ -109,6 +109,10 @@ def main() -> None:
         reasons = st["failure_reasons"].dropna().str.split(";").explode()
         info["failure_reasons"] = reasons.value_counts().to_dict()
     (out / "assembly_info.json").write_text(json.dumps(info, indent=2, default=str), encoding="utf-8")
+    if "reason" in bt.columns and bt["reason"].notna().any():
+        info["invalid_reasons"] = bt["reason"].dropna().str.split(";").explode().value_counts().to_dict()
+        (out / "assembly_info.json").write_text(json.dumps(info, indent=2, default=str), encoding="utf-8")
+        print(f"[assembly] not ok: {info['invalid_reasons']} (branches {bt.loc[bt['reason'].notna(), 'branch_index'].tolist()})", flush=True)
     print(f"[assembly] branches: {info['status_counts']}; spines placed {info.get('spines_placed', 0)}, dropped {info.get('spines_dropped', 0)}; "
           f"attempt failures {info.get('failure_reasons', {})}", flush=True)
     if len(bt) and "watertight" in bt.columns:

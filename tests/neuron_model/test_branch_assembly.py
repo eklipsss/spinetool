@@ -118,3 +118,17 @@ def test_load_tp_set_roundtrip(tmp_path):
     branches, recs, placements = load_tp_set(tmp_path)
     assert len(recs) == 2 and np.allclose(recs[1]["gamma"], trunks[1]["gamma"]) and recs[1]["length"] == pytest.approx(4000.0)
     assert list(placements) == [1] and placements[1]["s"].tolist() == [1000.0, 2000.0]
+
+
+def test_manifold_simplify_keeps_a_closed_mesh():
+    """The degenerate-triangle cleanup (Manifold.simplify, 0.1 nm) must keep a valid closed surface."""
+    import manifold3d as m3d
+    import trimesh
+
+    a = m3d.Manifold.sphere(500.0, 48)
+    b = m3d.Manifold.sphere(300.0, 48).translate([700.0, 0.0, 0.0])
+    u = (a + b).simplify(0.1)
+    out = u.to_mesh64()
+    mesh = trimesh.Trimesh(np.asarray(out.vert_properties)[:, :3], np.asarray(out.tri_verts), process=False)
+    assert mesh.is_watertight and mesh.is_winding_consistent and mesh.volume > 0
+    assert abs(mesh.volume - u.volume()) / u.volume() < 1e-6
