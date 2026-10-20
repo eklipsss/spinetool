@@ -17,6 +17,9 @@ nothing changes in the training code - only ``data.manifests`` points at it:
         "data.manifests=['D:/cache/minnie65_dev/manifest.parquet']" "data.check_files=[]" \
         data.drop_unassigned=true data.splits=<same splits> data.bbox=<same bbox> ...
 
+    # MoGen picks a random point-cloud resampling: restrict it to the cached ones (default --variants 1 2)
+    python scripts/neuron_model/train_mogen.py --config ... <same data overrides> "data.variants=[1,2]"
+
 Only what training needs is copied: the ``--n-points`` point clouds (points + normals) of the
 first ``--variants`` resamplings, and the SDF arrays ``query_points / sdf / sample_type /
 surface_normals``. Meshes, quality files etc. are not copied, so the cache is for TRAINING only
