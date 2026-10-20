@@ -69,6 +69,7 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     picked = pool.iloc[rng.integers(0, len(pool), args.n)].reset_index(drop=True)
     requests = [dict(_cond(r), length_nm=float(r["length_nm"]), is_terminal=bool(r["is_terminal"]),
+                     step_nm=None if pd.isna(r.get("step_nm")) else float(r["step_nm"]),
                      soma_distance_start_nm=None if pd.isna(r.get("soma_distance_start_nm")) else float(r["soma_distance_start_nm"]), source_branch=branch_key(r))
                 for r in picked.to_dict("records")]
 

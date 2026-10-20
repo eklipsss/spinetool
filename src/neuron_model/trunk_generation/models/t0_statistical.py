@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -204,7 +205,9 @@ class LengthModel:
         for k in range(1, max_components + 1):
             if len(log_l) < 20 * k:
                 break
-            gm = GaussianMixture(k, random_state=seed, n_init=2).fit(log_l.reshape(-1, 1))
+            with warnings.catch_warnings():  # "KMeans is known to have a memory leak on Windows with MKL": harmless here
+                warnings.simplefilter("ignore", UserWarning)
+                gm = GaussianMixture(k, random_state=seed, n_init=2).fit(log_l.reshape(-1, 1))
             bic = gm.bic(log_l.reshape(-1, 1))
             if best is None or bic < best[0]:
                 best = (bic, gm)
@@ -392,7 +395,8 @@ class T0Model:
     # -------------------------------------------------------------- generation
     def sample(self, conditions: Sequence[Dict[str, Any]], rng: np.random.Generator) -> List[Dict[str, Any]]:
         """One raw feature sample per request. A request: ``species``, ``cell_type_binary``, ``compartment`` and
-        optionally ``length_nm`` (otherwise drawn from the length model). Returns dicts with ``kappa1``, ``kappa2``
+        optionally ``length_nm`` (otherwise drawn from the length model) and ``step_nm`` (node step of the request, e.g. of
+        the real branch it copies: the preprocessing step is 250-500 nm with the adaptive smoothing; default 500). Returns dicts with ``kappa1``, ``kappa2``
         (M-1 steps), ``log_radius`` (M nodes), ``step``, ``length``, ``group``."""
         n = len(conditions)
         meta = []
@@ -401,7 +405,9 @@ class T0Model:
             length = c.get("length_nm")
             if length is None:
                 length = float(self.length_model.sample(group, self.length_bounds, rng)[0])
-            n_nodes = max(int(math.ceil(length / 500.0)) + 1, 3)
+            step_req = c.get("step_nm")
+            step_req = float(step_req) if step_req is not None and np.isfinite(step_req) and step_req > 0 else 500.0
+            n_nodes = max(int(math.ceil(length / step_req)) + 1, 3)
             meta.append({"group": group, "length": float(length), "n_nodes": n_nodes, "step": float(length) / (n_nodes - 1),
                          "design": self.encoder.row(c.get("species"), c.get("cell_type_binary"), c.get("compartment"), float(length))})
         n_max = max(m["n_nodes"] for m in meta)

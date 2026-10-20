@@ -282,7 +282,7 @@ def trunk_record(geom: Dict[str, np.ndarray]) -> Dict[str, Any]:
 TABLE_COLUMNS = [
     "status", "split", "train_eligible_T", "train_eligible_P", "config_hash", "species", "health", "cell_type_binary", "compartment",
     "length_nm", "is_terminal", "tortuosity", "area_shaft_nm2", "soma_distance_start_nm", "radius_median_nm",
-    "n_spines_in_range", "n_with_position", "unknown_fraction",
+    "n_spines_in_range", "n_with_position", "unknown_fraction", "step_nm",
 ]
 SPINE_COLUMNS = ["status", "has_position", "s", "u", "theta", "radius_at_s", "attachment_cap_area", "projects_to_end", "position_outlier"]
 
