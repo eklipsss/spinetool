@@ -180,12 +180,19 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
     verts, faces, mesh = export(union)
     areas = mesh.area_faces
     n_degenerate_raw = int((areas < 1e-6).sum())
+    used_tol = 0.0
     if n_degenerate_raw and cfg.simplify_tolerance_nm > 0:
-        # slivers where two surfaces nearly touch: collapse edges shorter than the tolerance (keeps the mesh manifold)
-        union = union.simplify(float(cfg.simplify_tolerance_nm))
-        verts, faces, mesh = export(union)
-        areas = mesh.area_faces
+        # slivers where two surfaces nearly touch: collapse edges shorter than the tolerance (keeps the mesh manifold);
+        # escalate x10, x50 if needed (the mesh edges are ~10-50 nm, a few nm do not change the geometry)
+        for factor in (1.0, 10.0, 50.0):
+            used_tol = float(cfg.simplify_tolerance_nm) * factor
+            union = union.simplify(used_tol)
+            verts, faces, mesh = export(union)
+            areas = mesh.area_faces
+            if not (areas < 1e-6).any():
+                break
     branch["n_degenerate_faces_before_simplify"] = n_degenerate_raw
+    branch["simplify_tolerance_used_nm"] = used_tol
     n_placed = sum(r["status"] == "placed" for r in spine_rows)
     branch.update(
         status="ok", reason=None, n_spines_placed=int(n_placed), n_spines_dropped=int(len(spine_rows) - n_placed),

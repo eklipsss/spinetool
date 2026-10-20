@@ -9,7 +9,7 @@ assembly:
   penetration_tol_nm: 20.0      # spine body vertex deeper than this inside the trunk -> penetrates_trunk
   max_penetration_fraction: 0.0
   collision_volume_nm3: 1000.0  # overlap of two spines above this volume -> collides
-  simplify_tolerance_nm: 0.1    # degenerate (zero-area) triangles after the union -> Manifold.simplify (collapses edges < 0.1 nm)
+  simplify_tolerance_nm: 0.1    # degenerate (zero-area) triangles after the union -> Manifold.simplify (edges < 0.1 nm, then 1, 5 nm if still degenerate)
   on_failure: resample          # resample (another pool spine, up to max_tries) | drop
   max_tries: 5
   seed: 0
