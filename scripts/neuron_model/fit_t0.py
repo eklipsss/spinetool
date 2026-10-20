@@ -49,8 +49,8 @@ def main() -> None:
         parser.error("set data.branches_root=<output root of run_branch_preprocessing.py>")
     table, _, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None,
                                            io_threads=int(d["io_threads"]), force_pack=args.force_pack)
-    tr = select(table, eligible="train_eligible_T", splits=d["train_splits"])
-    va = select(table, eligible="train_eligible_T", splits=d["val_splits"])
+    tr = select(table, eligible="train_eligible_T", splits=d["train_splits"], exclude_compartments=d.get("exclude_compartments"))
+    va = select(table, eligible="train_eligible_T", splits=d["val_splits"], exclude_compartments=d.get("exclude_compartments"))
     if len(va) > int(d["max_val_branches"]):
         va = va.sample(int(d["max_val_branches"]), random_state=int(cfg["seed"])).reset_index(drop=True)
     if not len(tr) or not len(va):

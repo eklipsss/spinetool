@@ -11,6 +11,7 @@ data:
   io_threads: 16
   train_splits: [train]
   val_splits: [val]
+  exclude_compartments: []        # e.g. [axon_like]: not a category of the condition vector (pooled with unknown)
   max_val_branches: 3000           # generation + functionals on at most this many validation branches
 
 model:

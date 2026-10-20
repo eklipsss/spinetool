@@ -45,8 +45,8 @@ def main() -> None:
         parser.error("set data.branches_root=<output root of run_branch_preprocessing.py>")
     table, spines, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None,
                                                 io_threads=int(d["io_threads"]), force_pack=args.force_pack)
-    tr = select(table, eligible="train_eligible_P", splits=d["train_splits"])
-    va = select(table, eligible="train_eligible_P", splits=d["val_splits"])
+    tr = select(table, eligible="train_eligible_P", splits=d["train_splits"], exclude_compartments=d.get("exclude_compartments"))
+    va = select(table, eligible="train_eligible_P", splits=d["val_splits"], exclude_compartments=d.get("exclude_compartments"))
     if not len(tr) or not len(va):
         raise SystemExit(f"no train ({len(tr)}) or validation ({len(va)}) branches: is the split filled? (data.splits=...)")
     train_cov, val_cov = count_covariates(tr, pack), count_covariates(va, pack)

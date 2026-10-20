@@ -46,7 +46,7 @@ def main() -> None:
     d = cfg["data"]
     bundle = load_p0_bundle(run.root / "p0_bundle.json")
     table, spines, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None, io_threads=int(d["io_threads"]))
-    rows = select(table, eligible="train_eligible_P", splits=[args.split])
+    rows = select(table, eligible="train_eligible_P", splits=[args.split], exclude_compartments=d.get("exclude_compartments"))
     branches = position_branches(rows, spines, pack)
     h = np.linspace(50.0, args.h_max_nm, 40)
     env = dg.envelopes(bundle["position_model"], branches, h, n_sim=args.n_sim, seed=int(cfg["seed"]))

@@ -64,7 +64,7 @@ def main() -> None:
     bundle = load_p0_bundle(p_run.root / "p0_bundle.json")
     table, _, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None, io_threads=int(d["io_threads"]))
     eligible = "train_eligible_T" if args.mode == "generated" else "train_eligible_P"
-    pool = select(table, eligible=eligible, splits=[args.split])
+    pool = select(table, eligible=eligible, splits=[args.split], exclude_compartments=d.get("exclude_compartments"))
     pool = pool[[branch_key(r) in pack for r in pool.to_dict("records")]].reset_index(drop=True)
     rng = np.random.default_rng(args.seed)
     picked = pool.iloc[rng.integers(0, len(pool), args.n)].reset_index(drop=True)

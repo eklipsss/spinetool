@@ -67,13 +67,18 @@ def geometry_path(root: Path, row: Any) -> Path:
     return Path(root) / str(row["neuron_id"]) / f"limb_{int(row['limb_id']):03d}" / f"merged_{int(row['merged_branch_id'])}" / "branch_geometry.npz"
 
 
-def select(table: pd.DataFrame, *, eligible: Optional[str] = None, splits: Optional[Iterable[str]] = None) -> pd.DataFrame:
-    """Rows with ``status == ok``, the given eligibility flag (``train_eligible_T`` / ``train_eligible_P``) and split."""
+def select(table: pd.DataFrame, *, eligible: Optional[str] = None, splits: Optional[Iterable[str]] = None,
+           exclude_compartments: Optional[Iterable[str]] = None) -> pd.DataFrame:
+    """Rows with ``status == ok``, the given eligibility flag (``train_eligible_T`` / ``train_eligible_P``) and split.
+    ``exclude_compartments``: drop these compartments (e.g. ``axon_like``: the condition vector has no such category,
+    it would be pooled with ``unknown``)."""
     keep = table["status"].astype(str) == "ok" if "status" in table.columns else pd.Series(True, index=table.index)
     if eligible:
         keep &= table[eligible].fillna(False).astype(bool)
     if splits is not None:
         keep &= table["split"].astype(str).isin(set(splits))
+    if exclude_compartments and "compartment" in table.columns:
+        keep &= ~table["compartment"].astype(str).isin(set(exclude_compartments))
     return table[keep].reset_index(drop=True)
 
 
