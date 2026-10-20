@@ -17,5 +17,6 @@ data:
 model:
   mean_models: [parabola, gam]
   shrinkage_std: 0.3
+  direction: tilt                  # tilt: heading relaxes to the branch axis (bounded tortuosity); kappa: OU on the bending (old, tortuosity grows with L)
   max_iter: 200
   length_bounds_nm: [5000.0, 255500.0]

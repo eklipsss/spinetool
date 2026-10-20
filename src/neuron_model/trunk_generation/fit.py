@@ -89,6 +89,7 @@ def fit_t0(
     shrinkage_std: float = 0.3,
     max_iter: int = 200,
     length_bounds=(5000.0, 255500.0),
+    direction: str = "tilt",
     seed: int = 0,
     log=print,
 ) -> Dict[str, Any]:
@@ -114,7 +115,7 @@ def fit_t0(
     models: Dict[str, T0Model] = {}
     requests = [dict(c, length_nm=b.length, step_nm=b.step) for c, b in zip(val_conditions, val)]
     for mean in mean_models:
-        model = T0Model(mean, length_bounds=length_bounds).fit(train, encoder=encoder, shrinkage_std=shrinkage_std, max_iter=max_iter)
+        model = T0Model(mean, length_bounds=length_bounds, direction=direction).fit(train, encoder=encoder, shrinkage_std=shrinkage_std, max_iter=max_iter)
         records, summary = generate_trunks(model, requests, limits, seed=seed, model_id=f"t0-{mean}")
         gen_f = [functionals(r["kappa1"], r["kappa2"], np.log(r["radius"]), r["step"], r["gamma"]) for r in records if r is not None]
         metrics = {f: compare([x[f] for x in gen_f], [x[f] for x in real_f]) for f in FUNCTIONALS}
@@ -135,7 +136,7 @@ def fit_t0(
         "n_train": len(train), "n_val": len(val), "limits": limits.to_dict(),
         "real_val_rejection_rate": float(np.mean(real_reject)) if real_reject else None,
         "noise_floor": floor, "noise_floor_by": floor_by, "noise_floor_mean_w1_rel": float(np.nanmean([m["w1_rel"] for m in floor.values()])),
-        "variants": results, "chosen": chosen,
+        "variants": results, "chosen": chosen, "direction": models[chosen].direction.to_dict() if models[chosen].direction is not None else None,
         "pooled_ou": {"length_scales_nm": models[chosen].params_for("__pooled__").length_scales.tolist()},
     }
     return {"models": models, "chosen": chosen, "limits": limits, "report": report}

@@ -89,7 +89,7 @@ def test_group_shrinkage_separates_large_groups_and_keeps_small_close_to_pooled(
 def test_sampling_reproduces_statistics_and_geometry_checks(mean):
     rng = np.random.default_rng(3)
     branches, enc = _simulate(rng, 400)
-    model = T0Model(mean).fit(branches, encoder=enc, max_iter=200)
+    model = T0Model(mean, direction="kappa").fit(branches, encoder=enc, max_iter=200)
     reqs = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical", "length_nm": 30000.0}] * 300
     raws = model.sample(reqs, np.random.default_rng(0))
     assert len(raws) == 300 and all(len(r["log_radius"]) == len(r["kappa1"]) + 1 for r in raws)
@@ -144,3 +144,67 @@ def test_mean_models_fit_known_profiles():
     assert gm.sigma_b >= 0.0 and gm.beta is not None
     sample = gm.sample_log_mean(b.design, b.n_nodes, np.random.default_rng(0))
     assert sample.shape == (b.n_nodes,) and np.isfinite(sample).all()
+
+
+# ---------------------------------------------------------------------------
+# direction model (heading relaxing to the branch axis)
+# ---------------------------------------------------------------------------
+
+
+def _tortuosity(kappa1, kappa2, step):
+    from src.neuron_model import branch_geometry as bg
+
+    gamma, _ = bg.integrate_bending(kappa1, kappa2, step)
+    return (len(gamma) - 1) * step / np.linalg.norm(gamma[-1] - gamma[0])
+
+
+def test_bending_from_tangents_inverts_integration():
+    from src.neuron_model import branch_geometry as bg
+    from src.neuron_model.trunk_generation.models.direction import bending_from_tangents
+
+    rng = np.random.default_rng(3)
+    t = rng.normal(size=(60, 3)) * 0.3 + [0.0, 0.0, 1.0]
+    t /= np.linalg.norm(t, axis=1, keepdims=True)
+    k1, k2 = bending_from_tangents(t, 400.0)
+    _, frames = bg.integrate_bending(k1, k2, 400.0)
+    rebuilt = frames[:, :, 0]
+    assert np.abs(t @ t.T - rebuilt @ rebuilt.T).max() < 1e-9  # same shape up to a rotation
+
+
+def test_direction_model_recovers_restoring_length_and_bounds_tortuosity():
+    from src.neuron_model.trunk_generation.models.direction import DirectionModel, DirectionParams
+
+    rng = np.random.default_rng(5)
+    true = DirectionModel(DirectionParams(8000.0, 4.0e-5, 1500.0))
+    enc = DesignEncoder.fit([5000.0, 100000.0])
+    branches = []
+    for i in range(160):
+        length = float(np.exp(rng.uniform(math.log(10000.0), math.log(100000.0))))
+        step = 500.0
+        n = int(length // step) + 1
+        k1, k2 = true.sample_bending(n, step, "g", rng)
+        branches.append(T0Branch(k1, k2, np.full(n, math.log(300.0)), step, enc.row("mouse", "excitatory", "apical", length), "g"))
+    fitted = DirectionModel().fit(branches, min_group=10_000)
+    # the grid point next to the truth (the axis is the branch's own chord: a mild bias toward shorter L_d is expected)
+    assert 3000.0 <= fitted.pooled.restore_nm <= 20000.0
+    assert 0.5 < fitted.pooled.drive_std / 4.0e-5 < 2.0
+    # tortuosity does not grow with the length (it did with the OU on the bending)
+    short = [_tortuosity(*fitted.sample_bending(41, 500.0, "g", rng), 500.0) for _ in range(60)]
+    long = [_tortuosity(*fitted.sample_bending(401, 500.0, "g", rng), 500.0) for _ in range(60)]
+    assert np.median(long) < np.median(short) + 0.05
+    assert np.median(long) < 1.2
+
+
+def test_t0_tilt_mode_round_trip(tmp_path):
+    rng = np.random.default_rng(2)
+    branches, enc = _simulate(rng, 80)
+    model = T0Model("parabola", direction="tilt").fit(branches, encoder=enc, max_iter=60)
+    assert model.direction is not None
+    path = tmp_path / "t0.json"
+    model.save(path)
+    loaded = T0Model.load(path)
+    req = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical", "length_nm": 30000.0, "step_nm": 250.0}]
+    a = model.sample(req, np.random.default_rng(1))[0]
+    b = loaded.sample(req, np.random.default_rng(1))[0]
+    assert len(a["kappa1"]) == len(a["log_radius"]) - 1 == 120
+    assert np.allclose(a["kappa1"], b["kappa1"]) and np.allclose(a["log_radius"], b["log_radius"])

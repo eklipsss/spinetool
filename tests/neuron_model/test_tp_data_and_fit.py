@@ -97,7 +97,7 @@ def test_fit_t0_reports_functionals_against_noise_floor():
     val, _ = _simulate(rng, 60)
     conds = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical"}] * len(val)
     neurons = [f"n{i // 3}" for i in range(len(val))]
-    res = fit_t0(train, val, conds, neurons, encoder=enc, mean_models=("parabola",), max_iter=100, log=lambda *a: None)
+    res = fit_t0(train, val, conds, neurons, encoder=enc, mean_models=("parabola",), max_iter=100, log=lambda *a: None, direction="kappa")  # data simulated by the kappa-OU
     rep = res["report"]
     assert rep["real_val_rejection_rate"] <= 0.05  # the calibrated limits let the real branches through
     v = rep["variants"]["parabola"]

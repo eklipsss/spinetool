@@ -79,7 +79,7 @@ def main() -> None:
         chosen = args.t0_model or json.loads((t_run.root / "report.json").read_text(encoding="utf-8"))["chosen"]
         model = T0Model.load(t_run.root / f"t0_{chosen}.json")
         limits = TrunkLimits(**json.loads((t_run.root / "limits.json").read_text(encoding="utf-8")))
-        t_req = [{k: q[k] for k in ("species", "cell_type_binary", "compartment", "length_nm")} for q in requests]
+        t_req = [{k: q[k] for k in ("species", "cell_type_binary", "compartment", "length_nm", "step_nm")} for q in requests]
         trunks, t_summary = generate_trunks(model, t_req, limits, seed=args.seed, model_id=f"t0-{chosen}")
         info.update(t0_model=chosen, trunk_summary=t_summary)
     else:

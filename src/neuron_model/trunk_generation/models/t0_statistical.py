@@ -19,6 +19,12 @@ Mean log-radius profile ``m(s)``, two competing descriptions:
 - ``gam`` (T0-b): m(s) = f(u, log L, C) + b_branch, penalised B-spline model plus a random branch shift.
 
 Branch length for fully automatic generation: log-normal mixture (<= 3 components) per group.
+
+Direction (``direction="tilt"``, default): the bending of a generated trunk comes from ``direction.DirectionModel``
+(the heading relaxes to the branch axis, bounded tortuosity) instead of the kappa components of the OU above, which
+integrate to a free random walk of the heading (tortuosity growing with the length). The radius residual rho keeps its
+OU marginal (diagonal Phi: the rho component alone is an exact AR(1)); the bending-thickness cross terms are not used
+in this mode. ``direction="kappa"``: the original model.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ..conditions import DesignEncoder, group_key
+from .direction import DirectionModel
 
 
 @dataclass
@@ -315,9 +322,13 @@ class OUParams:
 class T0Model:
     """Statistical trunk model (see module docstring)."""
 
-    def __init__(self, mean_model: str = "parabola", length_bounds: Tuple[float, float] = (5000.0, 255500.0)) -> None:
+    def __init__(self, mean_model: str = "parabola", length_bounds: Tuple[float, float] = (5000.0, 255500.0), direction: str = "tilt") -> None:
         if mean_model not in MEAN_MODELS:
             raise ValueError(f"mean_model must be one of {tuple(MEAN_MODELS)}")
+        if direction not in ("tilt", "kappa"):
+            raise ValueError("direction must be 'tilt' or 'kappa'")
+        self.direction_mode = direction
+        self.direction: Optional[DirectionModel] = None
         self.mean = MEAN_MODELS[mean_model]()
         self.length_model = LengthModel()
         self.length_bounds = tuple(float(b) for b in length_bounds)
@@ -385,6 +396,9 @@ class T0Model:
         self.pooled = pooled.detach().numpy().copy()
         self.group_theta = {g: (pooled + delta[i]).detach().numpy().copy() for g, i in index.items()}
         self.fit_info = {"nll_per_node": final, "n_branches": len(branches), "n_nodes": int(n_total), "groups": names, "shrinkage_std": shrinkage_std}
+        if self.direction_mode == "tilt":
+            self.direction = DirectionModel().fit(branches, min_group=min_group)
+            self.fit_info["direction"] = self.direction.to_dict()
         if verbose:
             print(self.fit_info)
         return self
@@ -431,9 +445,13 @@ class T0Model:
         for i, m in enumerate(meta):
             log_mean = self.mean.sample_log_mean(m["design"], m["n_nodes"], rng)
             k = m["n_nodes"] - 1
+            if self.direction is not None:
+                kappa1, kappa2 = self.direction.sample_bending(m["n_nodes"], m["step"], m["group"], rng)
+            else:
+                kappa1, kappa2 = mu[i, 0] + z[i, :k, 0], mu[i, 1] + z[i, :k, 1]
             out.append({
-                "kappa1": mu[i, 0] + z[i, :k, 0],
-                "kappa2": mu[i, 1] + z[i, :k, 1],
+                "kappa1": kappa1,
+                "kappa2": kappa2,
                 "log_radius": log_mean + z[i, : m["n_nodes"], 2],
                 "step": m["step"], "length": m["length"], "group": m["group"],
             })
@@ -445,12 +463,14 @@ class T0Model:
             "model": "t0", "mean": self.mean.to_dict(), "length_model": self.length_model.to_dict(), "length_bounds": list(self.length_bounds),
             "pooled": self.pooled.tolist(), "group_theta": {g: t.tolist() for g, t in self.group_theta.items()},
             "encoder": self.encoder.to_dict(), "fit_info": self.fit_info,
+            "direction_mode": self.direction_mode, "direction": self.direction.to_dict() if self.direction is not None else None,
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "T0Model":
         mean = d["mean"]["kind"]
-        obj = cls(mean, tuple(d["length_bounds"]))
+        obj = cls(mean, tuple(d["length_bounds"]), direction=d.get("direction_mode", "kappa"))
+        obj.direction = DirectionModel.from_dict(d["direction"]) if d.get("direction") else None
         obj.mean = MEAN_MODELS[mean].from_dict(d["mean"])
         obj.length_model = LengthModel.from_dict(d["length_model"])
         obj.pooled = np.asarray(d["pooled"])

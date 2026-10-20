@@ -60,13 +60,19 @@ def main() -> None:
     print(f"[t0] train {len(train)} branches, validation {len(val)}", flush=True)
     rows = va.to_dict("records")
     result = fit_t0(train, val, [_cond(r) for r in rows], [str(r["neuron_id"]) for r in rows], encoder=encoder, mean_models=m["mean_models"],
-                    shrinkage_std=float(m["shrinkage_std"]), max_iter=int(m["max_iter"]), length_bounds=tuple(m["length_bounds_nm"]), seed=int(cfg["seed"]))
+                    shrinkage_std=float(m["shrinkage_std"]), max_iter=int(m["max_iter"]), length_bounds=tuple(m["length_bounds_nm"]), seed=int(cfg["seed"]),
+                    direction=str(m.get("direction", "tilt")))
     run = create_run(cfg, runs_root=resolve_path(cfg["runs_root"]), extra_info={"n_train": len(train), "n_val": len(val), "branches_root": str(d["branches_root"])})
     for name, model in result["models"].items():
         model.save(run.root / f"t0_{name}.json")
     (run.root / "encoder.json").write_text(json.dumps(encoder.to_dict()), encoding="utf-8")
     (run.root / "limits.json").write_text(json.dumps(result["limits"].to_dict(), indent=2), encoding="utf-8")
     (run.root / "report.json").write_text(json.dumps(result["report"], indent=2, default=float), encoding="utf-8")
+    if result["report"].get("direction"):
+        p = result["report"]["direction"]["pooled"]
+        rest = "inf (no restoring)" if p["restore_nm"] is None else f"{p['restore_nm'] / 1000.0:g} um"
+        print(f"[t0] direction: restoring length L_d {rest}, turning rate std {p['drive_std'] * 1000.0:.3g} /um, its correlation length {p['drive_length_nm'] / 1000.0:.3g} um; "
+              f"groups {list(result['report']['direction']['groups'])}", flush=True)
     print(f"[t0] chosen: {result['chosen']}; noise floor W1/std {result['report']['noise_floor_mean_w1_rel']:.3f}; run -> {run.root}", flush=True)
 
 
