@@ -11,7 +11,7 @@ data:
   io_threads: 16
   train_splits: [train]
   val_splits: [val]
-  exclude_compartments: []        # e.g. [axon_like]: not a category of the condition vector (pooled with unknown)
+  exclude_compartments: [axon_like]  # user decision 2026-10-20: dendrites only (axon_like is not a condition category, it was pooled with unknown); [] = keep
   max_val_branches: 3000           # generation + functionals on at most this many validation branches
 
 model:
