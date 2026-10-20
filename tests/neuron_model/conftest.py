@@ -9,6 +9,12 @@ from pathlib import Path
 # before numpy / torch are imported.
 if sys.platform == "win32":
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    # torch FIRST: imported after pandas / pyarrow / scipy on Windows it fails to load torch\lib\shm.dll
+    # (WinError 127 / fatal exception 0xc0000139) - e.g. when only the T0 tests run and T0 imports torch inside fit()
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        pass
 
 import numpy as np
 import pandas as pd
