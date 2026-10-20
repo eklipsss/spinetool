@@ -25,7 +25,7 @@ output (float64 throughout). Units: nm.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -116,6 +116,52 @@ def place(spine: PoolSpine, trunk: DenseTrunk, s: float, theta: float, cfg: Asse
     return out
 
 
+def flip_needles(vertices: np.ndarray, faces: np.ndarray, area_eps: float = 1e-6, passes: int = 3) -> Tuple[np.ndarray, int]:
+    """Remove zero-area "needle" triangles (a vertex lying on the opposite edge: all edges long, so edge collapse does
+    not touch them) by flipping their longest edge: (a,b,c) + neighbour (b,a,d) -> (a,d,c) + (d,b,c). A flip is skipped
+    when the edge c-d already exists (it would make the mesh non-manifold). Returns (faces, number of flips)."""
+    faces = np.asarray(faces, dtype=np.int64).copy()
+    v = np.asarray(vertices, dtype=float)
+    flips = 0
+    for _ in range(passes):
+        tri = v[faces]
+        area = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+        bad = np.flatnonzero(area < area_eps)
+        if not len(bad):
+            break
+        edge_face = {}
+        for fi, (x, y, z) in enumerate(faces):
+            edge_face[(x, y)] = fi
+            edge_face[(y, z)] = fi
+            edge_face[(z, x)] = fi
+        changed = False
+        for fi in bad:
+            f = faces[fi]
+            lengths = [np.linalg.norm(v[f[(k + 1) % 3]] - v[f[k]]) for k in range(3)]
+            k = int(np.argmax(lengths))
+            a, b, c = f[k], f[(k + 1) % 3], f[(k + 2) % 3]
+            gi = edge_face.get((b, a))
+            if gi is None or gi == fi:
+                continue
+            g = list(faces[gi])
+            d = g[(g.index(a) + 1) % 3]  # g = (b, a, d) up to rotation
+            if d in (a, b, c) or (c, d) in edge_face or (d, c) in edge_face:
+                continue
+            faces[fi] = (a, d, c)
+            faces[gi] = (d, b, c)
+            for e in ((a, b), (b, c), (c, a), (b, a), (a, d), (d, b)):
+                edge_face.pop(e, None)
+            for nf, (x, y, z) in ((fi, (a, d, c)), (gi, (d, b, c))):
+                edge_face[(x, y)] = nf
+                edge_face[(y, z)] = nf
+                edge_face[(z, x)] = nf
+            flips += 1
+            changed = True
+        if not changed:
+            break
+    return faces, flips
+
+
 def _boxes_overlap(a, b) -> bool:
     return all(a[k] <= b[k + 3] and b[k] <= a[k + 3] for k in range(3))
 
@@ -191,8 +237,15 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
             areas = mesh.area_faces
             if not (areas < 1e-6).any():
                 break
+    n_flips = 0
+    if (areas < 1e-6).any():
+        # needles survive edge collapse: flip their longest edge (topology-preserving, keeps the surface closed)
+        faces, n_flips = flip_needles(verts, faces)
+        mesh = trimesh.Trimesh(verts, faces, process=False)
+        areas = mesh.area_faces
     branch["n_degenerate_faces_before_simplify"] = n_degenerate_raw
     branch["simplify_tolerance_used_nm"] = used_tol
+    branch["n_needle_flips"] = int(n_flips)
     n_placed = sum(r["status"] == "placed" for r in spine_rows)
     branch.update(
         status="ok", reason=None, n_spines_placed=int(n_placed), n_spines_dropped=int(len(spine_rows) - n_placed),

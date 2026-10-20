@@ -146,3 +146,19 @@ def test_spine_geometry_stats_and_circular_moments():
     rng = np.random.default_rng(0)
     assert circular_moments(rng.uniform(-np.pi, np.pi, 4000))["R1"] < 0.05
     assert circular_moments(np.r_[np.zeros(500), np.full(500, np.pi)])["R2"] == pytest.approx(1.0)
+
+
+def test_flip_needles_removes_a_zero_area_triangle_and_keeps_the_surface_closed():
+    from src.neuron_model.branch_assembly.assemble import flip_needles
+
+    m = trimesh.creation.icosphere(subdivisions=2, radius=1000.0)
+    v, f = np.asarray(m.vertices, float).copy(), np.asarray(m.faces).copy()
+    a, b, c = f[0]
+    v[c] = 0.5 * (v[a] + v[b])  # c on the edge ab: face 0 becomes a needle
+    tri = v[f]
+    assert (0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1) < 1e-6).sum() >= 1
+    new, flips = flip_needles(v, f)
+    out = trimesh.Trimesh(v, new, process=False)
+    assert flips >= 1
+    assert (out.area_faces < 1e-6).sum() == 0
+    assert out.is_watertight and out.is_winding_consistent
