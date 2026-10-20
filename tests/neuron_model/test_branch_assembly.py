@@ -132,3 +132,17 @@ def test_manifold_simplify_keeps_a_closed_mesh():
     mesh = trimesh.Trimesh(np.asarray(out.vert_properties)[:, :3], np.asarray(out.tri_verts), process=False)
     assert mesh.is_watertight and mesh.is_winding_consistent and mesh.volume > 0
     assert abs(mesh.volume - u.volume()) / u.volume() < 1e-6
+
+
+def test_spine_geometry_stats_and_circular_moments():
+    from src.neuron_model.branch_assembly.evaluate import circular_moments, spine_geometry_stats
+
+    # three spines: two 300 nm apart along s on the same side, one on the opposite side of a r = 200 nm trunk
+    st = spine_geometry_stats(np.array([1000.0, 1300.0, 1300.0]), np.array([0.0, 0.0, np.pi]), np.full(3, 200.0), 2000.0)
+    assert np.allclose(st["u"], [0.5, 0.65, 0.65])
+    assert st["nn_surface_nm"][0] == pytest.approx(300.0)
+    assert st["nn_surface_nm"][2] == pytest.approx(min(np.hypot(300.0, 200.0 * np.pi), 200.0 * np.pi))
+    assert np.allclose(st["gap_nm"], [300.0, 0.0])
+    rng = np.random.default_rng(0)
+    assert circular_moments(rng.uniform(-np.pi, np.pi, 4000))["R1"] < 0.05
+    assert circular_moments(np.r_[np.zeros(500), np.full(500, np.pi)])["R2"] == pytest.approx(1.0)
