@@ -5,3 +5,5 @@
 icosphere
 # Screened Poisson surface reconstruction (S-module reconstruction backend)
 pymeshlab
+# Boolean union of trunk + spine meshes (branch assembly, src/neuron_model/branch_assembly)
+manifold3d

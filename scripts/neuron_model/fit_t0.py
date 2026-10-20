@@ -26,6 +26,10 @@ import os
 if sys.platform == "win32":
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# torch FIRST, before pandas / pyarrow / scipy: imported after them on Windows it fails with
+# "OSError: [WinError 127] ... torch\lib\shm.dll" (a DLL of the same name is already loaded)
+import torch  # noqa: F401,E402
+
 from src.neuron_model.branch_data import _cond, prepare_training_data, select, t0_training_branches
 from src.neuron_model.spine_generation.experiment.config import load_config, resolve_path
 from src.neuron_model.spine_generation.experiment.run import create_run

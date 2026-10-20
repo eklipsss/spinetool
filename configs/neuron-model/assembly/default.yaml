@@ -1,0 +1,14 @@
+# Branch assembly (scripts/neuron_model/assemble_branches.py, src/neuron_model/branch_assembly). Units: nm.
+assembly:
+  trunk_step_nm: 100.0          # dense centreline step of the trunk tube (the T nodes are 250-500 nm apart)
+  trunk_n_theta: 32             # vertices per tube ring
+  base_band_nm: 30.0            # spine base = vertices up to this height above the attachment centre
+  base_margin_nm: 10.0          # the base is sunk at least this deep inside the trunk
+  base_inside_quantile: 1.0     # share of base vertices that must be inside the trunk
+  max_immersion_fraction: 0.5   # sink depth <= this * spine height, else base_not_immersed
+  penetration_tol_nm: 20.0      # spine body vertex deeper than this inside the trunk -> penetrates_trunk
+  max_penetration_fraction: 0.0
+  collision_volume_nm3: 1000.0  # overlap of two spines above this volume -> collides
+  on_failure: resample          # resample (another pool spine, up to max_tries) | drop
+  max_tries: 5
+  seed: 0

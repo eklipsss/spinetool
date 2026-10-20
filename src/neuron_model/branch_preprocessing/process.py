@@ -505,7 +505,7 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
         dist_perp = np.linalg.norm(proj.v_perp, axis=1)
         for n, (i, source) in enumerate(owners):
             clamped = bool(proj.at_end[n] != 0 and proj.beyond[n] > cfg.end_clamp_factor * r_at[n])
-            outlier = bool(abs(dist_perp[n] - r_at[n]) > max(cfg.position_outlier_factor * r_at[n], cfg.position_outlier_floor_nm))
+            outlier = position_outlier(cfg, dist_perp[n] - r_at[n], r_at[n])
             info = segments[i]["info"]
             spine_rows[i].update(
                 has_position=not clamped and not outlier,
@@ -543,6 +543,12 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
     row["geometry_path"] = str(geometry_path)
     _finalize_eligibility(cfg, row)
     return row, spine_rows
+
+
+def position_outlier(cfg: BranchPreprocessingConfig, d: float, r: float) -> bool:
+    """Attachment centre too far inside (d < -inside_factor r) or outside (d > max(factor r, floor)) the trunk surface,
+    d = |v_perp| - r(s). The centre lies systematically outside (the spine cut crosses the neck above the shaft)."""
+    return bool(d < -cfg.position_inside_factor * r or d > max(cfg.position_outlier_factor * r, cfg.position_outlier_floor_nm))
 
 
 def _trapezoid(y: np.ndarray, x: np.ndarray) -> float:

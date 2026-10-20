@@ -28,6 +28,10 @@ import os
 if sys.platform == "win32":
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# torch FIRST, before pandas / pyarrow / scipy: imported after them on Windows it fails with
+# "OSError: [WinError 127] ... torch\lib\shm.dll" (a DLL of the same name is already loaded)
+import torch  # noqa: F401,E402
+
 import numpy as np
 import pandas as pd
 

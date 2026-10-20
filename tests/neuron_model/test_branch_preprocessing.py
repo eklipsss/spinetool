@@ -226,13 +226,46 @@ def test_position_outlier_floor(mini):
     import dataclasses
 
     cfg = mini["cfg"]
-    strict = dataclasses.replace(cfg, position_outlier_factor=0.0, output_root=mini["tmp"] / "out_strict")
+    strict = dataclasses.replace(cfg, position_outlier_factor=0.0, position_inside_factor=0.0, output_root=mini["tmp"] / "out_strict")
     run(strict)
     spines = pd.read_parquet(strict.out_root / "branch_spines.parquet")
     pos = spines[(spines["status"] == "valid") & spines["s"].notna()]
     assert len(pos) and pos["position_outlier"].all() and not pos["has_position"].any()  # limit 0 nm: every spine is an outlier
-    floor = dataclasses.replace(strict, position_outlier_floor_nm=1000.0, output_root=mini["tmp"] / "out_floor", force=True)
+    floor = dataclasses.replace(strict, position_outlier_floor_nm=1000.0, position_inside_factor=10.0, output_root=mini["tmp"] / "out_floor", force=True)
     run(floor)
     spines = pd.read_parquet(floor.out_root / "branch_spines.parquet")
     pos = spines[(spines["status"] == "valid") & spines["s"].notna()]
     assert not pos["position_outlier"].any() and pos["has_position"].all()
+
+
+def test_reapply_recomputes_spine_positions(mini):
+    import dataclasses
+
+    from src.neuron_model.branch_preprocessing import reapply_eligibility
+
+    cfg = mini["cfg"]
+    run(cfg)
+    before = pd.read_parquet(cfg.out_root / "branch_spines.parquet")
+    n_before = int(before["has_position"].sum())
+    assert n_before > 0
+    strict = dataclasses.replace(cfg, position_outlier_factor=0.0, position_inside_factor=0.0)
+    assert strict.config_hash() == cfg.config_hash()  # the position rule is an eligibility threshold
+    res = reapply_eligibility(strict)
+    assert res["spines_with_position"] == {"before": n_before, "after": 0}
+    spines = pd.read_parquet(cfg.out_root / NEURON / "branch_spines.parquet")
+    assert not spines["has_position"].any()
+    branches = pd.read_parquet(cfg.out_root / "branches.parquet")
+    assert (branches.loc[branches["status"] == "ok", "n_with_position"] == 0).all()
+    res = reapply_eligibility(cfg)  # back: the stored offsets are unchanged
+    assert res["spines_with_position"]["after"] == n_before
+
+
+def test_compartment_lookup_uses_limb_suffix():
+    from src.neuron_model.metadata import compartment_lookup
+
+    # limb_id in the real table is a running row index over all neurons; the limb is the suffix of 'limb'
+    frame = pd.DataFrame({"neuron": ["1", "1", "2", "2"], "limb_id": [0, 1, 2, 3], "limb": ["1_limb_000", "1_limb_001", "2_limb_000", "2_limb_001"],
+                          "compartment": ["apical", "basal", "axon_like", "apical"]})
+    lookup = compartment_lookup(frame)
+    assert lookup[("2", 0)] == "axon_like" and lookup[("2", 1)] == "apical" and ("2", 2) not in lookup
+    assert compartment_lookup(frame.drop(columns="limb"))[("2", 2)] == "axon_like"

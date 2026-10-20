@@ -64,8 +64,14 @@ joining_and_soma:
 
 spines:
   end_clamp_factor: 0.5            # projection beyond an end by > 0.5 r -> projects_to_end (not counted in N)
-  position_outlier_factor: 0.75    # | |v_perp| - r(s) | > max(0.75 r(s), floor) -> position_outlier (counted, no position)
-  position_outlier_floor_nm: 0.0   # set from the pilot (summarize_branches.py, per-spine block): the line is ~140 nm off the centres on thin branches
+  # d = |v_perp| - r(s) of the attachment centre; d < -inside_factor r or d > max(factor r, floor) -> position_outlier
+  # (counted in N, no position). Asymmetric: the centre lies systematically OUTSIDE the surface (the spine cut crosses the
+  # neck above the shaft). 10 neurons (analyze_spine_positions.py), r >= 200 nm: d median +137 nm = +0.44 r, 90 % +1.29 r;
+  # the ellipse does not change it. Spines without position: |d| > 0.75 r 25 %; this rule 7 % (r >= 200 nm 6 %).
+  # Eligibility thresholds (not in the hash): reapply_eligibility.py re-applies them to the stored d.
+  position_outlier_factor: 2.0
+  position_outlier_floor_nm: 400.0
+  position_inside_factor: 0.5
 
 eligibility:                       # initial values, to be refined by the audit
   length_min_t_nm: 5000.0

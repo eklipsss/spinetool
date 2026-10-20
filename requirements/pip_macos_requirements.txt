@@ -7,3 +7,5 @@ icosphere
 # open3d is not used - its macOS pip wheel needs Homebrew libusb and its
 # Poisson has no point_weight/samples_per_node parameters.
 pymeshlab
+# Boolean union of trunk + spine meshes (branch assembly, src/neuron_model/branch_assembly)
+manifold3d

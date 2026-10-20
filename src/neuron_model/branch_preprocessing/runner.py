@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BranchPreprocessingConfig
-from .inputs import available_neurons, load_members, load_metadata, load_soma_midpoints, load_spine_table, neuron_metadata, neuron_split_lookup
+from .inputs import available_neurons, load_members, load_metadata, load_soma_midpoints, load_spine_table, neuron_metadata, neuron_split_lookup  # noqa: F401
 from .process import process_neuron
 
 
@@ -157,30 +157,58 @@ def _write(frame: pd.DataFrame, path: Path) -> None:
     os.replace(tmp, path)
 
 
-def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, neurons: Optional[List[str]] = None) -> Dict[str, Any]:
+def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, neurons: Optional[List[str]] = None, refresh_metadata: bool = False) -> Dict[str, Any]:
     """Recompute the QC flags and ``train_eligible_T/P`` of finished neurons from the STORED quantities with the
     thresholds of ``cfg`` (no mesh is read, minutes for the whole dataset). ``write=False``: only count.
-    Returns counts and, per check, how many ok branches fail it."""
+    The spine position rule is re-applied to the stored offsets (``has_position``, ``n_with_position``).
+    ``refresh_metadata``: also re-read the compartment of every limb from the metadata tables (the lookup was fixed after
+    the first runs). Returns counts and, per check, how many ok branches fail it."""
     from collections import Counter
 
-    from .process import _finalize_eligibility
+    from .process import _finalize_eligibility, position_outlier
 
     root = cfg.out_root
     names = neurons if neurons is not None else sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
-    n_t = n_p = n_ok = n_total = 0
+    n_t = n_p = n_ok = n_total = n_pos = n_pos_before = 0
     reasons: Counter = Counter()
+    keys = ["limb_id", "merged_branch_id"]
+    compartments = None
+    if refresh_metadata:
+        metadata = load_metadata(cfg)
     for neuron_id in names:
         d = root / neuron_id
         if not (d / "_done.json").exists():
             continue
         frame = pd.read_parquet(d / "branches.parquet")
+        if refresh_metadata:
+            compartments = neuron_metadata(cfg, metadata, neuron_id, sorted(frame["limb_id"].astype(int).unique()))["compartment_by_limb"]
+        # spine positions: the outlier rule is applied to the stored d = |v_perp| - r(s)
+        spines_path = d / "branch_spines.parquet"
+        spines = pd.read_parquet(spines_path) if spines_path.exists() else None
+        n_with_position = None
+        if spines is not None and len(spines) and "dist_perp_minus_radius" in spines.columns:
+            n_pos_before += int(spines["has_position"].eq(True).sum())
+            dd, rr = spines["dist_perp_minus_radius"].to_numpy(float), spines["radius_at_s"].to_numpy(float)
+            computed = np.isfinite(dd) & np.isfinite(rr)
+            outlier = np.array([computed[k] and position_outlier(cfg, dd[k], rr[k]) for k in range(len(spines))])
+            clamped = spines["projects_to_end"].eq(True).to_numpy() if "projects_to_end" in spines.columns else np.zeros(len(spines), bool)
+            spines["position_outlier"] = outlier
+            spines["has_position"] = computed & ~clamped & ~outlier
+            n_pos += int(spines["has_position"].sum())
+            n_with_position = spines.groupby(keys)["has_position"].sum()
         rows = []
         for record in frame.to_dict("records"):
             # a missing value is an ABSENT key, as in the rows the processing builds (``row.get(key, default)``)
             record = {k: v for k, v in record.items() if isinstance(v, (list, tuple, np.ndarray)) or not pd.isna(v)}
+            if n_with_position is not None and record.get("status") == "ok" and "n_with_position" in record:
+                record["n_with_position"] = int(n_with_position.get((record["limb_id"], record["merged_branch_id"]), 0))
+            if compartments is not None:
+                record["compartment"] = compartments.get(int(record["limb_id"]))
             _finalize_eligibility(cfg, record)
             rows.append(record)
         new = pd.DataFrame(rows).reindex(columns=list(frame.columns))
+        if write and spines is not None and n_with_position is not None:
+            _write(spines, spines_path)
         n_total += len(new)
         n_ok += int((new["status"] == "ok").sum())
         n_t += int(new["train_eligible_T"].sum())
@@ -189,7 +217,8 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
             reasons.update([x for x in str(r).split(";") if x])
         if write:
             _write(new, d / "branches.parquet")
-    out = {"branches": n_total, "ok": n_ok, "train_eligible_T": n_t, "train_eligible_P": n_p, "failed_checks_among_ok": dict(reasons.most_common())}
+    out = {"branches": n_total, "ok": n_ok, "train_eligible_T": n_t, "train_eligible_P": n_p, "spines_with_position": {"before": n_pos_before, "after": n_pos},
+           "failed_checks_among_ok": dict(reasons.most_common())}
     if write:
         out.update(consolidate(cfg, names))
     return out

@@ -112,10 +112,23 @@ def parse_branch_prefix(prefix: str) -> Dict[str, Any]:
     }
 
 
+_LIMB_SUFFIX = re.compile(r"_limb_(\d+)$")
+
+
 def compartment_lookup(frame: pd.DataFrame) -> Dict[Tuple[str, int], str]:
+    """``{(neuron, limb): compartment}``. In ``minnie65_limb_compartments_length_rule.parquet`` the column ``limb_id`` is a
+    RUNNING row index over the whole table (0..7 for the first neuron, 8..12 for the second, ...), the limb of the neuron
+    is the suffix of ``limb`` (``<neuron>_limb_003``); ``limb_id`` is used only when ``limb`` is absent."""
     result: Dict[Tuple[str, int], str] = {}
+    has_limb = "limb" in frame.columns
     for row in frame.itertuples():
-        result[(str(row.neuron), int(row.limb_id))] = str(row.compartment)
+        limb = None
+        if has_limb and isinstance(row.limb, str):
+            match = _LIMB_SUFFIX.search(row.limb)
+            limb = int(match.group(1)) if match else None
+        if limb is None:
+            limb = int(row.limb_id)
+        result[(str(row.neuron), limb)] = str(row.compartment)
     return result
 
 

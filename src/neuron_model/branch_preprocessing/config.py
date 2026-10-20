@@ -20,6 +20,8 @@ _ELIGIBILITY_FIELDS = {
     "length_min_t_nm", "length_max_t_nm", "invalid_section_fraction_max", "radius_min_nm", "radius_max_nm", "trim_max_nm",
     "unknown_fraction_max", "position_fraction_min", "spline_rms_factor", "spline_rms_floor_nm", "long_gap_nm", "twist_tolerance_per_nm",
     "centerline_inside_min", "twist_relative_max",
+    # the spine position outlier rule is applied to the stored d = |v_perp| - r (reapply_eligibility recomputes has_position)
+    "position_outlier_factor", "position_outlier_floor_nm", "position_inside_factor",
 }
 # fields that change the result (enter the config hash); paths / parallelism do not
 _RUNTIME_FIELDS = {
@@ -83,8 +85,11 @@ class BranchPreprocessingConfig:
     soma_mismatch_fraction: float = 0.2
     # spines
     end_clamp_factor: float = 0.5
+    # d = |v_perp| - r(s) of the attachment centre; outlier (no position) if d < -inside_factor r or d > max(factor r, floor).
+    # Asymmetric: the attachment centre lies systematically OUTSIDE the trunk surface (10 neurons: median +0.44 r)
     position_outlier_factor: float = 0.75
-    position_outlier_floor_nm: float = 0.0  # absolute floor of |dist_perp - r| limit max(factor * r, floor); the yaml uses 200 nm
+    position_outlier_floor_nm: float = 0.0
+    position_inside_factor: float = 0.75
     # eligibility
     length_min_t_nm: float = 5000.0
     length_max_t_nm: float = 255500.0
