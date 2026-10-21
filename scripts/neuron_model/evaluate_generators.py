@@ -72,6 +72,7 @@ def main() -> None:
     eval_cfg = EvaluationConfig.from_mapping({**cfg["evaluation"], "device": str(get_device(cfg["evaluation"].get("device", "auto")))})
 
     # --- real reference (shared by all models)
+    print(f"reading manifests {data_cfg['manifests']}", flush=True)
     # split first, then check files only for the spines of the split (Path.exists on the NAS is slow)
     index = load_spine_index(
         [resolve_path(p) for p in data_cfg["manifests"]],
