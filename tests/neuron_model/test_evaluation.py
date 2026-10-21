@@ -345,6 +345,24 @@ def test_real_morphometrics_reads_manifest_paths(tmp_path):
     assert frame.loc[0, "Length"] == 1.0 and pd.isna(frame.loc[1, "Length"]) and len(frame.loc[0, "OldChordDistribution"]) == 100
 
 
+def test_real_morphometrics_from_stage_table_with_parts_and_json_fallback(tmp_path):
+    import json
+
+    from src.neuron_model.spine_generation.data.index import SpineIndex
+
+    ids = {"dataset": "minnie65", "neuron_id": "1", "limb_id": "000", "branch_id": "000"}
+    table = tmp_path / "morphometrics.parquet"
+    pd.DataFrame([{**ids, "spine_id": "000", "Length": 1.0}, {**ids, "spine_id": "001", "Length": 2.0}]).to_parquet(table)
+    (tmp_path / "morphometrics.parquet.parts").mkdir()
+    pd.DataFrame([{**ids, "spine_id": "001", "Length": 3.0}]).to_parquet(tmp_path / "morphometrics.parquet.parts" / "part-1.parquet")
+    fallback = tmp_path / "m.json"
+    fallback.write_text(json.dumps({"Length": 4.0}))
+    keys = [f"minnie65/1/000/000/{s}" for s in ("000", "001", "002")]
+    index = SpineIndex(pd.DataFrame({"spine_key": keys, "morphometrics_path": [None, None, str(fallback)]}), ())
+    frame = real_morphometrics(index, table=table, threads=2)
+    assert list(frame["Length"]) == [1.0, 3.0, 4.0]
+
+
 def test_end_to_end_report_ranks_good_model_above_collapsed(tmp_path):
     rng = np.random.default_rng(15)
     real = build_real_reference(

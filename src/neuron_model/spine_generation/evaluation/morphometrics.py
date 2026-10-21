@@ -24,20 +24,55 @@ import pandas as pd
 
 from ...spine_morphometrics import ALL_METRICS, JUNCTION_METRICS, AttachmentRegion, compute_chord_distribution, compute_scalar_metrics
 from ..data.index import SpineIndex
+from .inputs import threaded_map
 
 AttachmentFinder = Callable[[Any], Optional[AttachmentRegion]]
 
 
-def real_morphometrics(index: SpineIndex) -> pd.DataFrame:
-    """One row per indexed spine (``spine_key`` + the 12 metrics) from its ``morphometrics.json``."""
-    rows = []
-    for key, path in zip(index.frame["spine_key"], index.frame["morphometrics_path"]):
-        row = {"spine_key": key}
-        if path is not None and Path(path).exists():
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-            row.update({m: data.get(m) for m in ALL_METRICS})
-        rows.append(row)
-    frame = pd.DataFrame(rows)
+def _read_stage_table(path: Path) -> pd.DataFrame:
+    """A preprocessing stage table: main file + leftover ``<table>.parts/*.parquet`` (latest row wins)."""
+    path = Path(path)
+    frames = [pd.read_parquet(path)] if path.exists() else []
+    parts = path.with_name(path.name + ".parts")
+    if parts.is_dir():
+        frames.extend(pd.read_parquet(part) for part in sorted(parts.glob("*.parquet")))
+    if not frames:
+        raise FileNotFoundError(f"morphometrics table {path} not found")
+    frame = pd.concat(frames, ignore_index=True)
+    keys = ["dataset", "neuron_id", "limb_id", "branch_id", "spine_id"]
+    frame["spine_key"] = frame[keys].astype(str).agg("/".join, axis=1)
+    return frame.drop_duplicates("spine_key", keep="last")
+
+
+def _metrics_from_json(path: Any) -> Dict[str, Any]:
+    if path is None or (isinstance(path, float) and pd.isna(path)):
+        return {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    return {m: data.get(m) for m in ALL_METRICS}
+
+
+def real_morphometrics(index: SpineIndex, *, table: Optional[Path] = None, threads: int = 32, label: str = "") -> pd.DataFrame:
+    """One row per indexed spine (``spine_key`` + the 12 metrics).
+
+    ``table`` = the stage-8 ``morphometrics.parquet`` (same values as the per-spine JSON, one
+    file read instead of one NAS round trip per spine); spines missing from it, or no table,
+    -> ``morphometrics.json`` read in threads."""
+    keys = list(index.frame["spine_key"])
+    by_key: Dict[str, Dict[str, Any]] = {}
+    if table is not None:
+        frame = _read_stage_table(table)
+        frame = frame[frame["spine_key"].isin(set(keys))]
+        columns = [m for m in ALL_METRICS if m in frame.columns]
+        by_key = {row["spine_key"]: {m: row[m] for m in columns} for row in frame[["spine_key", *columns]].to_dict(orient="records")}
+    todo = [(k, p) for k, p in zip(keys, index.frame["morphometrics_path"]) if k not in by_key]
+    if todo:
+        for (key, _), values in zip(todo, threaded_map(lambda kp: _metrics_from_json(kp[1]), todo, threads=threads,
+                                                        label=f"{label} morphometrics json".strip())):
+            by_key[key] = values
+    frame = pd.DataFrame([{"spine_key": k, **by_key.get(k, {})} for k in keys])
     for metric in ALL_METRICS:
         if metric not in frame.columns:
             frame[metric] = None

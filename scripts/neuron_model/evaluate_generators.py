@@ -69,6 +69,7 @@ def main() -> None:
     if not data_cfg.get("manifests"):
         parser.error("set data.manifests=[...]")
     n_points = int(real_cfg["surface_points"])
+    threads = int(real_cfg.get("io_threads", 32))
     eval_cfg = EvaluationConfig.from_mapping({**cfg["evaluation"], "device": str(get_device(cfg["evaluation"].get("device", "auto")))})
 
     # --- real reference (shared by all models)
@@ -81,7 +82,7 @@ def main() -> None:
     ).with_split(load_splits(resolve_path(data_cfg["splits"])), drop_unassigned=bool(data_cfg.get("drop_unassigned", False)))
     index = index.subset(index.frame.loc[index.frame["split"].isin(["train", real_cfg["test_split"]]), "spine_key"])
     print(f"checking files of {len(index)} spines", flush=True)
-    index = index.require_files((f"pointcloud_{n_points}_path", "morphometrics_path"))
+    index = index.require_files((f"pointcloud_{n_points}_path", "morphometrics_path"), threads=threads)
     train_index = index.subset(index.frame.loc[index.frame["split"] == "train", "spine_key"])
     test_index = index.subset(index.frame.loc[index.frame["split"] == real_cfg["test_split"], "spine_key"])
     print(f"real: {len(train_index)} train / {len(test_index)} {real_cfg['test_split']} spines")
@@ -91,12 +92,14 @@ def main() -> None:
         cache = resolve_path(real_cfg["train_cloud_cache"])
         if args.rebuild_cloud_cache or not cache.exists():
             print(f"building train cloud cache {cache} (one pass over {len(train_index)} files)")
-            build_cloud_cache(train_index, n_points, cache)
+            build_cloud_cache(train_index, n_points, cache, threads=threads)
         train_clouds = open_cloud_cache(cache, train_index)
+    morph_table = resolve_path(real_cfg["morphometrics_table"]) if real_cfg.get("morphometrics_table") else None
+    print(f"real morphometrics ({morph_table or 'per-spine json'}) and test clouds", flush=True)
     real = build_real_reference(
-        real_morphometrics(train_index),
-        real_morphometrics(test_index),
-        test_clouds=load_real_clouds(test_index, n_points),
+        real_morphometrics(train_index, table=morph_table, threads=threads, label="train"),
+        real_morphometrics(test_index, table=morph_table, threads=threads, label="test"),
+        test_clouds=load_real_clouds(test_index, n_points, threads=threads),
         train_clouds=train_clouds,
         seed=eval_cfg.seed,
     )

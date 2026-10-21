@@ -18,6 +18,10 @@ real:
   surface_points: 2048           # = pointcloud_2048 of the preprocessing; generated meshes sampled the same way
   train_cloud_cache: data/interim/neuron-model/eval/train_clouds_2048.npy   # local disk! built once
   chamfer_memorization: true     # Chamfer-DCR against the FULL train split (needs the cache)
+  # stage-8 table next to the manifest (e.g. O:/Datasets/Minnie65/preprocessed/morphometrics.parquet): one file
+  # read instead of one NAS round trip per spine; null -> per-spine morphometrics.json (read in threads)
+  morphometrics_table: null
+  io_threads: 32                 # threads for the many small NAS reads (latency-bound)
 
 evaluation:                      # EvaluationConfig fields
   surface_reference_size: 1000   # clouds per set for MMD-CD / COV-CD / 1-NNA-CD / diversity

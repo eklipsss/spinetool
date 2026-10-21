@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -59,15 +61,29 @@ def load_generated_set(seed_dir: Path, mesh_kind: str = "raw") -> Tuple[List[Opt
     return meshes, reports, ids
 
 
-def load_real_clouds(index: SpineIndex, n_points: int, *, variant: int = 1) -> np.ndarray:
+def threaded_map(fn: Callable[[Any], Any], items: Sequence[Any], *, threads: int = 32, label: str = "") -> Iterator[Any]:
+    """``fn`` over ``items`` in threads, results in input order; prints progress every ~10 %.
+
+    The reads are NAS round trips (latency, not bandwidth), so threads give a near-linear speed-up."""
+    n = len(items)
+    step = max(1, n // 10)
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
+        for i, result in enumerate(pool.map(fn, items), start=1):
+            if label and (i % step == 0 or i == n):
+                print(f"  {label}: {i}/{n} ({time.perf_counter() - started:.0f} s)", flush=True)
+            yield result
+
+
+def load_real_clouds(index: SpineIndex, n_points: int, *, variant: int = 1, threads: int = 32) -> np.ndarray:
     """``[n, n_points, 3]`` precomputed surface samples (size ``n_points``, resampling ``variant``) of the indexed spines."""
-    clouds = []
-    for path in index.frame[f"pointcloud_{n_points}_path"]:
-        clouds.append(np.asarray(load_points(path, n_points, variant), dtype=np.float32))
+    paths = list(index.frame[f"pointcloud_{n_points}_path"])
+    clouds = list(threaded_map(lambda path: np.asarray(load_points(path, n_points, variant), dtype=np.float32), paths,
+                               threads=threads, label="test clouds"))
     return np.stack(clouds) if clouds else np.empty((0, n_points, 3), dtype=np.float32)
 
 
-def build_cloud_cache(index: SpineIndex, n_points: int, out_path: Path, *, variant: int = 1) -> Path:
+def build_cloud_cache(index: SpineIndex, n_points: int, out_path: Path, *, variant: int = 1, threads: int = 32) -> Path:
     """Stream all indexed clouds into one ``.npy`` (open later with ``np.load(..., mmap_mode="r")``).
 
     One pass over many small npz files (slow from the NAS - do it once, on a local disk);
@@ -77,8 +93,9 @@ def build_cloud_cache(index: SpineIndex, n_points: int, out_path: Path, *, varia
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_name(out_path.name + ".tmp.npy")
     cache = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float32, shape=(len(index), n_points, 3))
-    for i, path in enumerate(index.frame[f"pointcloud_{n_points}_path"]):
-        cache[i] = load_points(path, n_points, variant)
+    paths = list(index.frame[f"pointcloud_{n_points}_path"])
+    for i, points in enumerate(threaded_map(lambda path: load_points(path, n_points, variant), paths, threads=threads, label="train cloud cache")):
+        cache[i] = points
     cache.flush()
     del cache
     tmp.replace(out_path)
