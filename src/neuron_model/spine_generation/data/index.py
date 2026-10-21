@@ -109,6 +109,19 @@ class SpineIndex:
             frame = frame[frame["split"] == split]
         return SpineIndex(frame.reset_index(drop=True), self.dataset_versions)
 
+    def require_files(self, columns: Sequence[str], *, threads: int = 32) -> "SpineIndex":
+        """Keep spines whose files in ``columns`` exist; checked in threads (NAS round trips).
+        Call it after ``with_split`` so only the spines that are used are checked."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        frame = self.frame
+        for column in columns:
+            paths = list(frame[column])
+            with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
+                exists = list(pool.map(lambda p: p is not None and not (isinstance(p, float) and pd.isna(p)) and Path(p).exists(), paths))
+            frame = frame[exists]
+        return SpineIndex(frame.reset_index(drop=True), self.dataset_versions)
+
     def pointcloud_path(self, row: pd.Series, n_points: int, variant: int = 1) -> Path:
         """File holding that size/variant (the packed file, or the legacy per-variant one)."""
         return pointcloud_variant_path(Path(row[f"pointcloud_{n_points}_path"]), variant)

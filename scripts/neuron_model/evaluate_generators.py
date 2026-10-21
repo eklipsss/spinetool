@@ -72,11 +72,15 @@ def main() -> None:
     eval_cfg = EvaluationConfig.from_mapping({**cfg["evaluation"], "device": str(get_device(cfg["evaluation"].get("device", "auto")))})
 
     # --- real reference (shared by all models)
+    # split first, then check files only for the spines of the split (Path.exists on the NAS is slow)
     index = load_spine_index(
         [resolve_path(p) for p in data_cfg["manifests"]],
         path_mode=data_cfg.get("path_mode", "relative"),
-        check_files=(f"pointcloud_{n_points}_path", "morphometrics_path"),
-    ).with_split(load_splits(resolve_path(data_cfg["splits"])))
+        check_files=(),
+    ).with_split(load_splits(resolve_path(data_cfg["splits"])), drop_unassigned=bool(data_cfg.get("drop_unassigned", False)))
+    index = index.subset(index.frame.loc[index.frame["split"].isin(["train", real_cfg["test_split"]]), "spine_key"])
+    print(f"checking files of {len(index)} spines", flush=True)
+    index = index.require_files((f"pointcloud_{n_points}_path", "morphometrics_path"))
     train_index = index.subset(index.frame.loc[index.frame["split"] == "train", "spine_key"])
     test_index = index.subset(index.frame.loc[index.frame["split"] == real_cfg["test_split"], "spine_key"])
     print(f"real: {len(train_index)} train / {len(test_index)} {real_cfg['test_split']} spines")

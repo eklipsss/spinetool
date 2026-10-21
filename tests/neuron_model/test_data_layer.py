@@ -34,6 +34,12 @@ def test_index_drops_spines_with_missing_files(fake_dataset):
     assert len(index) == 22 and "minnie65/86469005/000/001/000" not in index.keys
 
 
+def test_require_files_matches_check_files(fake_dataset):
+    (fake_dataset / spine_relative_dir("86469005", "000", "001", "000") / "sdf_samples.npz").unlink()
+    checked = load_spine_index([fake_dataset / "manifest.parquet"], check_files=()).require_files(("sdf_samples_path",), threads=4)
+    assert checked.keys == load_spine_index([fake_dataset / "manifest.parquet"]).keys
+
+
 def test_group_split_no_leakage_and_group_fractions(fake_dataset):
     index = load_spine_index([fake_dataset / "manifest.parquet"])
     splits = build_group_split(index.frame, seed=1)
