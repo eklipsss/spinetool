@@ -62,7 +62,7 @@ from src.neuron_model.spine_generation.models.spine_vae.model import SpineVAE, S
 from src.neuron_model.spine_generation.reconstruction.mesh_validation import aggregate_validity
 
 
-def _reconstruction_latents(model, args, cfg, device):
+def _reconstruction_latents(model, args, cfg, device, *, split=None, n=None):
     """``(z [n, D], spine_keys, real_clouds [n, N, 3] in nm)``: encoder means of ``n`` random real spines of ``--split``
     and their real surface point clouds (the reference for ``--crop-to-spine`` and the reconstruction metrics)."""
     from src.neuron_model.spine_generation.data.datasets import PointCloudDataset
@@ -73,11 +73,12 @@ def _reconstruction_latents(model, args, cfg, device):
     manifests = args.manifest or [resolve_path(p) for p in data["manifests"]]
     splits_path = args.splits or resolve_path(data["splits"])
     index = load_spine_index(manifests, path_mode=data.get("path_mode", "relative"), check_files=())
-    index = index.with_split(load_splits(splits_path), args.split, drop_unassigned=args.drop_unassigned)
+    split = split or args.split
+    index = index.with_split(load_splits(splits_path), split, drop_unassigned=args.drop_unassigned)
     if len(index) == 0:
-        raise SystemExit(f"no spines in split {args.split!r}")
+        raise SystemExit(f"no spines in split {split!r}")
     rng = np.random.default_rng(args.seed)
-    chosen = index.subset(index.frame["spine_key"].iloc[rng.permutation(len(index))[: args.n_samples]])
+    chosen = index.subset(index.frame["spine_key"].iloc[rng.permutation(len(index))[: n or args.n_samples]])
     dataset = PointCloudDataset(chosen, int(data["n_points"]), random_variant=False, coord_scale=float(data["coord_scale"]), use_normals=bool(data.get("use_normals", True)))
     latents, keys, clouds = [], [], []
     for i in range(len(dataset)):
@@ -91,6 +92,19 @@ def _reconstruction_latents(model, args, cfg, device):
     return np.stack(latents), keys, clouds
 
 
+def _sample_data_prior(codes: np.ndarray, n: int, seed: int, components: int) -> np.ndarray:
+    """``n`` latents from a distribution fitted to the encoder means of real spines: a full-covariance Gaussian
+    (``components == 1``) or a Gaussian mixture. The standard-normal prior does not match the aggregate posterior when the
+    KL weight is tiny (beta 1e-4: the VAE is nearly an autoencoder), so prior samples fall into poorly covered regions."""
+    if components <= 1:
+        rng = np.random.default_rng(seed)
+        return rng.multivariate_normal(codes.mean(axis=0), np.cov(codes, rowvar=False), size=n)
+    from sklearn.mixture import GaussianMixture
+
+    gmm = GaussianMixture(n_components=components, covariance_type="full", reg_covar=1e-4, random_state=seed).fit(codes)
+    return gmm.sample(n)[0]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", type=Path, required=True, help="VAE training run directory")
@@ -99,6 +113,10 @@ def main() -> None:
     parser.add_argument("--n-samples", type=int, default=50)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=1.0, help="prior mode: z = temperature * N(0, I); <1 stays closer to the data manifold (less diverse)")
+    parser.add_argument("--prior", choices=("normal", "data"), default="normal", help="prior mode: 'normal' = N(0, I); 'data' = a Gaussian (or mixture, --gmm-components) fitted to the encoder means of --fit-n real spines of --fit-split. Meshes go to meshes_data_prior/")
+    parser.add_argument("--fit-split", default="train")
+    parser.add_argument("--fit-n", type=int, default=2000)
+    parser.add_argument("--gmm-components", type=int, default=1, help="--prior data: 1 = one full-covariance Gaussian")
     parser.add_argument("--resolution", type=int, help="marching-cubes grid (default: resolution_final of the reconstruction config, 256)")
     parser.add_argument("--no-postprocess", action="store_true")
     parser.add_argument("--crop-to-spine", action="store_true", help="reconstruction mode, DIAGNOSTIC: extract the mesh only in the box of the real spine (+ --crop-margin) instead of the frozen train bbox. "
@@ -131,7 +149,13 @@ def main() -> None:
     if args.crop_to_spine and args.mode != "reconstruction":
         parser.error("--crop-to-spine needs --mode reconstruction (a prior sample has no spine to take the box from)")
     real_clouds = None
-    if args.mode == "prior":
+    if args.mode == "prior" and args.prior == "data":
+        codes, _, _ = _reconstruction_latents(model, args, cfg, device, split=args.fit_split, n=args.fit_n)
+        print(f"fitted latent distribution on {len(codes)} {args.fit_split} spines ({args.gmm_components} component(s))", flush=True)
+        z_all = _sample_data_prior(codes, args.n_samples, args.seed, args.gmm_components)
+        keys = [None] * len(z_all)
+        out_root = run.root / "meshes_data_prior"
+    elif args.mode == "prior":
         z_all = (args.temperature * model.sample_prior(args.n_samples, generator=torch.Generator().manual_seed(args.seed), device="cpu")).numpy()
         keys = [None] * len(z_all)
         out_root = run.meshes

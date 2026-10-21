@@ -41,6 +41,23 @@ PINK, GREEN, VIOLET, GREY, INK = "#d6418f", "#3f8a2a", "#8a6bd1", "#8e9196", "#1
 SOFT_PINK, SOFT_GREEN, SOFT_GREY = "#fde0ef", "#e6f5d0", "#eceef1"
 BRAND_PINK, BRAND_GREEN = "#fd89c3", "#7fbc41"
 SERIES = [PINK, GREEN, VIOLET, INK]
+# names in the evaluation tables -> names on the slides (and the fixed colour of each model)
+MODEL_LABEL = {"base": "MoGen A0", "A": "MoGen A", "B": "MoGen B", "VAE": "VAE"}
+MODEL_ORDER = ["base", "A", "B", "VAE"]
+MODEL_COLOR = {"base": INK, "A": PINK, "B": GREEN, "VAE": VIOLET}
+
+
+def model_label(name: str) -> str:
+    return MODEL_LABEL.get(name, name)
+
+
+def order_models(names: Sequence[str]) -> List[str]:
+    known = [n for n in MODEL_ORDER if n in names]
+    return known + [n for n in names if n not in known]
+
+
+def model_color(name: str, fallback: int = 0) -> str:
+    return MODEL_COLOR.get(name, SERIES[fallback % len(SERIES)])
 
 plt.rcParams.update({
     "figure.facecolor": "white", "axes.facecolor": "white", "savefig.facecolor": "white",
@@ -498,6 +515,9 @@ def read_jsonl(path: Path) -> pd.DataFrame:
     return pd.read_json(path, lines=True) if path.exists() else pd.DataFrame()
 
 
+SMOOTH_STEPS = 2000  # moving-average window of the loss curves, training steps
+
+
 def fig_c1_training(out: Path, runs: Mapping[str, Path]) -> None:
     mogen, vae = {}, {}
     for name, run in runs.items():
@@ -514,17 +534,23 @@ def fig_c1_training(out: Path, runs: Mapping[str, Path]) -> None:
         ax = axes[0][ai]; ai += 1
         for (name, df), col in zip(mogen.items(), SERIES):
             y = df["loss"]
-            ax.plot(df["step"], y, color=col, alpha=0.18, lw=0.8)
-            ax.plot(df["step"], y.rolling(10, min_periods=1).mean(), color=col, lw=2.0, label=name)
-        ax.set_xlabel("шаг обучения"); ax.set_ylabel("loss Flow Matching (начальный спад B обрезан по оси)")
+            # smooth over a fixed number of TRAINING STEPS (not log lines), so that the runs are comparable
+            spacing = float(np.median(np.diff(df["step"]))) if len(df) > 1 else 1.0
+            window = max(5, int(round(SMOOTH_STEPS / max(spacing, 1.0))))
+            ax.plot(df["step"], y, color=col, alpha=0.12, lw=0.7)
+            ax.plot(df["step"], y.rolling(window, min_periods=max(1, window // 4), center=True).mean(), color=col, lw=2.2, label=name)
+        ax.set_xlabel("шаг обучения"); ax.set_ylabel("loss Flow Matching")
         ax.set_title("MoGen: loss выходит на плато рано"); ax.legend()
+        ax.text(0.99, 0.02, f"скользящее среднее по {SMOOTH_STEPS} шагам; бледная линия — исходные значения; начальный спад обрезан по оси", transform=ax.transAxes, ha="right", fontsize=8.5, color="#4a4d55")
         lo = min(df["loss"].quantile(0.02) for df in mogen.values()); ax.set_ylim(lo * 0.95, min(0.9, max(df["loss"].iloc[min(20, len(df) - 1)] for df in mogen.values()) * 1.05))
     if vae:
         ax = axes[0][ai]
         for name, df in vae.items():
             for column, col, lab in [("sdf_loss", PINK, "ошибка расстояния"), ("surface_loss", GREEN, "поверхность"), ("normal_loss", VIOLET, "нормаль"), ("eikonal_loss", GREY, "эйконал")]:
                 if column in df.columns:
-                    ax.plot(df["step"], df[column].rolling(10, min_periods=1).mean(), color=col, lw=1.8, label=lab)
+                    spacing = float(np.median(np.diff(df["step"]))) if len(df) > 1 else 1.0
+                    window = max(5, int(round(SMOOTH_STEPS / max(spacing, 1.0))))
+                    ax.plot(df["step"], df[column].rolling(window, min_periods=max(1, window // 4), center=True).mean(), color=col, lw=1.8, label=lab)
         ax.set_yscale("log"); ax.set_xlabel("шаг обучения"); ax.set_title("VAE: компоненты функции потерь"); ax.legend(fontsize=9)
     save(fig, out, "c1_training_curves.png")
 
@@ -543,13 +569,30 @@ def fig_c2_morph_w1(out: Path, evaluation: Path, kind: str) -> None:
     for f in files:
         name = f.stem[len("univariate_"):].rsplit("_seed", 1)[0]
         tables.setdefault(name, pd.read_csv(f))
-    features = [f for f in tables[next(iter(tables))]["feature"]]
+    names = order_models(list(tables))
+    features = [f for f in tables[names[0]]["feature"]]
     labels = [info.get(f, {}).get("name", f) for f in features]
-    series = {n: [float(t.set_index("feature").loc[f, "w1_normalized"]) if f in set(t["feature"]) else np.nan for f in features] for n, t in tables.items()}
-    fig, ax = plt.subplots(figsize=(10.5, 6.0))
-    grouped_bars(ax, labels, series, SERIES, horizontal=True, fmt="{:.2f}")
-    ax.set_xlabel("W₁ / σ (расстояние Вассерштейна в долях разброса; меньше — лучше)")
-    ax.set_title(f"Совпадение распределений морфометрик с реальными шипиками ({KIND_RU[kind]})"); ax.legend(loc="lower right")
+    series = {model_label(n): [float(tables[n].set_index("feature").loc[f, "w1_normalized"]) if f in set(tables[n]["feature"]) else np.nan for f in features] for n in names}
+    colors = [model_color(n, i) for i, n in enumerate(names)]
+    # the untuned MoGen is 10-50 times worse than the rest and flattens the other bars: the axis is cut and the cut bars say so
+    values = np.array([v for k, vals in series.items() for v in vals if k != model_label("base")], dtype=float)
+    cap = float(np.nanmax(values)) * 1.35 if values.size else None
+    fig, ax = plt.subplots(figsize=(11.5, 0.95 * len(features) + 2.2))
+    clipped = {k: np.minimum(v, cap) if cap else np.asarray(v) for k, v in series.items()}
+    grouped_bars(ax, labels, clipped, colors, horizontal=True, width=0.86, annotate=False)
+    n = len(series)
+    for i, (name, vals) in enumerate(series.items()):
+        for j, v in enumerate(vals):
+            if not np.isfinite(v):
+                continue
+            y = j - 0.86 / 2 + (0.86 / n) * (i + 0.5)
+            cut = bool(cap) and v > cap
+            ax.text(min(v, cap) if cap else v, y, (" ▶ " if cut else " ") + f"{v:.2f}", va="center", fontsize=9, color="#4a4d55")
+    if cap:
+        ax.set_xlim(0, cap * 1.12)
+    ax.set_xlabel("W₁ / σ (расстояние Вассерштейна в долях разброса; меньше — лучше)" + ("\n▶ — столбец обрезан, число справа настоящее" if cap else ""))
+    ax.set_title(f"Совпадение распределений морфометрик с реальными шипиками ({KIND_RU[kind]})", pad=34)
+    ax.legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=n, fontsize=10.5, handlelength=1.4)
     save(fig, out, "c2_morph_w1.png")
 
 
@@ -561,7 +604,9 @@ def fig_c3_morph_hist(out: Path, evaluation: Path, kind: str, features=("Length"
         return
     info = _metric_info()
     real = pd.read_parquet(real_path)
-    gens = {f.stem[len("morphometrics_"):].rsplit("_seed", 1)[0]: pd.read_parquet(f) for f in gen_files}
+    gens_raw = {f.stem[len("morphometrics_"):].rsplit("_seed", 1)[0]: pd.read_parquet(f) for f in gen_files}
+    gens = {model_label(n): gens_raw[n] for n in order_models(list(gens_raw))}
+    gen_colors = [model_color(n, i) for i, n in enumerate(order_models(list(gens_raw)))]
     fig, axes = plt.subplots(2, 3, figsize=(13.4, 7.0))
     for ax, feat in zip(axes.ravel(), features):
         meta = info.get(feat, {"name": feat, "unit": "", "factor": 1.0, "log": False})
@@ -577,7 +622,7 @@ def fig_c3_morph_hist(out: Path, evaluation: Path, kind: str, features=("Length"
             lo, hi = np.percentile(np.concatenate(pool), [0.5, 99.5])
             bins = np.linspace(lo, hi, 40)
         ax.hist(pool[0], bins=bins, density=True, color=SOFT_GREY, ec="#c9cbd0", label=f"реальные (n = {len(pool[0])})")
-        for (name, g), col, p in zip(gens.items(), SERIES, pool[1:]):
+        for (name, g), col, p in zip(gens.items(), gen_colors, pool[1:]):
             ax.hist(p, bins=bins, density=True, histtype="step", color=col, lw=2.0, label=f"{name} (n = {len(p)})")
         ax.set_title(meta["name"], fontsize=11); ax.set_xlabel(f"{meta['name']}, {meta['unit']}".rstrip(", ")); ax.set_yticks([])
     axes[0][0].legend(fontsize=8.5)
@@ -618,7 +663,7 @@ def fig_c4_scorecard(out: Path, evaluation: Path, kind: str) -> None:
         print(f"[figures] c4: {path} not found")
         return
     table = pd.read_csv(path)
-    models = [c for c in table.columns if c not in ("criterion", "target")]
+    models = order_models([c for c in table.columns if c not in ("criterion", "target")])
     cell_text, colors = [], []
     for _, row in table.iterrows():
         vals = np.array([_leading_float(row[m]) for m in models])
@@ -630,7 +675,7 @@ def fig_c4_scorecard(out: Path, evaluation: Path, kind: str) -> None:
         colors.append(["white", "white", *[(SOFT_GREEN if np.isfinite(s) and s == best and best != worst else SOFT_PINK if np.isfinite(s) and s == worst and best != worst else "white") for s in score]])
     fig, ax = plt.subplots(figsize=(3.2 + 1.9 * len(models) + 3.5, 0.5 + 0.42 * len(table)))
     ax.axis("off"); ax.grid(False)
-    tb = ax.table(cellText=cell_text, colLabels=["критерий", "ориентир", *models], cellColours=colors, loc="center", cellLoc="center", colLoc="center")
+    tb = ax.table(cellText=cell_text, colLabels=["критерий", "ориентир", *[model_label(m) for m in models]], cellColours=colors, loc="center", cellLoc="center", colLoc="center")
     tb.auto_set_font_size(False); tb.set_fontsize(9.5); tb.scale(1, 1.5)
     tb.auto_set_column_width(list(range(len(models) + 2)))
     for (r, c), cell in tb.get_celld().items():
