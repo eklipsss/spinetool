@@ -10,7 +10,7 @@ Real reference = the source branch of every request (same conditions and length)
 the P0 run of the set (``data.branches_root`` / ``data.pack_dir``: local disk, no NAS). Compared: spines per branch,
 density, share of branches without spines (overall and per length class), trunk functionals, position along the
 branch, nearest-neighbour distance on the trunk surface, gaps along the branch, angle around the trunk; noise floor =
-two halves of the real reference. Writes ``<out>/evaluation.json`` and ``<out>/evaluation_branches.csv``
+two halves of the real reference. Writes ``<out>/evaluation.json``, ``<out>/evaluation_branches.csv`` and ``<out>/evaluation_spines.csv``
 (out = the assembly directory, else ``<tp-dir>/evaluation``). CPU, seconds.
 """
 
@@ -123,6 +123,7 @@ def main() -> None:
               "noise_floor_by": "neuron" if len(set(real_neurons)) >= 2 else "branch", "result": result, "noise_floor": floor, "assembly_info": asm_info}
     (out / "evaluation.json").write_text(json.dumps(report, indent=2, default=float), encoding="utf-8")
     pd.concat([gen_b.assign(kind="generated"), real_b.assign(kind="real")], ignore_index=True).to_csv(out / "evaluation_branches.csv", index=False)
+    pd.concat([gen_s.assign(kind="generated"), real_s.assign(kind="real")], ignore_index=True).to_csv(out / "evaluation_spines.csv", index=False)
 
     print(f"[evaluate] {report['level']} level: {len(gen_b)} generated branches vs {len(real_b)} real source branches "
           f"({report['n_real_neurons']} neurons; noise floor by {report['noise_floor_by']})")

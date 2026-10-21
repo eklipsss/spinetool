@@ -11,7 +11,8 @@ Chamfer-DCR memorization against the FULL train split (local cloud cache).
 
 ``<model_root>`` contains ``seed_<s>/sample_<i>/generated_mesh_{raw,postprocessed}.off``
 (written by generate_mogen.py and the VAE generator). Output: one run directory under
-``runs/analysis/neuron-model`` with report.json / summary.csv / summary.md per mesh kind.
+``runs/analysis/neuron-model`` with report.json / summary.csv / summary.md per mesh kind, plus the morphometric tables
+(``real_test_morphometrics.parquet``, ``<kind>/morphometrics_<model>_seed<s>.parquet``) that the figures are drawn from.
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ import os
 # extraction after training, SVD) aborts the process with "OMP: Error #15". Standard workaround, Windows only.
 if sys.platform == "win32":
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import numpy as np
 
 from src.neuron_model.spine_generation.data.index import load_spine_index
 from src.neuron_model.spine_generation.data.splits import load_splits
@@ -54,6 +57,23 @@ def _parse_model(value: str):
     if not sep or not name or not root:
         raise argparse.ArgumentTypeError("--model expects NAME=PATH")
     return name, Path(root)
+
+
+
+def _save_table(frame, path) -> None:
+    """Parquet; a column that mixes lists and NaN (OldChordDistribution of a mesh without a surface) is stored as JSON text."""
+    import json
+
+    import numpy as np
+
+    try:
+        frame.to_parquet(path, index=False)
+    except Exception:
+        frame = frame.copy()
+        for column in frame.columns:
+            if frame[column].dtype == object:
+                frame[column] = frame[column].map(lambda v: json.dumps(np.asarray(v, dtype=float).tolist()) if v is not None and not (isinstance(v, float) and v != v) else None)
+        frame.to_parquet(path, index=False)
 
 
 def main() -> None:
@@ -94,12 +114,20 @@ def main() -> None:
             print(f"building train cloud cache {cache} (one pass over {len(train_index)} files)")
             build_cloud_cache(train_index, n_points, cache, threads=threads)
         train_clouds = open_cloud_cache(cache, train_index)
+    # the surface metrics use a random subset of the test clouds (<= surface_reference_size, in practice the number of
+    # generated clouds), so reading ~13 000 files from the NAS is wasted time: a seeded random subset is statistically the same
+    n_cloud = int(real_cfg.get("test_cloud_subset", 0))
+    cloud_index = test_index
+    if 0 < n_cloud < len(test_index):
+        pick = np.random.default_rng(eval_cfg.seed).choice(len(test_index), size=n_cloud, replace=False)
+        cloud_index = test_index.subset(test_index.frame["spine_key"].iloc[np.sort(pick)])
+        print(f"test clouds: random subset of {n_cloud} of {len(test_index)} test spines", flush=True)
     morph_table = resolve_path(real_cfg["morphometrics_table"]) if real_cfg.get("morphometrics_table") else None
     print(f"real morphometrics ({morph_table or 'per-spine json'}) and test clouds", flush=True)
     real = build_real_reference(
         real_morphometrics(train_index, table=morph_table, threads=threads, label="train"),
         real_morphometrics(test_index, table=morph_table, threads=threads, label="test"),
-        test_clouds=load_real_clouds(test_index, n_points, threads=threads),
+        test_clouds=load_real_clouds(cloud_index, n_points, threads=threads),
         train_clouds=train_clouds,
         seed=eval_cfg.seed,
     )
@@ -116,7 +144,10 @@ def main() -> None:
         write_json(run.root / "finder_bias.json", bias)
         print(f"finder bias on {bias['n_spines']} real test spines: found {bias['found_rate']:.1%}, methods {bias['methods']}")
     expected_seeds = set(proto.get("generation_seeds", []))
+    # the tables behind the report (distribution plots / slides): real test spines once, generated sets per model and seed
+    _save_table(real.test_morph, run.root / "real_test_morphometrics.parquet")
     for mesh_kind in proto.get("mesh_kinds", ["raw"]):
+        (run.root / mesh_kind).mkdir(parents=True, exist_ok=True)
         models = {}
         for name, root in args.model:
             seed_dirs = discover_seed_dirs(root)
@@ -131,6 +162,7 @@ def main() -> None:
                     "gen_clouds": sample_clouds(meshes, n_points, seed=seed),
                     "validity_raw" if mesh_kind == "raw" else "validity_postprocessed": reports,
                 }
+                _save_table(per_seed[seed]["gen_morph"], run.root / mesh_kind / f"morphometrics_{name}_seed{seed}.parquet")
                 print(f"{mesh_kind} {name} seed {seed}: {sum(m is not None for m in meshes)}/{len(meshes)} meshes")
             models[name] = evaluate_model(real, per_seed, eval_cfg)
         out = write_report(models, run.root / mesh_kind)

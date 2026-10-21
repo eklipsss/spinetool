@@ -190,6 +190,7 @@ def main() -> None:
     parser.add_argument("--vae-run", type=Path, required=True)
     parser.add_argument("--checkpoint", default="latest")
     parser.add_argument("--manifest", type=Path, nargs="+", required=True, help="manifest(s) with real meshes and morphometrics (NAS)")
+    parser.add_argument("--path-mode", choices=("relative", "absolute"), help="default: data.path_mode of the VAE run; 'absolute' for a LOCAL COPY of the NAS manifest (its paths are O:\\...)")
     parser.add_argument("--splits", type=Path, help="default: data.splits of the VAE run")
     parser.add_argument("--split", default="test")
     parser.add_argument("--n-real", type=int, default=1500)
@@ -213,7 +214,7 @@ def main() -> None:
 
     vae = A.load_vae(args.vae_run, args.checkpoint)
     d = vae.cfg["data"]
-    index = load_spine_index(list(args.manifest), path_mode=d.get("path_mode", "relative"), check_files=())
+    index = load_spine_index(list(args.manifest), path_mode=args.path_mode or d.get("path_mode", "relative"), check_files=())
     splits = load_splits(args.splits or resolve_path(d["splits"]))
     real_index = index.with_split(splits, args.split, drop_unassigned=True)
     if not len(real_index):
