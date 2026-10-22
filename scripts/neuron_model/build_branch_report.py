@@ -24,7 +24,8 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 
-from src.neuron_model.branch_assembly import load_tp_set
+from src.neuron_model.branch_assembly import densify, load_tp_set, trunk_mesh
+from src.neuron_model.branch_assembly.evaluate import trunk_functionals
 from src.neuron_model.reports import html_kit as hk
 
 ASSET = REPO_ROOT / "src/neuron_model/reports/assets/branch_report.js"
@@ -46,6 +47,79 @@ EVAL_METRICS = [
     ("radius_cv", "Разброс радиуса вдоль ветви (коэффициент вариации)", "Стандартное отклонение радиуса, делённое на среднее."),
     ("mean_radius_nm", "Средний радиус, нм", ""),
 ]
+
+
+COND_RU = {
+    "mouse": "мышь", "human": "человек", "excitatory": "возбуждающая", "inhibitory": "тормозная",
+    "apical": "апикальный", "basal": "базальный", "uncertain": "неопределённый",
+}
+
+
+def _cond_label(value) -> str:
+    return "не указано" if value is None or (isinstance(value, float) and not np.isfinite(value)) else COND_RU.get(str(value), str(value))
+
+
+def conditions_of(row) -> list:
+    """The conditions of T and P (conditions.py: species, cell type, compartment, length; P also: terminal flag, distance to the soma)."""
+    soma = row.get("soma_distance_start_nm")
+    has_soma = soma is not None and np.isfinite(soma)
+    return [["Вид", _cond_label(row.get("species"))], ["Тип клетки", _cond_label(row.get("cell_type_binary"))], ["Компартмент", _cond_label(row.get("compartment"))],
+            ["Длина ветви, мкм", f"{float(row['length_nm']) / 1000.0:.1f}"], ["Концевая ветвь", "да" if bool(row.get("is_terminal")) else "нет"],
+            ["Расстояние от сомы до начала ветви, мкм", f"{float(soma) / 1000.0:.1f}" if has_soma else "не указано"]]
+
+
+def shared_stats(record: dict, s_nm, n_spines) -> dict:
+    """Numbers shown for the generated and for the real branch in the same table."""
+    f = trunk_functionals(record)
+    s_nm = np.sort(np.asarray(s_nm, float))
+    length_um = float(record["length"]) / 1000.0
+    gaps = np.diff(s_nm) if len(s_nm) > 1 else np.zeros(0)
+    return {"length_um": length_um, "radius_mean_nm": _f(f.get("mean_radius_nm")), "radius_cv": _f(f.get("radius_cv")), "tortuosity": _f(f.get("tortuosity")),
+            "kappa_rms": _f(f.get("kappa_rms_per_nm")), "n_spines": None if n_spines is None else int(n_spines),
+            "density": None if n_spines is None else n_spines / length_um, "gap_median_nm": _f(np.median(gaps)) if len(gaps) else None}
+
+
+def real_entry(record: dict, row: dict, key: str, sp_rows, max_faces: int, tube_theta: int = 32):
+    """The real source branch of a request: a round tube along its measured centre line and radius (the real surface is not round,
+    see the audit of the inverse reconstruction), the places where its spines are attached, the table numbers."""
+    dense = densify(record, 100.0)
+    v, f = trunk_mesh(dense, tube_theta)
+    v, f = hk.decimate(v, f, max_faces)
+    s_sp = np.asarray(sp_rows["s"], float) if sp_rows is not None else np.zeros(0)
+    th_sp = np.asarray(sp_rows["theta"], float) if sp_rows is not None else np.zeros(0)
+    eligible = bool(row.get("train_eligible_P")) and row.get("n_spines_in_range") is not None and bool(np.isfinite(row.get("n_spines_in_range")))
+    n = int(row["n_spines_in_range"]) if eligible else None
+    s, radius = np.asarray(record["s"], float), np.asarray(record["radius"], float)
+    anchors = dense.surface_frame(s_sp, th_sp)["anchor"] / 1000.0 if len(s_sp) else np.zeros((0, 3))
+    parts = key.split("/")
+    return {"key": key, "neuron": parts[1] if len(parts) > 1 else None, "conditions": conditions_of({**row, "length_nm": float(record["length"])}),
+            "stats": shared_stats(record, s_sp, n), "eligible_for_spines": eligible,
+            "mesh": hk.pack_mesh(v / 1000.0, f, max_faces=10**9),
+            "profile": {"s_um": (s / 1000.0).tolist(), "r_nm": radius.tolist()},
+            "spines": [{"s_um": float(a / 1000.0), "theta_deg": float(np.degrees(t) % 360.0), "r_nm": float(np.interp(a, s, radius)), "ax": float(p[0]), "ay": float(p[1]), "az": float(p[2])}
+                       for a, t, p in zip(s_sp, th_sp, anchors)]}
+
+
+def trunk_record_of(pack, key: str) -> dict:
+    from src.neuron_model.branch_data import trunk_record
+
+    return trunk_record(pack.get(key))
+
+
+def load_real_source(tp_dir: Path):
+    """(rows by key, spine tables by key, geometry pack) of the P0 run that made the set: the same local data as evaluate_assembled_branches.py."""
+    from src.neuron_model.branch_data import key_series, prepare_training_data
+    from src.neuron_model.spine_generation.experiment.config import resolve_path
+    from src.neuron_model.spine_generation.experiment.run import open_run
+
+    gen_info = json.loads((tp_dir / "generation_info.json").read_text(encoding="utf-8"))
+    d = open_run(Path(gen_info["p0_run"])).load_config()["data"]
+    table, spines, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]),
+                                                splits=resolve_path(d["splits"]) if d.get("splits") else None, io_threads=int(d["io_threads"]))
+    rows = dict(zip(key_series(table), table.to_dict("records")))
+    sp = spines[(spines["status"].astype(str) == "valid") & spines["has_position"].fillna(False).astype(bool)] if len(spines) else spines
+    sp_by_key = {k: g for k, g in sp.groupby(key_series(sp))} if len(sp) else {}
+    return rows, sp_by_key, pack
 
 
 def _f(x):
@@ -79,6 +153,7 @@ def main() -> None:
     parser.add_argument("--evaluation", type=Path, help="output of evaluate_assembled_branches.py (evaluation_branches.csv); default: look in --assembly")
     parser.add_argument("--max-branches", type=int, default=10, help="branches embedded as 3-D meshes (the statistics cover all branches)")
     parser.add_argument("--max-faces", type=int, default=50_000, help="display limit of faces per branch")
+    parser.add_argument("--no-real", action="store_true", help="do not load the real source branches (the comparison with the real branch of the same conditions is skipped)")
     parser.add_argument("--title", default="Сгенерированные ветви дендрита")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -90,7 +165,15 @@ def main() -> None:
     bt = pd.read_parquet(asm / "assembly_branches.parquet")
     st = pd.read_parquet(asm / "assembly_spines.parquet") if (asm / "assembly_spines.parquet").exists() else pd.DataFrame()
     rej = pd.read_parquet(asm / "spine_pool_rejected.parquet") if (asm / "spine_pool_rejected.parquet").exists() else pd.DataFrame(columns=["key", "reason"])
-    _, trunks, _ = load_tp_set(tp_dir)
+    branches_df, trunks, _ = load_tp_set(tp_dir)
+    req = branches_df.set_index("branch_index").to_dict("index")
+    real_src = None
+    if not args.no_real:
+        try:
+            real_src = load_real_source(tp_dir)
+            print(f"[report] real source branches: {len(real_src[2])} in the geometry pack", flush=True)
+        except Exception as exc:  # the report is still useful without the real branches
+            print(f"[report] real source branches unavailable ({exc!r}): the comparison with the real branch is skipped", flush=True)
     assembled = bt[bt["status"].isin(["ok", "invalid"]) & bt.get("mesh_path", pd.Series(dtype=object)).notna()].sort_values("branch_index")
 
     def trunk_stats(i: int) -> dict:
@@ -136,6 +219,16 @@ def main() -> None:
         vu = v / 1000.0
         stats = trunk_stats(i)
         row = next(x for x in table if x["index"] == i)
+        sp_list = spines_of(i, s, radius, float(s[-1]))
+        placed_s = [x["s_um"] * 1000.0 for x in sp_list if x["status"] == "placed"]
+        request = req.get(i, {})
+        real = None
+        if real_src is not None and request.get("source_branch") in real_src[2]:
+            key = request["source_branch"]
+            try:
+                real = real_entry(trunk_record_of(real_src[2], key), real_src[0].get(key, {}), key, real_src[1].get(key), args.max_faces)
+            except Exception as exc:
+                print(f"[report] real branch {key}: {exc!r}", flush=True)
         embedded.append({
             "index": i, "length_um": row["length_um"], "placements": row["placements"], "placed": row["placed"], "dropped": row["dropped"], "density": row["density"],
             "status": r.status, "reason": row["reason"], "watertight": row["watertight"], "n_components": row["n_components"], "genus": int(getattr(r, "genus", -1)) if hasattr(r, "genus") else None,
@@ -145,7 +238,8 @@ def main() -> None:
             "mesh_trunk": _pack_subset(vu, f[~is_spine]), "mesh_spines": _pack_subset(vu, f[is_spine]),
             "center": {"x": (gamma[:, 0] / 1000.0).tolist(), "y": (gamma[:, 1] / 1000.0).tolist(), "z": (gamma[:, 2] / 1000.0).tolist()},
             "profile": {"s_um": (s / 1000.0).tolist(), "r_nm": radius.tolist()},
-            "spines": spines_of(i, s, radius, float(s[-1])),
+            "spines": sp_list, "conditions": conditions_of(request) if request else None,
+            "stats": shared_stats(t, placed_s, row["placed"]), "real": real,
         })
         print(f"[report] branch {i}: {len(mesh.faces)} faces -> {len(f)} shown, spines {row['placed']}/{row['placements']}", flush=True)
 
@@ -192,16 +286,27 @@ def main() -> None:
         "Затем шипики вставляются в ствол и объединяются с ним в одну замкнутую поверхность. Условия генерации (тип клетки, длина ветви и другие) взяты у реальных ветвей, поэтому каждой "
         "собранной ветви можно сопоставить реальную ветвь с теми же условиями.",
         "**Что показано.** Ствол серый, шипики розовые. Флажками можно добавить центральную линию ствола (чёрная) и зелёные точки в местах, где основания шипиков вставлены в ствол. "
-        "Вращать ветвь можно мышью, колесо меняет масштаб. Ниже список ветвей и статистика по всему набору. "
-        "Показаны первые ветви набора, но таблица и графики охватывают все собранные ветви.",
+        "Вращать ветвь можно мышью, колесо меняет масштаб. Кнопки над рисунком позволяют сравнить собранную ветвь с реальной ветвью, у которой те же условия и длина. "
+        "Ниже список ветвей и статистика по всему набору. Показаны первые ветви набора, но таблица и графики охватывают все собранные ветви.",
+        "**Важно.** Форма ствола, число шипиков и их положения зависят от условий ветви (вид, тип клетки, компартмент, длина, концевая ветвь, расстояние до сомы). "
+        "Форма самих шипиков пока безусловна: шипик выбирается из пула случайно. Условная генерация шипиков — следующий шаг.",
     ], title="О чём этот отчёт")
     viewer = ('<div class="grid-2">'
               + hk.card("Ветвь", '<div class="row" style="margin-bottom:6px;gap:16px;align-items:center"><select id="branchSelect" aria-label="Ветвь" style="max-width:360px"></select>'
                         '<label class="check"><input type="checkbox" id="showCenter"> центральная линия</label>'
-                        '<label class="check"><input type="checkbox" id="showAnchors"> основания шипиков</label></div><div id="view" class="plot l"></div><div id="viewNote" class="small muted"></div>',
-                        hint="вращение мышью")
-              + hk.card("Параметры выбранной ветви", '<table class="metrics" id="branchStats"></table>')
-              + "</div>"
+                        '<label class="check"><input type="checkbox" id="showAnchors"> основания шипиков</label></div>'
+                        '<div id="viewModeBox" class="row" style="margin-bottom:6px;gap:16px"><span class="muted">Показать:</span>'
+                        '<label class="check"><input type="radio" name="viewMode" value="gen" checked> собранную</label>'
+                        '<label class="check"><input type="radio" name="viewMode" value="real"> реальную с теми же условиями</label>'
+                        '<label class="check"><input type="radio" name="viewMode" value="both"> рядом</label></div>'
+                        '<div id="view" class="plot l"></div><div id="viewNote" class="small muted"></div>', hint="вращение мышью")
+              + "<div>"
+              + hk.card("Условия генерации этой ветви", '<table class="metrics" id="condTable"></table><div id="realSource" class="small muted" style="margin-top:6px"></div>'
+                        '<div class="small" style="margin-top:8px"><b>Форма шипиков пока генерируется безусловно.</b> Ствол и число с положениями шипиков зависят от условий выше, '
+                        'а сам шипик берётся из пула сгенерированных MoGen сеток случайно, независимо от условий и места на ветви.</div>')
+              + '<div style="height:var(--gap)"></div>'
+              + hk.card("Сравнение с реальной ветвью", '<table class="metrics" id="branchStats"></table><div id="statsNote" class="small muted"></div>')
+              + "</div></div>"
               + hk.card("Радиус ствола и положения шипиков вдоль ветви", '<div id="profile" class="plot m"></div>'))
     glob = ('<div class="grid-2e">'
             + hk.card("Длина ветви и число шипиков", '<div id="lenSpines" class="plot s"></div>')

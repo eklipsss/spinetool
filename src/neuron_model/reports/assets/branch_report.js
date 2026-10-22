@@ -4,46 +4,97 @@ const GREY = P.mesh_real, PINK = P.brand_pink, GREEN = '#3f8a2a';
 const um = v => (v === null || v === undefined) ? null : v;
 
 // ---------------------------------------------------------------- viewer
+state.view = 'gen';
 function fillSelect() {
   const sel = $('branchSelect');
   B.forEach((b, k) => sel.add(new Option(`Ветвь ${b.index}: ${fmt(b.length_um, 1)} мкм, шипиков ${b.placed}`, k)));
   sel.onchange = () => { state.i = +sel.value; drawAll(); };
   $('showCenter').onchange = e => { state.centerline = e.target.checked; drawViewer(); };
   $('showAnchors').onchange = e => { state.anchors = e.target.checked; drawViewer(); };
+  for (const r of document.querySelectorAll('input[name=viewMode]')) r.onchange = e => { state.view = e.target.value; drawViewer(); };
 }
-function drawViewer() {
-  const b = B[state.i], trunk = unpackMesh(b.mesh_trunk), traces = [meshTrace(trunk, GREY, 'ствол')], meshes = [trunk];
-  if (b.mesh_spines) { const sp = unpackMesh(b.mesh_spines); meshes.push(sp); traces.push(meshTrace(sp, PINK, 'шипики')); }
-  if (state.centerline) traces.push({type: 'scatter3d', mode: 'lines', x: b.center.x, y: b.center.y, z: b.center.z, line: {color: P.ink, width: 3}, name: 'центральная линия', hoverinfo: 'skip'});
+function generatedTraces(b, scene) {
+  const trunk = unpackMesh(b.mesh_trunk), meshes = [trunk], traces = [Object.assign(meshTrace(trunk, GREY, 'ствол'), {scene: scene})];
+  if (b.mesh_spines) { const sp = unpackMesh(b.mesh_spines); meshes.push(sp); traces.push(Object.assign(meshTrace(sp, PINK, 'шипики'), {scene: scene})); }
+  if (state.centerline) traces.push({type: 'scatter3d', mode: 'lines', x: b.center.x, y: b.center.y, z: b.center.z, line: {color: P.ink, width: 3}, name: 'центральная линия', hoverinfo: 'skip', scene: scene});
   if (state.anchors) {
     const a = b.spines.filter(s => s.status === 'placed');
-    traces.push({type: 'scatter3d', mode: 'markers', x: a.map(s => s.ax), y: a.map(s => s.ay), z: a.map(s => s.az), marker: {size: 4, color: GREEN}, name: 'основания шипиков',
+    traces.push({type: 'scatter3d', mode: 'markers', x: a.map(s => s.ax), y: a.map(s => s.ay), z: a.map(s => s.az), marker: {size: 4, color: GREEN}, name: 'основания шипиков', scene: scene,
       text: a.map(s => `шипик ${s.k}, s = ${fmt(s.s_um, 2)} мкм, погружение ${fmt(s.delta_nm, 0)} нм`), hoverinfo: 'text'});
   }
-  const sc = scene3d(cubeRange(meshes), {aspectmode: 'data'});
+  return {traces: traces, meshes: meshes};
+}
+function realTraces(b, scene) {
+  const m = unpackMesh(b.real.mesh), sp = b.real.spines;
+  const traces = [Object.assign(meshTrace(m, GREY, 'ствол реальной ветви (круглая трубка по измеренной оси)', 0.9), {scene: scene}),
+    {type: 'scatter3d', mode: 'markers', x: sp.map(s => s.ax), y: sp.map(s => s.ay), z: sp.map(s => s.az), marker: {size: 5, color: PINK, symbol: 'diamond'}, name: 'места крепления реальных шипиков', scene: scene,
+     text: sp.map((s, k) => `шипик ${k + 1}, s = ${fmt(s.s_um, 2)} мкм`), hoverinfo: 'text'}];
+  return {traces: traces, meshes: [m]};
+}
+function sceneFor(meshes, domain) {
+  const sc = scene3d(cubeRange(meshes), {aspectmode: 'data', domain: domain});
+  if (domain) sc.camera = {eye: {x: 0.95, y: 0.7, z: 0.7}, up: {x: 0, y: 1, z: 0}};  // two stacked scenes: come closer
   for (const a of ['xaxis', 'yaxis', 'zaxis']) { delete sc[a].range; sc[a].showticklabels = true; sc[a].title = {text: a[0] + ', мкм', font: {size: 11, color: P.ink_secondary}}; }
-  Plotly.react('view', traces, layout({margin: {l: 0, r: 0, t: 0, b: 0}, showlegend: true, legend: Object.assign({}, THEME.legend, {orientation: 'h', y: 0.01}), scene: sc, uirevision: 'b' + state.i}), PLOT_CONFIG);
+  return sc;
+}
+function syncCameras() {
+  const gd = $('view'); if (gd._synced) return; gd._synced = true; let busy = false;
+  gd.on('plotly_relayout', ev => {
+    if (busy) return; const k = Object.keys(ev).find(x => /^scene2?\.camera$/.test(x)); if (!k) return;
+    busy = true; Plotly.relayout(gd, {[k === 'scene.camera' ? 'scene2.camera' : 'scene.camera']: ev[k]}).finally(() => busy = false);
+  });
+}
+function drawViewer() {
+  const b = B[state.i], hasReal = !!b.real, mode = hasReal ? state.view : 'gen';
+  $('viewModeBox').style.display = hasReal ? '' : 'none';
+  let traces = [], lay = {margin: {l: 0, r: 0, t: 18, b: 0}, showlegend: true, legend: Object.assign({}, THEME.legend, {orientation: 'h', y: 0.01}), uirevision: 'b' + state.i + mode, annotations: []};
+  if (mode === 'gen') { const g = generatedTraces(b, 'scene'); traces = g.traces; lay.scene = sceneFor(g.meshes); }
+  else if (mode === 'real') { const r = realTraces(b, 'scene'); traces = r.traces; lay.scene = sceneFor(r.meshes); }
+  else {
+    const g = generatedTraces(b, 'scene'), r = realTraces(b, 'scene2'); traces = g.traces.concat(r.traces);
+    lay.scene = sceneFor(g.meshes, {x: [0, 1], y: [0.52, 1]}); lay.scene2 = sceneFor(r.meshes, {x: [0, 1], y: [0, 0.48]});
+    lay.annotations = [{text: 'Собранная ветвь', x: 0.01, y: 1.0, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'left', font: {size: 12, color: P.ink_secondary}},
+      {text: 'Реальная ветвь с теми же условиями', x: 0.01, y: 0.5, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'left', font: {size: 12, color: P.ink_secondary}}];
+  }
+  $('view').style.height = mode === 'both' ? '900px' : '';
+  Plotly.react('view', traces, layout(lay), PLOT_CONFIG);
+  if (mode === 'both') syncCameras();
+  $('viewNote').textContent = (b.shown_faces < b.n_faces ? `Сетка собранной ветви упрощена для показа до ${b.shown_faces.toLocaleString('ru-RU')} граней из ${b.n_faces.toLocaleString('ru-RU')}. ` : '')
+    + (hasReal ? 'У реальной ветви показан ствол в виде круглой трубки по измеренной оси и радиусу, а шипики отмечены ромбами в местах крепления: сетки реальных шипиков здесь не показаны. ' : 'Реальная ветвь с теми же условиями недоступна для этого набора. ');
+}
+function drawConditions() {
+  const b = B[state.i];
+  $('condTable').innerHTML = (b.conditions || []).map(r => `<tr><td>${r[0]}</td><td style="text-align:right">${r[1]}</td></tr>`).join('') || '<tr><td>Условия набора недоступны</td></tr>';
+  $('realSource').textContent = b.real ? `Реальная ветвь сравнения: нейрон ${b.real.neuron}, ветвь ${b.real.key.split('/').slice(2).join('/')}.` : '';
 }
 function drawStats() {
-  const b = B[state.i];
-  const rows = [['Статус', b.status === 'ok' ? 'собрана, все проверки пройдены' : 'собрана, есть замечания: ' + (b.reason || '—')],
-    ['Длина, мкм', fmt(b.length_um, 1)], ['Медианный радиус, нм', fmt(b.radius_median_nm, 0)], ['Извилистость (путь / хорда)', fmt(b.tortuosity, 2)],
-    ['Запрошено шипиков', b.placements], ['Поставлено', b.placed], ['Не удалось поставить', b.dropped], ['Плотность, шипиков на мкм', fmt(b.density, 2)],
+  const b = B[state.i], g = b.stats, r = b.real ? b.real.stats : null;
+  const row = (name, gv, rv, d) => `<tr><td>${name}</td><td style="text-align:right">${gv === null || gv === undefined ? '—' : fmt(gv, d)}</td><td style="text-align:right">${!r ? '—' : (rv === null || rv === undefined ? '—' : fmt(rv, d))}</td></tr>`;
+  const rows = [['Длина, мкм', g.length_um, r && r.length_um, 1], ['Средний радиус, нм', g.radius_mean_nm, r && r.radius_mean_nm, 0], ['Разброс радиуса (CV)', g.radius_cv, r && r.radius_cv, 3],
+    ['Извилистость (путь / хорда)', g.tortuosity, r && r.tortuosity, 2], ['Кривизна, среднеквадратичная, 1/нм', g.kappa_rms, r && r.kappa_rms, 5],
+    ['Число шипиков', g.n_spines, r && r.n_spines, 0], ['Плотность, шипиков на мкм', g.density, r && r.density, 2], ['Медианный интервал между шипиками, нм', g.gap_median_nm, r && r.gap_median_nm, 0]];
+  const fixed = [['Статус сборки', b.status === 'ok' ? 'все проверки пройдены' : 'есть замечания: ' + (b.reason || '—')], ['Запрошено шипиков', b.placements], ['Не удалось поставить', b.dropped],
     ['Замкнута', b.watertight ? 'да' : 'нет'], ['Компонент', b.n_components], ['Род поверхности', b.genus], ['Граней в сетке', b.n_faces === null ? '—' : b.n_faces.toLocaleString('ru-RU')],
     ['Площадь, мкм²', fmt(b.area_um2, 1)], ['Объём, мкм³', fmt(b.volume_um3, 2)], ['Время сборки, с', fmt(b.seconds, 1)]];
-  $('branchStats').innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td style="text-align:right">${r[1]}</td></tr>`).join('');
-  $('viewNote').textContent = b.shown_faces < b.n_faces ? `Для показа сетка упрощена до ${b.shown_faces.toLocaleString('ru-RU')} граней из ${b.n_faces.toLocaleString('ru-RU')}.` : '';
+  $('branchStats').innerHTML = '<tr><th></th><th style="text-align:right">Собранная</th><th style="text-align:right">Реальная</th></tr>'
+    + rows.map(x => row(x[0], x[1], x[2], x[3])).join('') + fixed.map(x => `<tr><td>${x[0]}</td><td style="text-align:right" colspan="2">${x[1]}</td></tr>`).join('');
+  $('statsNote').textContent = b.real && !b.real.eligible_for_spines ? 'У реальной ветви число шипиков не определено: она не годится для обучения модели P.' : '';
 }
 function drawProfile() {
   const b = B[state.i], placed = b.spines.filter(s => s.status === 'placed'), dropped = b.spines.filter(s => s.status !== 'placed');
-  const traces = [{type: 'scatter', mode: 'lines', x: b.profile.s_um, y: b.profile.r_nm, line: {color: P.ink_secondary, width: 2}, name: 'радиус ствола', hovertemplate: 's = %{x:.1f} мкм<br>r = %{y:.0f} нм<extra></extra>'},
+  const traces = [{type: 'scatter', mode: 'lines', x: b.profile.s_um, y: b.profile.r_nm, line: {color: P.ink_secondary, width: 2}, name: 'радиус собранной ветви', hovertemplate: 's = %{x:.1f} мкм<br>r = %{y:.0f} нм<extra></extra>'},
     {type: 'scatter', mode: 'markers', x: placed.map(s => s.s_um), y: placed.map(s => s.r_nm), marker: {color: GREEN, size: 8, line: {color: '#fff', width: 1}}, name: 'поставленные',
       text: placed.map(s => `шипик ${s.k}: погружение ${fmt(s.delta_nm, 0)} нм, угол ${fmt(s.theta_deg, 0)}°`), hoverinfo: 'text'}];
   if (dropped.length) traces.push({type: 'scatter', mode: 'markers', x: dropped.map(s => s.s_um), y: dropped.map(s => s.r_nm), marker: {color: PINK, size: 9, symbol: 'x'}, name: 'не удалось поставить',
     text: dropped.map(s => `шипик ${s.k}: ${s.reasons || '—'}`), hoverinfo: 'text'});
-  Plotly.react('profile', traces, layout({showlegend: true, legend: Object.assign({}, THEME.legend, {orientation: 'h', y: -0.25}), xaxis: {title: axisTitle('Положение вдоль ветви, мкм')}, yaxis: {title: axisTitle('Радиус ствола, нм')}, margin: {b: 90}}), PLOT_CONFIG);
+  if (b.real) {
+    traces.push({type: 'scatter', mode: 'lines', x: b.real.profile.s_um, y: b.real.profile.r_nm, line: {color: GREY, width: 2, dash: 'dot'}, name: 'радиус реальной ветви', hoverinfo: 'skip'},
+      {type: 'scatter', mode: 'markers', x: b.real.spines.map(s => s.s_um), y: b.real.spines.map(s => s.r_nm), marker: {color: 'rgba(0,0,0,0)', size: 9, symbol: 'diamond', line: {color: PINK, width: 2}}, name: 'шипики реальной ветви',
+        text: b.real.spines.map((s, k) => `реальный шипик ${k + 1}, угол ${fmt(s.theta_deg, 0)}°`), hoverinfo: 'text'});
+  }
+  Plotly.react('profile', traces, layout({showlegend: true, legend: Object.assign({}, THEME.legend, {orientation: 'h', y: -0.28}), xaxis: {title: axisTitle('Положение вдоль ветви, мкм')}, yaxis: {title: axisTitle('Радиус ствола, нм')}, margin: {b: 100}}), PLOT_CONFIG);
 }
-function drawAll() { drawViewer(); drawStats(); drawProfile(); }
+function drawAll() { drawViewer(); drawConditions(); drawStats(); drawProfile(); }
 
 // ---------------------------------------------------------------- all branches
 function hist(id, values, title, xtitle, opts) {
@@ -73,7 +124,7 @@ function drawGlobal() {
   hist('uHist', s.u, '', 'Положение вдоль ветви, доля длины (0 — начало, 1 — конец)', {bins: 10, uniform: true, range: [0, 1]});
   hist('thetaHist', s.theta_deg, '', 'Угол вокруг оси, градусы', {bins: 12, uniform: true, range: [0, 360]});
   bars('attemptReasons', D.failure_reasons, P.brand_pink);
-  bars('poolReasons', D.pool.rejected_reasons, P.series_1 || P.brand_pink);
+  bars('poolReasons', D.pool.rejected_reasons, P.brand_pink);
   const tb = $('tableBody');
   tb.innerHTML = t.map(r => `<tr><td>${r.index}</td><td>${fmt(r.length_um, 1)}</td><td>${r.placements}</td><td>${r.placed}</td><td>${r.dropped}</td><td>${fmt(r.density, 2)}</td><td>${r.watertight ? 'да' : 'нет'}</td><td>${r.n_components}</td><td>${fmt(r.seconds, 1)}</td><td>${r.status === 'ok' ? 'ок' : (r.reason || r.status)}</td></tr>`).join('');
 }
