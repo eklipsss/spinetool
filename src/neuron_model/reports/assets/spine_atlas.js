@@ -155,7 +155,7 @@ function drawViewer() {
     shown.push({idx: j, label: label, note: note});
   }
   if (!shown.length) { Plotly.purge('viewer'); $('viewer').innerHTML = '<div class="empty">Выберите точку на карте</div>'; box.textContent = ''; return; }
-  $('viewer').innerHTML = '';
+  if (!$('viewer')._fullData) $('viewer').innerHTML = '';  // never clear a live plot's DOM: Plotly.react would then draw nothing
   const meshes = shown.map(s => unpackMesh(D.meshes[PTS.mesh[s.idx]]));
   const range = cubeRange(meshes);
   const traces = [], lay = layout({margin: {l: 0, r: 0, t: 26, b: 0}, showlegend: false, annotations: []});
@@ -275,9 +275,9 @@ function drawTraversal() {
   $('travStep').max = steps.length - 1; $('travStep').value = s.step;
   const f = frames[s.step];
   $('travStepText').textContent = `${steps[s.step] > 0 ? '+' : ''}${fmt(steps[s.step], 1)} σ`;
-  if (f.mesh < 0) { $('travView').innerHTML = '<div class="empty">Для этого шага поверхность не извлечена</div>'; }
+  if (f.mesh < 0) { Plotly.purge('travView'); $('travView').innerHTML = '<div class="empty">Для этого шага поверхность не извлечена</div>'; }
   else {
-    $('travView').innerHTML = '';
+    if (!$('travView')._fullData) $('travView').innerHTML = '';  // see drawViewer
     const all = frames.filter(x => x.mesh >= 0).map(x => unpackMesh(D.meshes[x.mesh]));
     const m = unpackMesh(D.meshes[f.mesh]);
     const lay = layout({margin: {l: 0, r: 0, t: 0, b: 0}, showlegend: false, uirevision: 'trav', scene: scene3d(cubeRange(all), {uirevision: 'trav'})});
