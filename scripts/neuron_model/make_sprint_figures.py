@@ -541,7 +541,6 @@ def fig_c1_training(out: Path, runs: Mapping[str, Path]) -> None:
             ax.plot(df["step"], y.rolling(window, min_periods=max(1, window // 4), center=True).mean(), color=col, lw=2.2, label=name)
         ax.set_xlabel("шаг обучения"); ax.set_ylabel("loss Flow Matching")
         ax.set_title("MoGen: loss выходит на плато рано"); ax.legend()
-        ax.text(0.99, 0.02, f"скользящее среднее по {SMOOTH_STEPS} шагам; бледная линия — исходные значения; начальный спад обрезан по оси", transform=ax.transAxes, ha="right", fontsize=8.5, color="#4a4d55")
         lo = min(df["loss"].quantile(0.02) for df in mogen.values()); ax.set_ylim(lo * 0.95, min(0.9, max(df["loss"].iloc[min(20, len(df) - 1)] for df in mogen.values()) * 1.05))
     if vae:
         ax = axes[0][ai]
