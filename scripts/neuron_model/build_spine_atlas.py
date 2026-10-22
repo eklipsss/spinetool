@@ -48,6 +48,7 @@ import numpy as np
 import pandas as pd
 
 from src.neuron_model.reports import html_kit as hk
+from src.neuron_model.reports.atlas_gallery import gallery_js, gallery_section
 from src.neuron_model.spine_generation import atlas as A
 from src.neuron_model.spine_generation.data.index import load_spine_index
 from src.neuron_model.spine_generation.data.splits import load_splits
@@ -163,6 +164,7 @@ def body_html(meta: dict, sources: list, summary_rows: list) -> str:
     return (head + hk.tiles(tiles) + summary + intro
             + hk.section("Карта форм", "Реальные и сгенерированные шипики в общем пространстве; щелчок по точке открывает её сетку.", workspace + map_note, anchor="sec-map")
             + hk.section("Морфометрические признаки", "Насколько распределения признаков и связи между ними у моделей совпадают с реальными.", morph + morph_note, anchor="sec-morph")
+            + gallery_section()
             + hk.section("Качество поверхности", "Пригодность сеток для анализа: замкнутость, связность, гладкость.", quality + quality_note, anchor="sec-quality")
             + hk.section("Латентные направления", "Как меняется форма шипика при движении по главным направлениям латентного пространства VAE.", trav + trav_note, anchor="sec-traversal")
             + f'<footer class="page">{hk.esc(meta["footer"])}</footer>')
@@ -350,7 +352,7 @@ def main() -> None:
     }
     out = args.out or REPO_ROOT / "runs/analysis/neuron-model/atlas" / f"{_dt.datetime.now():%Y-%m-%d_%H%M%S}" / "spine_atlas.html"
     out.parent.mkdir(parents=True, exist_ok=True)
-    page_js = ASSET.read_text(encoding="utf-8") + "\n" + SUMMARY_JS
+    page_js = ASSET.read_text(encoding="utf-8") + "\n" + SUMMARY_JS + "\n" + gallery_js()
     out.write_text(hk.page(args.title, body_html(meta, sources, summary), payload, page_js), encoding="utf-8")
     (out.parent / "atlas_summary.json").write_text(json.dumps({"summary": summary, "quality_rates": quality_rates}, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     print(f"[atlas] {len(records)} spines, {len(meshes)} meshes, {out.stat().st_size / 1e6:.1f} MB -> {out}", flush=True)
