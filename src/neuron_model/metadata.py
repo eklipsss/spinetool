@@ -29,6 +29,42 @@ EXCITATORY_CELL_TYPES = {
 }
 INHIBITORY_CELL_TYPES = {"BC", "BPC", "MC", "NGC", "Unsure I"}
 
+# LabID: group folder -> (health, treatment, imaging series). branch ids: labid_unit_id
+LABID_GROUPS = {
+    "Wt": ("healthy", None, "wt"),
+    "Wt_old": ("healthy", None, "wt_old"),
+    "Wt+9009": ("healthy", "9009", "wt+9009"),
+    "Ab": ("disease", None, "ab"),
+    "Ab+9009": ("disease", "9009", "ab+9009"),
+}
+_LABID_NAME = re.compile(r"^(?:ab)?(\d+)(?:-(\d+))?", re.IGNORECASE)
+
+
+def labid_unit_id(group: str, dendrite: str) -> str:
+    """Id of a LabID branch = ``<group>_<folder name>`` (sanitised, ``_processed`` dropped). Every folder of a group is
+    a SEPARATE branch (user decision 2026-10-24: whether two folders come from one dendrite / cell is unknown); it is
+    also the grouping unit of the split (``neuron_id``). The numbers in the name are kept only as metadata
+    (``labid_name_numbers``)."""
+    name = str(dendrite).replace("_processed", "")
+    return re.sub(r"[^A-Za-z0-9+]+", "_", f"{group}_{name}").strip("_")
+
+
+def labid_name_numbers(dendrite: str) -> Tuple[Optional[int], Optional[int]]:
+    """The two numbers of a folder name like ``ab23-1_processed`` / ``1003-22`` (meaning unknown, metadata only)."""
+    m = _LABID_NAME.match(str(dendrite).replace("_processed", ""))
+    if not m:
+        return None, None
+    return int(m.group(1)), (int(m.group(2)) if m.group(2) else None)
+
+
+def labid_group(neuron_id: str) -> Optional[str]:
+    """Group of a LabID cell id (longest matching ``<group>_`` prefix)."""
+    for group in sorted(LABID_GROUPS, key=len, reverse=True):
+        if str(neuron_id).startswith(group + "_"):
+            return group
+    return None
+
+
 PREFIX_RE = re.compile(r"^(?P<neuron>.+)_limb_(?P<limb>\d+)_branch_(?P<branch>\d+)$")
 
 
@@ -146,13 +182,20 @@ def identity_columns(record: SpineRecord, metadata: Dict[str, Any]) -> Dict[str,
 def dataset_metadata(record: SpineRecord, metadata: Dict[str, Any]) -> Dict[str, Any]:
     kind = dataset_kind(record.dataset)
     ctype = cell_type(record, metadata)
-    return {
+    out = {
         "species": species(kind),
         "health": health(kind),
         "cell_type": ctype,
         "cell_type_binary": cell_type_binary(ctype),
         "compartment": compartment(record, metadata),
+        "treatment": None,
+        "imaging_series": None,
     }
+    if kind == "labid":  # health / treatment / series come from the group encoded in the cell id
+        group = labid_group(record.neuron_id)
+        if group is not None:
+            out["health"], out["treatment"], out["imaging_series"] = LABID_GROUPS[group]
+    return out
 
 
 def species(kind: str) -> str:

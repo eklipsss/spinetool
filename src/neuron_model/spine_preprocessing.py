@@ -3058,6 +3058,8 @@ def run_manifest_stage(
                 "cell_type": get("metadata", "cell_type"),
                 "cell_type_binary": get("metadata", "cell_type_binary"),
                 "compartment": get("metadata", "compartment"),
+                "treatment": get("metadata", "treatment"),
+                "imaging_series": get("metadata", "imaging_series"),
                 "source_path": str(record.source_path),
                 "local_mesh_path": artifact(local_mesh_path(record, cfg), "orient"),
                 "sealed_mesh_path": artifact(sealed_mesh_path(record, cfg), "seal"),
