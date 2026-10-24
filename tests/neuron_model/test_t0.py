@@ -236,3 +236,76 @@ def test_direction_model_recovers_branch_amplitudes():
         k1, k2 = fitted.sample_bending(b.n_nodes, 500.0, "g", rng, radius_nm=float(np.exp(b.log_radius[0])))
         gen_rms.append(np.sqrt(np.mean(k1**2 + k2**2)))
     assert np.median(gen_rms) == pytest.approx(np.median(real_rms), rel=0.2)
+
+
+def _simulate_radius_amplitudes(rng, n_branches, beta_r=-1.0, tau=0.4, length_nm=4000.0):
+    """Branches whose log-radius residual has a per-branch amplitude (thinner branches fluctuate more)."""
+    from src.neuron_model.trunk_generation.models.radius import RadiusResidualModel
+
+    true = RadiusResidualModel(length_nm, math.log(0.08), beta_r, 0.0, tau)
+    enc = DesignEncoder.fit([5000.0, 100000.0])
+    branches = []
+    for _ in range(n_branches):
+        length = float(np.exp(rng.uniform(math.log(10000.0), math.log(80000.0))))
+        r = float(np.exp(rng.uniform(math.log(150.0), math.log(700.0))))
+        n = int(length // 500.0) + 1
+        step = length / (n - 1)
+        rho = true.sample(n, step, "g", rng, radius_nm=r, length_nm=length)
+        k1, k2 = rng.normal(0.0, 5e-5, n - 1), rng.normal(0.0, 5e-5, n - 1)  # bending is irrelevant here
+        branches.append(T0Branch(k1, k2, math.log(r) + rho, step, enc.row("mouse", "excitatory", "apical", length), "g"))
+    return branches, enc, true
+
+
+def test_radius_residual_recovers_branch_amplitudes():
+    from src.neuron_model.trunk_generation.models.radius import RadiusResidualModel
+
+    rng = np.random.default_rng(5)
+    branches, _, true = _simulate_radius_amplitudes(rng, 300)
+    rho = [b.log_radius - b.log_radius.mean() for b in branches]
+    fitted = RadiusResidualModel().fit(rho, [b.step for b in branches], [float(np.exp(b.log_radius.mean())) for b in branches],
+                                       [b.length for b in branches], [b.group for b in branches], min_group=10_000)
+    assert fitted.length_nm == pytest.approx(true.length_nm, rel=0.35)
+    assert fitted.beta_r == pytest.approx(true.beta_r, abs=0.25)
+    assert abs(fitted.beta_l) < 0.25
+    assert fitted.tau == pytest.approx(true.tau, abs=0.12)
+    assert 0.7 < math.exp(fitted.alpha) / math.exp(true.alpha) < 1.4
+    path_dict = RadiusResidualModel.from_dict(fitted.to_dict())
+    assert path_dict.beta_r == fitted.beta_r and path_dict.length_nm == fitted.length_nm
+
+
+def test_t0_branch_radius_residual_reproduces_radius_cv_by_thickness(tmp_path):
+    """With heterogeneous amplitudes the pooled residual gives every branch the same spread; the branch model
+    reproduces the radius CV of thin and thick branches separately."""
+    rng = np.random.default_rng(8)
+    branches, enc, _ = _simulate_radius_amplitudes(rng, 300, beta_r=-1.2, tau=0.3)
+    reqs = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical", "length_nm": b.length, "step_nm": b.step} for b in branches]
+    radius = np.array([float(np.exp(np.median(b.log_radius))) for b in branches])
+    real_cv = np.array([np.exp(b.log_radius).std() / np.exp(b.log_radius).mean() for b in branches])
+    thin, thick = radius < 300.0, radius >= 450.0
+
+    def gen_cv(model):
+        # the generated radius level comes from the mean model; compare per class of the REQUEST's real radius
+        out = []
+        for b, raw in zip(branches, model.sample(reqs, np.random.default_rng(1))):
+            r = np.exp(raw["log_radius"] - np.median(raw["log_radius"]) + np.median(b.log_radius))
+            out.append(r.std() / r.mean())
+        return np.asarray(out)
+
+    branch = T0Model("gam", direction="kappa", radius_residual="branch").fit(branches, encoder=enc, max_iter=60)
+    pooled = T0Model("gam", direction="kappa", radius_residual="pooled").fit(branches, encoder=enc, max_iter=60)
+    assert branch.radius is not None and pooled.radius is None
+    # the GAM mean does not know the branch radius, so the generated level is pooled; the branch amplitude is drawn
+    # from the generated median radius: compare the overall spread and the spread of the amplitudes
+    cv_b, cv_p = gen_cv(branch), gen_cv(pooled)
+    assert np.median(cv_b) == pytest.approx(np.median(real_cv), rel=0.25)
+    # the spread of the CV across branches: the pooled model is too uniform
+    iqr = lambda x: np.subtract(*np.percentile(x, [75, 25]))
+    assert iqr(cv_b) > 1.5 * iqr(cv_p)
+    assert iqr(cv_b) == pytest.approx(iqr(real_cv), rel=0.4)
+    path = tmp_path / "t0.json"
+    branch.save(path)
+    loaded = T0Model.load(path)
+    a = branch.sample(reqs[:3], np.random.default_rng(2))
+    b = loaded.sample(reqs[:3], np.random.default_rng(2))
+    assert all(np.allclose(x["log_radius"], y["log_radius"]) for x, y in zip(a, b))
+    assert thin.sum() > 20 and thick.sum() > 20

@@ -1,154 +1,63 @@
-"""What happened to the branches: statuses, why branches are not eligible for T / P, and what the failures look like.
+"""Text summary of a branch preprocessing output (reads only branches.parquet / branch_spines.parquet): statuses,
+eligibility, QC reasons and medians of the main quantities, overall and per group (default: ``labid_group`` for LabID,
+``cell_type_binary`` otherwise). Paste the output into the chat instead of sending files.
 
-    python scripts/neuron_model/summarize_branches.py --root C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches [--neuron-id <id>]
-
-Reads ``<root>/branches.parquet`` (or the per-neuron table with ``--neuron-id``). Nothing is changed. Paste the output into the chat.
+    python scripts/neuron_model/summarize_branches.py --root C:\\...\\preprocessed_branches [--group-by compartment]
 """
 
 from __future__ import annotations
 
 import argparse
-import warnings
-from collections import Counter
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-
-def _bins(frame: pd.DataFrame, column: str, edges, label: str) -> None:
-    if column not in frame.columns or frame[column].notna().sum() == 0:
-        return
-    cut = pd.cut(frame[column], edges, include_lowest=True)
-    print(f"  {label}: " + ", ".join(f"{k}: {v}" for k, v in cut.value_counts().sort_index().items() if v))
-
-
-def _spine_summary(root: Path, neuron_id, branches: pd.DataFrame) -> None:
-    path = (root / neuron_id / "branch_spines.parquet") if neuron_id else root / "branch_spines.parquet"
-    if not path.exists():
-        return
-    sp = pd.read_parquet(path)
-    sp = sp[sp["status"] == "valid"]
-    if not len(sp) or "dist_perp_minus_radius" not in sp.columns:
-        return
-    r = sp.merge(branches[["limb_id", "merged_branch_id", "radius_median_nm"]], on=["limb_id", "merged_branch_id"], how="left")
-    r = r[r["dist_perp_minus_radius"].notna()]
-    print(f"\n== valid spines with a computed position: {len(r)} ({int(sp['has_position'].fillna(False).sum())} have has_position) ==")
-    print("  outlier limit now: |distance to the line - r| > 0.75 r  (the line deviates from the section centres by ~140 nm on thin branches)")
-    for name, m in (("r < 120 nm", r["radius_median_nm"] < 120), ("120 <= r < 200 nm", (r["radius_median_nm"] >= 120) & (r["radius_median_nm"] < 200)), ("r >= 200 nm", r["radius_median_nm"] >= 200)):
-        x = r[m]
-        if not len(x):
-            continue
-        d = x["dist_perp_minus_radius"].astype(float)
-        out = x["position_outlier"].fillna(False).astype(bool).mean() if "position_outlier" in x.columns else float("nan")
-        end = x["projects_to_end"].fillna(False).astype(bool).mean() if "projects_to_end" in x.columns else float("nan")
-        print(f"  {name:18s} {len(x):4d} spines: |dist - r| median {d.abs().median():.0f} nm (10-90 %: {d.abs().quantile(0.1):.0f}-{d.abs().quantile(0.9):.0f}); signed median {d.median():+.0f} nm; position_outlier {out:.0%}; projects_to_end {end:.0%}")
-        for floor in (150.0, 200.0, 300.0):
-            lim = np.maximum(0.75 * x["radius_median_nm"].astype(float), floor)
-            print(f"      with a floor of {floor:.0f} nm: outliers {np.mean(d.abs() > lim):.0%}")
+# kappa_rms is printed in 1/um
+COLUMNS = ["length_nm", "radius_median_nm", "section_invalid_fraction", "centerline_inside_fraction", "tortuosity", "kappa_rms", "step_nm", "n_spines", "n_with_position"]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--neuron-id")
+    parser.add_argument("--group-by", default=None)
     args = parser.parse_args()
-    path = (args.root / args.neuron_id / "branches.parquet") if args.neuron_id else args.root / "branches.parquet"
-    b = pd.read_parquet(path)
-    print(f"{len(b)} merged branches from {path}\n")
-    print("status:", b["status"].value_counts().to_dict())
-    for flag in ("train_eligible_T", "train_eligible_P"):
-        if flag in b.columns:
-            print(f"{flag}: {int(b[flag].fillna(False).sum())} of {len(b)} ({int((b['status'] == 'ok').sum())} with status ok)")
-
-    _spine_summary(args.root, args.neuron_id, b)
-    ok = b[b["status"] == "ok"]
-    print(f"\n== status ok: {len(ok)} branches; why NOT eligible for T (a branch can fail several checks) ==")
-    reasons = Counter()
-    for r in ok.loc[~ok["train_eligible_T"].fillna(False).astype(bool), "qc_reason"].fillna(""):
-        reasons.update([x for x in str(r).split(";") if x])
-    # length bounds are not in qc_reason: report them separately
-    if "length_nm" in ok.columns:
-        short = ((ok["length_nm"] < 5000.0) & ~ok["train_eligible_T"].fillna(False).astype(bool)).sum()
-        reasons["length < 5 um (T only)"] = int(short)
-    for k, v in reasons.most_common():
-        print(f"  {k:28s} {v}")
-    if "qc_centerline" in ok.columns:
-        # 'centerline' = gap OR rms OR the line leaves the mesh: which one
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from src.neuron_model.branch_preprocessing import load_config
-        cfg = load_config(Path(__file__).resolve().parents[2] / "data/processed/config/branch_preprocessing.yaml", {})
-        bad = ok[~ok["qc_centerline"].fillna(False).astype(bool)]
-        r = bad["radius_median_nm"].astype(float)
-        parts = {
-            f"longest_gap > {cfg.long_gap_nm:.0f} nm": int((bad["longest_gap_nm"].astype(float) > cfg.long_gap_nm).sum()),
-            f"rms > max({cfg.spline_rms_factor} r, {cfg.spline_rms_floor_nm:.0f} nm)": int((bad["centerline_rms_to_centers_nm"].astype(float) > np.maximum(cfg.spline_rms_factor * r, cfg.spline_rms_floor_nm)).sum()),
-        }
-        if "centerline_inside_fraction" in bad.columns:
-            parts[f"inside < {cfg.centerline_inside_min}"] = int((bad["centerline_inside_fraction"].astype(float) < cfg.centerline_inside_min).sum())
-        print("  centerline failures by part (yaml thresholds):", parts)
-    only = ok[~ok["train_eligible_T"].fillna(False).astype(bool)]
-    if len(only) and "qc_reason" in only.columns:
-        single = only["qc_reason"].fillna("").map(lambda s: s.split(";")[0] if s and ";" not in s else None).dropna().value_counts()
-        if len(single):
-            print("  fails exactly ONE check:", single.to_dict())
-
-    print("\n== status ok: eligible for P but not for T, and vice versa ==")
-    print("  P only:", int((ok["train_eligible_P"].fillna(False) & ~ok["train_eligible_T"].fillna(False)).sum()), " T only:", int((ok["train_eligible_T"].fillna(False) & ~ok["train_eligible_P"].fillna(False)).sum()))
-
-    print("\n== lengths, nm ==")
-    _bins(b, "table_length_nm", [0, 2000, 5000, 10000, 20000, 50000, 1e9], "all branches, table length")
-    for status in ("no_centerline", "too_short"):
-        sub = b[b["status"] == status]
-        if len(sub):
-            _bins(sub, "table_length_nm", [0, 2000, 5000, 10000, 20000, 50000, 1e9], f"{status} ({len(sub)})")
-
-    nc = b[b["status"] == "no_centerline"]
-    if len(nc):
-        print(f"\n== no_centerline ({len(nc)}): the fit found fewer than 5 reliable sections ==")
-        for col in ("n_sections", "n_reliable_sections", "radius_median_nm", "section_max_radius_nm", "n_mesh_vertices", "n_spine_vertices_removed"):
-            if col in nc.columns and nc[col].notna().any():
-                v = nc[col].astype(float)
-                print(f"  {col:26s} median {v.median():.0f}, min {v.min():.0f}, max {v.max():.0f}")
-        flag_cols = [c for c in nc.columns if c.startswith("sections_")]
-        if flag_cols:
-            print("  section flags (sum over these branches):", {c[len('sections_'):]: int(nc[c].fillna(0).sum()) for c in flag_cols if nc[c].fillna(0).sum() > 0})
-        print("  by members:", nc["member_count"].value_counts().to_dict() if "member_count" in nc.columns else "n/a")
-        cols = [c for c in ("limb_id", "merged_branch_id", "table_length_nm", "n_sections", "n_reliable_sections", "radius_median_nm") if c in nc.columns]
-        print(nc[cols].sort_values("table_length_nm", ascending=False).head(10).to_string(index=False))
-
-    if len(ok):
-        print("\n== status ok: the quantities behind the checks (median, 10-90 %) ==")
-        for col, note in (("length_nm", "nm"), ("radius_median_nm", "nm"), ("section_invalid_fraction", "limit 0.2"), ("trim_start_nm", "limit 2000"), ("trim_end_nm", "limit 2000"),
-                          ("longest_gap_nm", "limit 3000"), ("centerline_rms_to_centers_nm", ""), ("max_r_kappa", "limit 1"), ("twist_max_per_nm", "limit 1e-5"), ("unknown_fraction", "limit 0.1")):
-            if col in ok.columns and ok[col].notna().any():
-                v = ok[col].astype(float)
-                print(f"  {col:30s} {v.median():.4g}  ({v.quantile(0.1):.4g} .. {v.quantile(0.9):.4g})  {note}")
-        flag_cols = [c for c in ok.columns if c.startswith("sections_")]
-        if flag_cols and "n_sections" in ok.columns:
-            total = float(ok["n_sections"].sum())
-            print("  section flags among ALL sections of ok branches (a section may carry several): "
-                  + ", ".join(f"{c[len('sections_'):]} {ok[c].fillna(0).sum() / total:.0%}" for c in flag_cols) + f"  ({int(total)} sections)")
-            # radius classes: thin branches have sparse mesh vertices -> few points per section
-            r = ok["radius_median_nm"].astype(float)
-            for name, m in (("r < 120 nm", r < 120), ("120 <= r < 200 nm", (r >= 120) & (r < 200)), ("r >= 200 nm", r >= 200)):
-                sub = ok[m]
-                if len(sub):
-                    tot = float(sub["n_sections"].sum())
-                    inv = sub["section_invalid_fraction"].astype(float)
-                    rms = sub["centerline_rms_to_centers_nm"].astype(float)
-                    print(f"  {name:18s} {len(sub):3d} branches: invalid sections median {inv.median():.2f}; centreline rms median {rms.median():.0f} nm; "
-                          f"few_points {sub['sections_few_points'].fillna(0).sum() / tot:.0%}, outside_mesh {sub['sections_outside_mesh'].fillna(0).sum() / tot:.0%}, "
-                          f"kink {sub['sections_kink'].fillna(0).sum() / tot:.0%}; eligible T {int(sub['train_eligible_T'].fillna(False).sum())}")
-        if "n_spines_in_range" in ok.columns:
-            print(f"  spines per branch: median {ok['n_spines_in_range'].median():.0f}, branches without spines {(ok['n_spines_in_range'] == 0).mean():.0%}")
-        if "tube_self_contact" in ok.columns:
-            print(f"  tube self-contact: {ok['tube_self_contact'].mean():.0%}; skeleton topology not ok: {(~ok['skeleton_topology_ok'].fillna(True).astype(bool)).mean():.0%}" if "skeleton_topology_ok" in ok.columns else "")
-        if "soma_distance_mismatch" in ok.columns:
-            print(f"  soma distance mismatch with the table (> 20 %): {ok['soma_distance_mismatch'].fillna(False).astype(bool).mean():.0%}")
+    branches = pd.read_parquet(args.root / "branches.parquet")
+    spines_path = args.root / "branch_spines.parquet"
+    spines = pd.read_parquet(spines_path) if spines_path.exists() else pd.DataFrame()
+    group = args.group_by or ("labid_group" if "labid_group" in branches.columns else "cell_type_binary")
+    if group not in branches.columns:
+        group = None
+    pd.set_option("display.width", 220)
+    pd.set_option("display.max_columns", 30)
+    print(f"branches {len(branches)}, neurons {branches['neuron_id'].nunique()}, spine rows {len(spines)}")
+    print("status:", branches["status"].value_counts().to_dict())
+    print(f"train_eligible_T {int(branches['train_eligible_T'].sum())}, train_eligible_P {int(branches['train_eligible_P'].sum())}")
+    reasons = branches["qc_reason"].dropna().str.split(";").explode().value_counts()
+    print("qc reasons (branches failing each):", reasons.to_dict())
+    if "kappa_rms" in branches.columns:
+        branches["kappa_rms"] = branches["kappa_rms"] * 1000.0  # 1/nm -> 1/um
+    cols = [c for c in COLUMNS if c in branches.columns]
+    print("\nmedians, all branches with status ok:")
+    print(branches.loc[branches["status"] == "ok", cols].median().round(3).to_string())
+    if group:
+        ok = branches[branches["status"] == "ok"]
+        table = ok.groupby(group, dropna=False)[cols].median().round(3)
+        table.insert(0, "n_ok", ok.groupby(group, dropna=False).size())
+        table.insert(1, "n_all", branches.groupby(group, dropna=False).size())
+        table.insert(2, "elig_T", branches.groupby(group, dropna=False)["train_eligible_T"].sum())
+        table.insert(3, "elig_P", branches.groupby(group, dropna=False)["train_eligible_P"].sum())
+        print(f"\nper {group}:")
+        print(table.to_string())
+    if len(spines):
+        print("\nspines: has_position", round(float(spines["has_position"].mean()), 3), "| status", spines["status"].value_counts().to_dict())
+        if "attachment_method" in spines.columns:
+            print("attachment_method:", spines["attachment_method"].value_counts().to_dict())
+        if "dist_perp_minus_radius" in spines.columns:
+            print("attachment offset from the trunk surface d - r (nm), quantiles 10/50/90:", spines["dist_perp_minus_radius"].quantile([0.1, 0.5, 0.9]).round(0).tolist())
+    failed = branches[branches["status"] == "failed"]
+    if len(failed):
+        print("\nfailed branches, first 5 errors:")
+        print(failed[["neuron_id", "error"]].head(5).to_string())
 
 
 if __name__ == "__main__":

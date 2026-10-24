@@ -97,10 +97,14 @@ def test_fit_t0_reports_functionals_against_noise_floor():
     val, _ = _simulate(rng, 60)
     conds = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical"}] * len(val)
     neurons = [f"n{i // 3}" for i in range(len(val))]
-    res = fit_t0(train, val, conds, neurons, encoder=enc, mean_models=("parabola",), max_iter=100, log=lambda *a: None, direction="kappa")  # data simulated by the kappa-OU
+    res = fit_t0(train, val, conds, neurons, encoder=enc, mean_models=("parabola",), max_iter=100, log=lambda *a: None, direction="kappa",  # data simulated by the kappa-OU
+                 train_conditions=[conds[0]] * len(train))
     rep = res["report"]
     assert rep["real_val_rejection_rate"] <= 0.05  # the calibrated limits let the real branches through
     v = rep["variants"]["parabola"]
     assert v["generation"]["acceptance_rate"] > 0.9
     # a correct model is within a few noise floors on every functional
     assert v["mean_w1_rel"] < 3 * rep["noise_floor_mean_w1_rel"] + 0.3
+    # radius CV diagnostics on validation AND train branches; the branch radius residual is saved in the report
+    assert v["radius_cv_by_radius"] and v["radius_cv_by_radius_train"]
+    assert rep["radius_residual"]["length_nm"] > 0

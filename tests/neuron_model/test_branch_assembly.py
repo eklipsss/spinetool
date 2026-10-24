@@ -162,3 +162,42 @@ def test_flip_needles_removes_a_zero_area_triangle_and_keeps_the_surface_closed(
     assert flips >= 1
     assert (out.area_faces < 1e-6).sum() == 0
     assert out.is_watertight and out.is_winding_consistent
+
+
+def test_context_selector_fit_recovers_the_base_trunk_relation():
+    import pandas as pd
+
+    from src.neuron_model.branch_assembly.selection import ContextSelector
+
+    rng = np.random.default_rng(0)
+    r = np.exp(rng.uniform(np.log(150.0), np.log(800.0), 500))
+    b = np.exp(np.log(120.0) + 0.6 * np.log(r / 300.0) + rng.normal(0.0, 0.2, len(r)))
+    df = pd.DataFrame({"radius_at_s": r, "attachment_loop_area": np.pi * b**2, "has_position": True})
+    sel = ContextSelector.fit(df)
+    assert sel.a == pytest.approx(np.log(120.0), abs=0.05) and sel.c == pytest.approx(0.6, abs=0.08) and sel.s == pytest.approx(0.2, abs=0.03)
+    assert ContextSelector.from_dict(sel.to_dict()).c == sel.c
+
+
+def test_context_chooser_prefers_narrow_bases_on_thin_trunks():
+    from src.neuron_model.branch_assembly.selection import ContextSelector, SpineChooser
+
+    pool = SpinePool.from_meshes([(f"n{nr}", _spine(neck_r=nr, neck_len=600.0, head_r=nr + 120.0)) for nr in (40.0, 80.0, 160.0, 320.0)])
+    assert len(pool) == 4 and np.isfinite([sp.base_radius_nm for sp in pool.spines]).all()
+    widths = np.array([sp.base_radius_nm for sp in pool.spines])
+    assert np.all(np.diff(widths) > 0)  # the found base grows with the neck
+    chooser = SpineChooser(pool, ContextSelector(a=np.log(100.0), c=1.0, s=0.25))
+    rng = np.random.default_rng(1)
+    thin = np.array([chooser.choose(rng, 150.0) for _ in range(400)])
+    thick = np.array([chooser.choose(rng, 900.0) for _ in range(400)])
+    assert widths[thin].mean() < 0.6 * widths[thick].mean()
+    # uniform chooser (default) ignores the radius
+    uni = SpineChooser(pool)
+    assert len(set(uni.choose(rng, 150.0) for _ in range(200))) == 4
+    # fewer impossible placements on a thin trunk than with the uniform choice
+    rec = _trunk(radius=150.0, length=20000.0)
+    s = np.linspace(1000.0, 19000.0, 10)
+    th = np.linspace(-3.0, 3.0, 10)
+    cfg = AssemblyConfig(on_failure="drop", seed=3)
+    bad_ctx = sum(r["status"] == "dropped" for r in assemble_branch(rec, s, th, pool, cfg, np.random.default_rng(3), chooser=chooser).spines)
+    bad_uni = sum(r["status"] == "dropped" for r in assemble_branch(rec, s, th, pool, cfg, np.random.default_rng(3)).spines)
+    assert bad_ctx < bad_uni  # 0 vs 4 base_not_immersed of 10 (seed 3)

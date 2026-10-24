@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .selection import SpineChooser
 from .spines import PoolSpine, SpinePool
 from .trunk import DenseTrunk, densify, trunk_mesh
 
@@ -167,11 +168,14 @@ def _boxes_overlap(a, b) -> bool:
 
 
 def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Sequence[float], pool: SpinePool, cfg: AssemblyConfig,
-                    rng: Optional[np.random.Generator] = None) -> AssemblyResult:
+                    rng: Optional[np.random.Generator] = None, chooser: Optional[SpineChooser] = None) -> AssemblyResult:
+    """``chooser``: how the pool spine of a placement is drawn (default uniform; ``SpineChooser(pool, ContextSelector)``
+    matches the base size to the trunk radius at the placement)."""
     import manifold3d as m3d
     import trimesh
 
     rng = rng or np.random.default_rng(cfg.seed)
+    chooser = chooser or SpineChooser(pool)
     trunk = densify(trunk_record, cfg.trunk_step_nm)
     origin = trunk.gamma.mean(axis=0)
     trunk.gamma = trunk.gamma - origin  # work near 0, shift back on output
@@ -188,8 +192,9 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
         tries = cfg.max_tries if cfg.on_failure == "resample" else 1
         row: Dict[str, Any] = {"spine_index": i, "s": float(s_i), "theta": float(th_i)}
         reasons = []
+        r_here = float(trunk.surface_frame(np.array([float(s_i)]), np.array([float(th_i)]))["radius"][0])
         for attempt in range(tries):
-            sp = pool.spines[int(rng.integers(len(pool)))]
+            sp = pool.spines[chooser.choose(rng, r_here)]
             pose = place(sp, trunk, float(s_i), float(th_i), cfg)
             reason = pose["reason"]
             mf = None
@@ -205,7 +210,7 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
                         break
             if reason is None:
                 accepted.append((mf, box))
-                row.update(status="placed", spine_key=sp.key, attachment_method=sp.attachment_method, delta_nm=pose["delta_nm"], attempts=attempt + 1,
+                row.update(status="placed", spine_key=sp.key, attachment_method=sp.attachment_method, base_radius_nm=sp.base_radius_nm, delta_nm=pose["delta_nm"], attempts=attempt + 1,
                            radius_at_s=pose["radius_at_s"], penetration_fraction=pose.get("penetration_fraction", 0.0),
                            anchor_x=pose["anchor"][0] + origin[0], anchor_y=pose["anchor"][1] + origin[1], anchor_z=pose["anchor"][2] + origin[2])
                 break

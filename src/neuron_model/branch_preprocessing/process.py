@@ -20,7 +20,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -361,9 +361,20 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
         row["proximal_end_method"] = "unknown"
 
     vertices, faces, spine_mask = load_branch_surface(cfg, member_dirs, segments)
+    return branch_geometry(cfg, ctx, row, segments, spine_rows, polyline, vertices, faces, spine_mask, out_dir, limb, merged_id, list(group["prefix"]))
+
+
+def branch_geometry(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], row: Dict[str, Any], segments: List[Dict[str, Any]], spine_rows: List[Dict[str, Any]],
+                    polyline: np.ndarray, vertices: np.ndarray, faces: np.ndarray, spine_mask: np.ndarray, out_dir: Path, limb: int, merged_id: int,
+                    prefixes: Sequence[str] = ()) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """B2-B4 of one branch from dataset-independent inputs: the ordered raw ``polyline`` (nm), the branch mesh with the
+    vertices of real spines marked in ``spine_mask``, the spine ``segments`` (``status`` valid / invalid / unknown, ``info``
+    with ``origin_global`` = attachment centre and the areas). ``ctx["soma"].distance(limb, point)`` may return nan.
+    Shared by the Minnie65 / H01 inputs (``process_branch``) and LabID (``labid.process_cell``)."""
     shaft = vertices[~spine_mask]
     row["n_mesh_vertices"] = int(len(vertices))
     row["n_spine_vertices_removed"] = int(spine_mask.sum())
+    soma = ctx["soma"]
 
     # ---- B2: sections ------------------------------------------------------------------
     g = bg.resample_polyline(polyline, cfg.initial_step_nm)
@@ -473,7 +484,7 @@ def process_branch(cfg: BranchPreprocessingConfig, ctx: Dict[str, Any], group: p
     d_start = soma.distance(limb, gamma[0])
     row["soma_distance_start_nm"] = d_start if np.isfinite(d_start) else None
     row["soma_distance_source"] = "limb_graph" if np.isfinite(d_start) else None
-    table_mid = [ctx["soma_midpoints"].get(p) for p in group["prefix"]]
+    table_mid = [ctx["soma_midpoints"].get(p) for p in prefixes]
     table_mid = [v for v in table_mid if v is not None]
     row["soma_midpoint_table_nm"] = float(table_mid[0]) if table_mid else None
     if table_mid and np.isfinite(d_start):

@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 
 from src.neuron_model.branch_assembly import AssemblyConfig, SpinePool, assemble_branch, find_mesh_files, load_tp_set
+from src.neuron_model.branch_assembly.selection import ContextSelector, SpineChooser
 from src.neuron_model.spine_generation.experiment.config import load_config
 
 
@@ -49,6 +50,9 @@ def main() -> None:
     parser.add_argument("--n-branches", type=int, default=20, help="first N branches of the set (0 = all)")
     parser.add_argument("--max-pool", type=int, default=0, help="use at most this many spine meshes (0 = all)")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--context-spines", type=Path, default=None,
+                        help="branch_spines.parquet of the branch preprocessing (REAL spines): pick the pool spine whose base size matches the "
+                             "trunk radius at the placement (default: uniform random choice)")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args()
@@ -68,6 +72,14 @@ def main() -> None:
     if not len(pool):
         raise SystemExit("no usable spine mesh")
 
+    selector = None
+    if args.context_spines is not None:
+        selector = ContextSelector.fit(pd.read_parquet(args.context_spines))
+        n_base = int(np.isfinite([sp.base_radius_nm for sp in pool.spines]).sum())
+        print(f"[assembly] context selection: log base radius = {selector.a:.3f} + {selector.c:.3f} log(r / 300 nm) +- {selector.s:.3f} "
+              f"(real spines {selector.info['n']}, corr {selector.info['corr_log_r_log_b']:.2f}); pool spines with a base area {n_base} of {len(pool)}", flush=True)
+    chooser = SpineChooser(pool, selector)
+
     branches, trunks, placements = load_tp_set(args.tp_dir)
     n = len(trunks) if args.n_branches <= 0 else min(args.n_branches, len(trunks))
     out = args.out or args.tp_dir / f"assembly_{_dt.datetime.now():%Y-%m-%d_%H%M%S}"
@@ -82,7 +94,7 @@ def main() -> None:
         th = p["theta"].to_numpy(float) if p is not None else np.zeros(0)
         started = time.perf_counter()
         try:
-            res = assemble_branch(trunks[i], s, th, pool, cfg, rng)
+            res = assemble_branch(trunks[i], s, th, pool, cfg, rng, chooser=chooser)
         except Exception as exc:  # one broken branch must not stop the set
             brows.append({"branch_index": i, "status": "failed", "reason": repr(exc)[:300]})
             continue
@@ -102,7 +114,9 @@ def main() -> None:
     st.to_parquet(out / "assembly_spines.parquet", index=False)
     pd.DataFrame(pool.rejected or [], columns=["key", "reason"]).to_parquet(out / "spine_pool_rejected.parquet", index=False)
     info = {"tp_dir": str(args.tp_dir), "spines": str(args.spines), "n_branches": n, "pool_size": len(pool), "pool_rejected": len(pool.rejected),
-            "config": cfg.__dict__, "status_counts": bt["status"].value_counts().to_dict()}
+            "config": cfg.__dict__, "status_counts": bt["status"].value_counts().to_dict(),
+            "spine_selection": selector.to_dict() if selector is not None else "uniform",
+            "context_spines": str(args.context_spines) if args.context_spines else None}
     if len(st):
         info["spines_placed"] = int((st["status"] == "placed").sum())
         info["spines_dropped"] = int((st["status"] == "dropped").sum())

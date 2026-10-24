@@ -15,6 +15,8 @@ from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
 
+from .selection import base_radius
+
 
 @dataclass
 class PoolSpine:
@@ -25,6 +27,7 @@ class PoolSpine:
     height: float         # max y - center y
     base_mask: np.ndarray
     attachment_method: str
+    base_radius_nm: float = float("nan")  # sqrt(loop area / pi) of the found attachment region (context selection)
 
 
 @dataclass
@@ -66,7 +69,8 @@ class SpinePool:
             v = np.asarray(mesh.vertices, dtype=float)
             c = np.asarray(region.center, dtype=float)
             good.append(PoolSpine(key=str(key), vertices=v, faces=np.asarray(mesh.faces, dtype=np.int64), center=c,
-                                  height=float(v[:, 1].max() - c[1]), base_mask=v[:, 1] <= c[1] + base_band_nm, attachment_method=str(region.method)))
+                                  height=float(v[:, 1].max() - c[1]), base_mask=v[:, 1] <= c[1] + base_band_nm, attachment_method=str(region.method),
+                                  base_radius_nm=base_radius(getattr(region, "loop_area", None), getattr(region, "cap_area", None))))
         return cls(good, rejected)
 
     @classmethod

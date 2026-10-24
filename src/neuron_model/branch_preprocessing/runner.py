@@ -73,25 +73,37 @@ def build_payloads(cfg: BranchPreprocessingConfig, neurons: List[str]) -> List[D
 def run(cfg: BranchPreprocessingConfig, *, consolidate_after: bool = True) -> Dict[str, Any]:
     t0 = time.perf_counter()
     config_hash = cfg.config_hash()
-    members = load_members(cfg)
-    neurons = available_neurons(cfg, members)
+    from ..metadata import dataset_kind
+
+    labid = dataset_kind(cfg.dataset) == "labid"  # no merge mapping / skeletons / S tables: own inputs, same geometry
+    if labid:
+        from . import labid as labid_inputs
+
+        neurons = sorted(labid_inputs.discover(cfg)["neuron_id"].unique())
+        if cfg.limit_neurons:
+            neurons = neurons[: int(cfg.limit_neurons)]
+        worker = labid_inputs.process_cell
+    else:
+        members = load_members(cfg)
+        neurons = available_neurons(cfg, members)
+        worker = process_neuron
     todo = neurons if cfg.force else [n for n in neurons if not _is_done(cfg, n, config_hash)]
     print(f"[branches] {cfg.dataset}: {len(neurons)} neurons, {len(neurons) - len(todo)} done, {len(todo)} to process -> {cfg.out_root} (config {config_hash})", flush=True)
     summaries: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
     if todo:
-        payloads = build_payloads(cfg, todo)
+        payloads = labid_inputs.build_payloads(cfg, todo) if labid else build_payloads(cfg, todo)
         print(f"[branches] inputs loaded in {time.perf_counter() - t0:.1f}s", flush=True)
         from tqdm.auto import tqdm
 
         bar = tqdm(total=len(payloads), desc="neurons", unit="neuron")
         if cfg.workers <= 1:
             for payload in payloads:
-                summaries.append(_run_one(payload, failures))
+                summaries.append(_run_one(payload, failures, worker))
                 bar.update()
         else:
             with ProcessPoolExecutor(max_workers=int(cfg.workers)) as pool:
-                futures = {pool.submit(process_neuron, p): p["neuron_id"] for p in payloads}
+                futures = {pool.submit(worker, p): p["neuron_id"] for p in payloads}
                 for future in as_completed(futures):
                     try:
                         summaries.append(future.result())
@@ -111,9 +123,9 @@ def run(cfg: BranchPreprocessingConfig, *, consolidate_after: bool = True) -> Di
     return result
 
 
-def _run_one(payload: Dict[str, Any], failures: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _run_one(payload: Dict[str, Any], failures: List[Dict[str, Any]], worker=process_neuron) -> Optional[Dict[str, Any]]:
     try:
-        return process_neuron(payload)
+        return worker(payload)
     except Exception as exc:
         failures.append({"neuron_id": payload["neuron_id"], "error": repr(exc)})
         return None
