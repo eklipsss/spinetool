@@ -201,3 +201,18 @@ def test_context_chooser_prefers_narrow_bases_on_thin_trunks():
     bad_ctx = sum(r["status"] == "dropped" for r in assemble_branch(rec, s, th, pool, cfg, np.random.default_rng(3), chooser=chooser).spines)
     bad_uni = sum(r["status"] == "dropped" for r in assemble_branch(rec, s, th, pool, cfg, np.random.default_rng(3)).spines)
     assert bad_ctx < bad_uni  # 0 vs 4 base_not_immersed of 10 (seed 3)
+
+
+def test_component_report_names_the_detached_piece_and_nearest_spine():
+    from src.neuron_model.branch_assembly.assemble import component_report
+
+    main = trimesh.creation.icosphere(3, 500.0)
+    piece = trimesh.creation.icosphere(2, 60.0)
+    piece.apply_translation([2000.0, 0.0, 0.0])
+    mesh = trimesh.util.concatenate([main, piece])
+    rows = [{"spine_index": 0, "status": "placed", "spine_key": "a", "base_radius_nm": 100.0, "anchor_x": 0.0, "anchor_y": 0.0, "anchor_z": 500.0},
+            {"spine_index": 1, "status": "placed", "spine_key": "b", "base_radius_nm": 80.0, "anchor_x": 1950.0, "anchor_y": 10.0, "anchor_z": 0.0},
+            {"spine_index": 2, "status": "dropped"}]
+    rep = component_report(mesh, rows)
+    assert len(rep) == 1 and rep[0]["nearest_spine_index"] == 1 and rep[0]["nearest_spine_key"] == "b"
+    assert rep[0]["nearest_spine_distance_nm"] < 100.0 and rep[0]["n_faces"] < len(main.faces) and rep[0]["watertight"]

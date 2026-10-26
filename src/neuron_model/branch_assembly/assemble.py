@@ -163,6 +163,25 @@ def flip_needles(vertices: np.ndarray, faces: np.ndarray, area_eps: float = 1e-6
     return faces, flips
 
 
+def component_report(mesh, spine_rows: Sequence[Dict[str, Any]], max_components: int = 10) -> List[Dict[str, Any]]:
+    """Why a branch has several components: every component except the largest (faces), with its size and the placed
+    spine whose anchor is nearest to its centroid (global coordinates; ``spine_rows`` carry ``anchor_x/y/z``)."""
+    parts = sorted(mesh.split(only_watertight=False), key=lambda m: -len(m.faces))
+    anchors = [(r["spine_index"], r.get("spine_key"), r.get("base_radius_nm"), np.array([r["anchor_x"], r["anchor_y"], r["anchor_z"]], dtype=float))
+               for r in spine_rows if r.get("status") == "placed"]
+    out = []
+    for comp in parts[1:max_components + 1]:
+        c = np.asarray(comp.vertices).mean(axis=0)
+        row = {"n_faces": int(len(comp.faces)), "area_nm2": float(comp.area), "volume_nm3": float(comp.volume) if comp.is_watertight else None,
+               "watertight": bool(comp.is_watertight), "extent_nm": float(np.ptp(np.asarray(comp.vertices), axis=0).max())}
+        if anchors:
+            dist = [float(np.linalg.norm(c - a[3])) for a in anchors]
+            k = int(np.argmin(dist))
+            row.update(nearest_spine_index=int(anchors[k][0]), nearest_spine_key=anchors[k][1], nearest_spine_base_radius_nm=anchors[k][2], nearest_spine_distance_nm=dist[k])
+        out.append(row)
+    return out
+
+
 def _boxes_overlap(a, b) -> bool:
     return all(a[k] <= b[k + 3] and b[k] <= a[k + 3] for k in range(3))
 
@@ -265,6 +284,10 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
                                        ("non_positive_volume", branch["volume_nm3"] <= 0)) if bad]
     if problems:
         branch.update(status="invalid", reason=";".join(problems))
+    if branch["n_components"] > 1:
+        import json
+
+        branch["components_json"] = json.dumps(component_report(mesh, spine_rows), default=float)
     return AssemblyResult(verts, faces, branch, spine_rows)
 
 

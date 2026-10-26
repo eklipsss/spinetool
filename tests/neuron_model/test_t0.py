@@ -309,3 +309,18 @@ def test_t0_branch_radius_residual_reproduces_radius_cv_by_thickness(tmp_path):
     b = loaded.sample(reqs[:3], np.random.default_rng(2))
     assert all(np.allclose(x["log_radius"], y["log_radius"]) for x, y in zip(a, b))
     assert thin.sum() > 20 and thick.sum() > 20
+
+
+def test_semivariogram_separates_fast_and_slow_components():
+    from src.neuron_model.trunk_generation.variogram import by_radius_class, semivariogram
+
+    rng = np.random.default_rng(3)
+    step = 250.0
+    n = 400
+    slow = [np.cumsum(rng.normal(0, 0.002, n)) for _ in range(40)]  # random walk: gamma grows with the lag
+    fast = [rng.normal(0, 0.1, n) for _ in range(40)]               # white noise: gamma flat = sigma^2
+    g_slow, g_fast = semivariogram(slow, [step] * 40), semivariogram(fast, [step] * 40)
+    assert g_slow[8000.0] > 10 * g_slow[250.0]
+    assert g_fast[250.0] == pytest.approx(0.01, rel=0.15) and g_fast[8000.0] == pytest.approx(0.01, rel=0.15)
+    cls = by_radius_class(fast, [step] * 40, [250.0] * 20 + [400.0] * 20)
+    assert set(cls) == {"r < 300 nm", "300-500 nm"} and cls["r < 300 nm"]["n"] == 20
