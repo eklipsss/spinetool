@@ -16,6 +16,8 @@ Uses the TRAIN split by default (the test split stays untouched for the evaluati
 
 from __future__ import annotations
 
+import torch  # noqa: F401  # first: on Windows torch imported after pandas/pyarrow/scipy fails with WinError 127 (shm.dll)
+
 import argparse
 import sys
 from pathlib import Path
