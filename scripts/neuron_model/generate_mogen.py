@@ -10,6 +10,12 @@ From a training run (EMA weights of best_val_loss by default):
 
     python scripts/neuron_model/generate_mogen.py --run runs/training/neuron-model/<experiment_id> --n-samples 1000 --seed 1
 
+From a conditional run (condition_encoder.json in the run; blocks not given are "unknown"; --guidance > 1 strengthens
+the condition; output tag cond_<...>_g<w>_seed_<s>, same noise as the unconditional tag of the same seed):
+
+    python scripts/neuron_model/generate_mogen.py --run <conditional run> --checkpoint latest --n-samples 200 --seed 1 \
+        --condition compartment=apical,cell_type_binary=excitatory --guidance 1.0
+
 Outputs go to ``<run>/meshes/<tag>/`` (or ``runs/analysis/neuron-model/<id>/meshes`` for --weights).
 """
 
@@ -58,6 +64,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--steps", type=int, help="override flow.inference_steps")
     parser.add_argument("--no-mesh", action="store_true", help="only point clouds")
+    parser.add_argument("--condition", default=None, help="block=value,... (conditional runs only)")
+    parser.add_argument("--guidance", type=float, default=1.0, help="classifier-free guidance weight (1 = none)")
+    parser.add_argument("--tag", default=None, help="output folder name (default seed_<s>, or cond_..._seed_<s>)")
     args = parser.parse_args()
 
     if args.run:
@@ -77,6 +86,17 @@ def main() -> None:
         run = create_run(cfg, name="mogen-zero-shot", runs_root=REPO_ROOT / "runs" / "analysis" / "neuron-model", extra_info={"weights": str(args.weights)})
         out_root = run.meshes
 
+    cond_vec, condition, encoder = None, {}, None
+    if args.condition is not None or args.guidance != 1.0:
+        enc_path = (args.run / "condition_encoder.json") if args.run else None
+        if enc_path is None or not enc_path.exists():
+            parser.error("--condition / --guidance need a conditional training run (condition_encoder.json in --run)")
+        from src.neuron_model.spine_generation.conditioning import ConditionEncoder
+
+        encoder = ConditionEncoder.load(enc_path)
+        condition = encoder.parse(args.condition or "")
+        cond_vec = encoder.encode(condition)
+
     device = get_device(cfg.get("device", "auto"))
     model.to(device)
     print(f"output {out_root}; device {device}", flush=True)
@@ -95,7 +115,7 @@ def main() -> None:
         "n_points": int(cfg["data"]["n_points"]),
         "generation_seed": args.seed,
         "checkpoint_id": checkpoint_id,
-        "cond": "zeros (unconditional)",
+        "cond": "zeros (unconditional)" if cond_vec is None else {"condition": condition, "vector": cond_vec.tolist(), "guidance": args.guidance},
     }
     points = generate_point_clouds(
         model,
@@ -107,13 +127,21 @@ def main() -> None:
         seed=args.seed,
         device=device,
         batch_size=args.batch_size,
+        cond=cond_vec,
+        guidance=args.guidance,
         log=log,
     )
     rec_cfg = load_config(resolve_path(cfg["reconstruction"]["poisson_config"]))
     poisson = PoissonParams.from_mapping(rec_cfg["poisson"])
     k_normal = int(rec_cfg["normals"]["k_normal"])
     writer = SampleWriter(out_root)
-    tag = f"seed_{args.seed}"
+    if args.tag:
+        tag = args.tag
+    elif cond_vec is not None:
+        label = "_".join(f"{k}-{v}" for k, v in sorted(condition.items())) or "null"
+        tag = f"cond_{label}_g{args.guidance:g}_seed_{args.seed}"
+    else:
+        tag = f"seed_{args.seed}"
     raw_reports, post_reports = [], []
     for i, cloud in enumerate(points):
         reconstruction = None if args.no_mesh else pointcloud_to_mesh(cloud, k_normal=k_normal, poisson=poisson, postprocess_cfg=rec_cfg["postprocess"])

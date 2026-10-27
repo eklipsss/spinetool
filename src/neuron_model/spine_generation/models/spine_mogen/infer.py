@@ -32,12 +32,16 @@ def generate_point_clouds(
     device,
     batch_size: int = 8,
     cond=None,
+    guidance: float = 1.0,
     log=None,
 ) -> np.ndarray:
     """``[n_samples, n_points, 3]`` in PHYSICAL units (model output / coord_scale).
 
     Noise for sample ``i`` depends only on ``(seed, i)`` - the same seed gives
-    the same samples regardless of ``batch_size``.
+    the same samples regardless of ``batch_size`` (and of the condition: the same
+    noise under two conditions = the swap test of the conditional evaluation).
+    ``cond``: one condition vector [cond_dim] for every sample (conditioning.py), or None;
+    ``guidance``: classifier-free guidance weight (1 = plain conditional sampling).
     """
     import torch
 
@@ -46,7 +50,11 @@ def generate_point_clouds(
     for start in range(0, n_samples, batch_size):
         idx = range(start, min(start + batch_size, n_samples))
         noise = torch.stack([torch.randn(n_points, 3, generator=torch.Generator().manual_seed(seed * 1_000_003 + i)) for i in idx]).to(device)
-        points = sample_midpoint(model, noise, n_steps=n_steps, schedule=schedule, cond=cond)
+        batch_cond = None
+        if cond is not None:
+            vec = torch.as_tensor(np.asarray(cond, dtype=np.float32)).reshape(1, -1).to(device)
+            batch_cond = vec.expand(len(idx), -1).contiguous()
+        points = sample_midpoint(model, noise, n_steps=n_steps, schedule=schedule, cond=batch_cond, guidance=guidance)
         out.append((points / coord_scale).cpu().numpy())
         if log is not None:
             log(f"point clouds {idx.stop}/{n_samples}")

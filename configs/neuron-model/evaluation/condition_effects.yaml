@@ -1,0 +1,27 @@
+# Step 0 of the conditional spine generator (s-module-conditional-design.md, section 6): which condition blocks change
+# the real spine morphology more than the variation between neurons. CPU, minutes.
+#   python scripts/neuron_model/condition_effects.py "data.manifests=['<cache>/manifest.parquet']" data.splits=<splits> ...
+seed: 20260929
+runs_root: runs/analysis/neuron-model
+name: condition-effects
+
+data:
+  manifests: []
+  path_mode: relative
+  splits: null
+  drop_unassigned: false
+  split: train              # the test split stays untouched for the evaluation of the generator
+
+real:
+  morphometrics_table: null # stage-8 morphometrics.parquet (one read instead of a JSON per spine)
+  io_threads: 32
+
+condition:
+  metadata_root: datasets   # cell types / compartments of the repository (fixed compartment lookup)
+  exclude_compartments: [axon_like]
+
+effects:
+  min_neurons: 5            # a value needs at least this many neurons to be testable
+  alpha: 0.05               # Bonferroni over the pairs of a block
+  n_permutations: 200       # labels permuted BETWEEN NEURONS
+  max_per_neuron: 200       # spines per neuron in the statistic (dense neurons do not dominate)

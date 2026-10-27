@@ -4,6 +4,10 @@ Both use the same architecture, split, point count, coordinate scale, solver
 and evaluation (spec: "Обязательные условия сравнения pretrained и scratch");
 only ``model.init`` differs (``pretrained`` vs ``random``). Configs:
 ``configs/neuron-model/mogen/{pretrained_finetune,scratch_pilot,scratch_final}.yaml``.
+
+Conditional fine-tuning (``conditional_finetune.yaml``, s-module-conditional-design.md): ``model.init: run`` starts
+from the EMA weights of a finished run (MoGen A); the batch carries ``cond`` (conditioning.py) and the loss applies
+block / whole-vector condition dropout; validation reports the loss with the condition and with the null one.
 """
 
 from __future__ import annotations
@@ -34,6 +38,18 @@ def build_model(model_cfg: Mapping[str, Any]) -> PointInfinity:
             if mismatch:
                 raise ValueError(f"Pretrained checkpoint differs from the configured architecture: {mismatch}")
         return model
+    if init == "run":
+        import json
+
+        from ...experiment.checkpoint import CheckpointManager
+        from ...experiment.run import open_run
+
+        run = open_run(resolve_path(model_cfg["init_run"]))
+        model = PointInfinity(PointInfinityConfig(**json.loads((run.root / "model_config.json").read_text(encoding="utf-8"))))
+        payload = CheckpointManager(run.checkpoints).load(model_cfg.get("init_checkpoint", "latest"), restore_rng=False)
+        state = payload["state"]
+        model.load_state_dict(state["ema"]["model"] if "ema" in state else state["model"])  # EMA weights = what generation used
+        return model
     if init == "random":
         architecture = dict(model_cfg["architecture"])
         if architecture.get("cond_dim") is None:
@@ -42,7 +58,7 @@ def build_model(model_cfg: Mapping[str, Any]) -> PointInfinity:
                 "(printed by export_mogen_weights.py) so scratch and fine-tuned models share one architecture"
             )
         return PointInfinity(PointInfinityConfig(**architecture))
-    raise ValueError(f"model.init must be 'pretrained' or 'random', got {init!r}")
+    raise ValueError(f"model.init must be 'pretrained', 'run' or 'random', got {init!r}")
 
 
 def make_optimizer(model, opt_cfg: Mapping[str, Any]):
@@ -63,22 +79,39 @@ def make_optimizer(model, opt_cfg: Mapping[str, Any]):
     raise ValueError(f"Unknown optimizer {name!r}")
 
 
-def point_cloud_datasets(index: SpineIndex, data_cfg: Mapping[str, Any]) -> Tuple[PointCloudDataset, Optional[PointCloudDataset]]:
-    """Train (random variant + physical jitter) and val (variant 1, no jitter) datasets."""
+def point_cloud_datasets(index: SpineIndex, data_cfg: Mapping[str, Any], cond_by_key: Optional[Mapping[str, np.ndarray]] = None
+                         ) -> Tuple[PointCloudDataset, Optional[PointCloudDataset]]:
+    """Train (random variant + physical jitter) and val (variant 1, no jitter) datasets. ``cond_by_key``: condition
+    vector per ``spine_key`` (conditional training; spines without one are dropped)."""
+    if cond_by_key is not None:
+        index = index.subset([k for k in index.frame["spine_key"] if k in cond_by_key])
     train_index = index.subset(index.frame.loc[index.frame["split"] == "train", "spine_key"])
     val_index = index.subset(index.frame.loc[index.frame["split"] == "val", "spine_key"])
     common = dict(n_points=int(data_cfg["n_points"]), coord_scale=float(data_cfg["coord_scale"]), use_normals=False, variants=tuple(int(v) for v in data_cfg.get("variants", (1, 2, 3, 4))))
-    train = PointCloudDataset(train_index, random_variant=True, jitter_std=float(data_cfg.get("jitter_std", 0.0)), **common)
-    val = PointCloudDataset(val_index, random_variant=False, jitter_std=0.0, **common) if len(val_index) else None
+
+    def cond_of(idx):
+        return None if cond_by_key is None else np.stack([cond_by_key[k] for k in idx.frame["spine_key"]]) if len(idx) else None
+
+    train = PointCloudDataset(train_index, random_variant=True, jitter_std=float(data_cfg.get("jitter_std", 0.0)), cond=cond_of(train_index), **common)
+    val = PointCloudDataset(val_index, random_variant=False, jitter_std=0.0, cond=cond_of(val_index), **common) if len(val_index) else None
     return train, val
 
 
-def make_loss_fn(flow_cfg: Mapping[str, Any], device):
+def make_loss_fn(flow_cfg: Mapping[str, Any], device, *, encoder=None, condition_cfg: Optional[Mapping[str, Any]] = None):
+    """Flow Matching loss; with ``cond`` in the batch the condition goes through block dropout (``encoder.drop_blocks``,
+    probabilities ``condition.p_block`` / ``condition.p_all``) before the model."""
     schedule = flow_cfg.get("time_schedule", "mogen_cosine")
+    condition_cfg = condition_cfg or {}
+    p_block, p_all = float(condition_cfg.get("p_block", 0.15)), float(condition_cfg.get("p_all", 0.10))
 
     def loss_fn(model, batch, step: int) -> Tuple[Any, Dict[str, float]]:
         x1 = batch["points"].to(device, non_blocking=True)
-        loss = flow_matching_loss(model, x1, schedule=schedule)
+        cond = batch.get("cond")
+        if cond is not None:
+            cond = cond.to(device, non_blocking=True)
+            if encoder is not None:
+                cond = encoder.drop_blocks(cond, p_block=p_block, p_all=p_all)
+        loss = flow_matching_loss(model, x1, schedule=schedule, cond=cond)
         return loss, {"loss": float(loss.detach())}
 
     return loss_fn
@@ -94,16 +127,23 @@ def make_validate_fn(val_dataset, flow_cfg: Mapping[str, Any], device, *, batch_
         if val_dataset is None:
             return {}
         loader = make_loader(val_dataset, batch_size=batch_size, shuffle=False, seed=seed)
-        total, n = 0.0, 0
+        total, total_null, n = 0.0, 0.0, 0
         for i, batch in enumerate(loader):
             if max_batches is not None and i >= max_batches:
                 break
             x1 = batch["points"].to(device)
+            cond = batch.get("cond")
             generator = torch.Generator().manual_seed(seed + i)
-            loss = flow_matching_loss(model, x1, schedule=schedule, generator=generator)
+            loss = flow_matching_loss(model, x1, schedule=schedule, cond=None if cond is None else cond.to(device), generator=generator)
             total += float(loss) * x1.shape[0]
+            if cond is not None:  # same noise and times, null condition: the gap = what the condition explains
+                generator = torch.Generator().manual_seed(seed + i)
+                total_null += float(flow_matching_loss(model, x1, schedule=schedule, cond=torch.zeros_like(cond).to(device), generator=generator)) * x1.shape[0]
             n += x1.shape[0]
-        return {"val_loss": total / max(n, 1)}
+        out = {"val_loss": total / max(n, 1)}
+        if total_null:
+            out["val_loss_null_cond"] = total_null / max(n, 1)
+        return out
 
     return validate
 

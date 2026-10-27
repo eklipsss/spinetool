@@ -41,6 +41,7 @@ class PointCloudDataset:
         jitter_std: Gaussian jitter std **in physical units** (0 disables).
         coord_scale: physical -> model units.
         use_normals: also return normals.
+        cond: optional [N, cond_dim] condition vectors aligned with ``index`` (conditioning.py) -> ``item["cond"]``.
     """
 
     def __init__(
@@ -53,8 +54,12 @@ class PointCloudDataset:
         jitter_std: float = 0.0,
         coord_scale: float = 1.0,
         use_normals: bool = True,
+        cond: Optional[np.ndarray] = None,
     ) -> None:
         self.index = index
+        if cond is not None and len(cond) != len(index):
+            raise ValueError(f"cond has {len(cond)} rows, the index {len(index)}")
+        self.cond = None if cond is None else np.asarray(cond, dtype=np.float32)
         self.n_points = int(n_points)
         self.variants = tuple(int(v) for v in variants)
         self.random_variant = random_variant
@@ -91,6 +96,8 @@ class PointCloudDataset:
         }
         if self.use_normals:
             item["normals"] = torch.from_numpy(np.asarray(data["normals"], dtype=np.float32))
+        if self.cond is not None:
+            item["cond"] = torch.from_numpy(self.cond[i])
         return item
 
 

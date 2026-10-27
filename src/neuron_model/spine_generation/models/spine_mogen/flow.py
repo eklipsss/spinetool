@@ -5,7 +5,9 @@
 - training times: ``t ~ U(0, 1)`` passed through the schedule
   (``mogen_cosine`` = ``cosine_2.0`` from the ``mouse_mixed`` config);
 - sampling: explicit midpoint ODE solver from t=0 to t=1 over the schedule
-  applied to ``linspace(0, 1, n_steps + 1)`` (``generate_step_midpoint``).
+  applied to ``linspace(0, 1, n_steps + 1)`` (``generate_step_midpoint``);
+- classifier-free guidance (conditional model trained with condition dropout, conditioning.py):
+  ``v = v(x, t, 0) + w (v(x, t, c) - v(x, t, 0))``; ``w = 1`` is plain conditional sampling.
 """
 
 from __future__ import annotations
@@ -76,14 +78,27 @@ def sample_midpoint(
     n_steps: int = 100,
     schedule: str = "mogen_cosine",
     cond: Optional[torch.Tensor] = None,
+    guidance: float = 1.0,
     return_history: bool = False,
 ):
-    """Integrate ``dx/dt = v(x, t)`` from t=0 (noise ``x_0``) to t=1 with the explicit midpoint rule."""
+    """Integrate ``dx/dt = v(x, t)`` from t=0 (noise ``x_0``) to t=1 with the explicit midpoint rule.
+
+    ``guidance`` != 1 (with ``cond``): classifier-free guidance against the null condition (zeros); the conditional
+    and the null velocity are evaluated in one batch of size 2B."""
     timesteps = t_schedule(torch.linspace(0.0, 1.0, n_steps + 1, device=x_0.device, dtype=x_0.dtype), schedule)
     b = x_0.shape[0]
     x = x_0
     history = [x] if return_history else None
-    call = (lambda y, tt: model(y, tt, cond)) if cond is not None else (lambda y, tt: model(y, tt))
+    if cond is not None and float(guidance) != 1.0:
+        both = torch.cat([cond, torch.zeros_like(cond)], dim=0)
+        w = float(guidance)
+
+        def call(y, tt):
+            v = model(torch.cat([y, y], dim=0), torch.cat([tt, tt], dim=0), both)
+            v_cond, v_null = v[: y.shape[0]], v[y.shape[0]:]
+            return v_null + w * (v_cond - v_null)
+    else:
+        call = (lambda y, tt: model(y, tt, cond)) if cond is not None else (lambda y, tt: model(y, tt))
     for i in range(n_steps):
         t0, t1 = timesteps[i], timesteps[i + 1]
         dt = t1 - t0

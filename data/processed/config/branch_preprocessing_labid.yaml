@@ -1,0 +1,97 @@
+# LabID copy of branch_preprocessing.yaml (2026-10-28). ONLY the section-fitting window differs (slab 300, cluster eps 400 nm;
+# Minnie65: 150 / 150), everything else is the Minnie65 value. Kept as a separate file: these two values enter the config hash.
+#
+# Why: with the Minnie65 values 17 % of the sections of LabID branches could not be fitted (7 test branches: 85 sections, 0-2 with the
+# wider window) and the fitted radius was ~30 % too small (median 560 against 820 nm; the radius of the shaft mesh from its volume,
+# sqrt(V / (pi L)), is 650 nm and from its area, A / (2 pi L), 1000 nm: the wider window lies between them for every test branch, the
+# Minnie65 window below both). The edge of the LabID meshes (median 90-130 nm, 90th percentile 190-330 nm) is longer than the clustering
+# distance of 150 nm, so the ring of vertices around the axis fell apart into pieces. Windows of 250/250 ... 400/500 nm agree (radius 812-829 nm).
+# NOT tuned yet (decide after the voxel size / z scale of LabID is known: a z scale changes the sections): invalid_section_fraction_max,
+# kink_floor_nm, end_distance_factor, position thresholds; 'outside_mesh' is 33-36 % of the sections even with the wider window.
+# Usage: run_branch_preprocessing.py --dataset labid --config data/processed/config/branch_preprocessing_labid.yaml ...
+# Branch preprocessing for modules T and P (docs/neuron-model/tp-branch-preprocessing.md).
+# All lengths in nanometres. Paths/parallelism are CLI flags (scripts/neuron_model/run_branch_preprocessing.py);
+# only the algorithm parameters below enter the config hash (a neuron is redone when they change).
+#
+# Windows (full Minnie65): --raw-data-root O:\Datasets --metadata-root <repo>\datasets --output-root C:\... --workers 8
+#   input ~220 MB per neuron (branch meshes + spine meshes + limb skeletons) -> ~160 GB from the NAS,
+#   i.e. the run is bound by the NAS read throughput (~4 MB/s measured): plan for one night.
+#   Output (npz + parquet) is small (a few GB): put it on the LOCAL disk (--output-root C:/...), not on the NAS
+#   (~2 files per merged branch, ~110 000 small files; the fit scripts read them back). mac: a few branches, workers 1.
+
+shaft:
+  vertex_decimals: 3               # spine vertices matched by coordinates rounded to 1e-3 nm
+
+centerline:
+  initial_step_nm: 500.0           # resampling of the raw skeleton (orders the sections only)
+  tangent_half_window_nm: 1500.0   # tangent from points +-1.5 um away (raw skeleton wobbles with the membrane)
+  slab_half_thickness_nm: 300.0    # LabID (2026-10-28): 150 for Minnie65. See the header
+  max_section_radius_nm: 1200.0    # verified on branches with r ~ 270 nm
+  adaptive_max_radius_factor: 4.5  # 2nd pass with max(1200, 4.5 r_med) for thick branches (NOT verified yet; 0 = off)
+  cluster_eps_nm: 400.0            # LabID (2026-10-28): 150 for Minnie65. See the header
+  robust_k: 0.35
+  fit_ellipse: true                # ellipse per section + a(s), b(s), angle(s) at the nodes (audit 2026-10-20: the round tube is 0.67 r off)
+  min_section_points: 10
+  large_radius_factor: 1.5
+  kink_factor: 0.5
+  kink_floor_nm: 150.0             # the deviation of a centre from its neighbours' midpoint is ~70-90 nm (median) at ANY radius: a limit
+                                   # 0.5 r alone flagged 65-70 % of the sections of branches with r < 200 nm (none usable). With 150 nm:
+                                   # 14-19 % in every class. NOT only measurement noise: the independent CGAL skeleton shows the same
+                                   # sub-micron wiggles of thin dendrites (scripts/neuron_model/compare_centerline_cgal.py, CLAUDE.md).
+  end_distance_factor: 2.0         # sections closer than 2 r_med to an end are unreliable (branching region)
+  outside_mesh_check: true
+  centerline_smoothing_nm: 1000.0  # smoothing-spline kernel width (lam = h^4 / spacing). GCV picks lam ~ 0 here
+                                   # (interpolates the fitting noise). On 2 real branches: h=1000 -> RMS to the
+                                   # centres 0.5-0.6 r, twist <= 1.2e-6/nm, round trip 0.1-0.2 um; 2000 -> ~1 r off.
+  # ADAPTIVE width (2026-10-20): h = clip(factor * r_med, min, centerline_smoothing_nm). Thin dendrites (r ~ 120 nm) wind on a
+  # sub-micron scale comparable to r (seen by our sections AND by the CGAL skeleton): with h = 1000 nm the line was inside the
+  # mesh at ~28 % of the points, with h = 250 nm at ~77 % (scripts/neuron_model/study_centerline_smoothing.py, 10 local thin
+  # branches). Chosen on 10 neurons x 120 branches (Windows, 2026-10-20), medians of 'line inside the mesh' / 'round-tube error / r':
+  #   r < 150 nm:  h 1000 -> 0.32 / 0.48,  k 2 -> 0.84 / 0.28;   150-250 nm: 0.58 / 0.42 -> 0.91 / 0.29;   >= 250 nm: 0.96 / 0.26 -> 1.00 / 0.21
+  # (k 3 / k 4 are worse for thin and middle branches). 0 = the fixed width above.
+  centerline_smoothing_factor: 2.0
+  centerline_smoothing_min_nm: 250.0
+  radius_smoothing_nm: 1000.0
+  spline_rms_factor: 0.75          # QC: RMS distance of the smoothed line to the reliable centres <= max(0.75 r_med, floor)
+  spline_rms_floor_nm: 200.0       # the deviation of the smoothed line from the centres (~70-140 nm) does not scale with r: with 0.75 r alone
+                                   # 56 of 94 branches of the pilot neuron failed (13 with 200). CAUTION: on thin branches (r ~ 120 nm) a line smoothed over
+                                   # 1 um leaves the tube most of the time (see CLAUDE.md, CGAL comparison): this limit admits them
+  min_reliable_sections: 5
+  long_gap_nm: 3000.0
+
+grid_and_frame:
+  node_step_nm: 500.0              # M = ceil(L / step) + 1 nodes, exact length; the maximum when adaptive
+  node_step_per_smoothing: 0.5     # step = clip(0.5 h, node_step_min_nm, node_step_nm): the nodes must resolve what the line keeps
+  node_step_min_nm: 250.0          # (thin branches: 250 nm, thick: 500 nm); 0 = the fixed step above
+  max_nodes: 512                   # T representation M_MAX: longer branches get a proportionally larger step
+  straight_fraction: 0.02          # bend reference unless the max deviation from the chord < 2 % of L
+  twist_tolerance_per_nm: 1.0e-5   # numerical twist of the discrete RMF; ~1e-6/nm at h = 1000 nm
+  twist_relative_max: 0.1          # limit max(tolerance, 0.1 kappa_max): the discretisation twist is ~0.05 kappa^2 step, with the adaptive
+                                   # smoothing thin branches reach kappa ~2e-3 /nm -> twist ~4e-5 /nm (301 of 1779 ok branches failed the absolute limit)
+
+joining_and_soma:
+  join_distance_nm: 500.0
+  soma_mismatch_fraction: 0.2      # cross-check against merged_branches.csv soma_midpoint_um (Minnie65)
+
+spines:
+  end_clamp_factor: 0.5            # projection beyond an end by > 0.5 r -> projects_to_end (not counted in N)
+  # d = |v_perp| - r(s) of the attachment centre; d < -inside_factor r or d > max(factor r, floor) -> position_outlier
+  # (counted in N, no position). Asymmetric: the centre lies systematically OUTSIDE the surface (the spine cut crosses the
+  # neck above the shaft). 10 neurons (analyze_spine_positions.py), r >= 200 nm: d median +137 nm = +0.44 r, 90 % +1.29 r;
+  # the ellipse does not change it. Spines without position: |d| > 0.75 r 25 %; this rule 7 % (r >= 200 nm 6 %).
+  # Eligibility thresholds (not in the hash): reapply_eligibility.py re-applies them to the stored d.
+  position_outlier_factor: 2.0
+  position_outlier_floor_nm: 400.0
+  position_inside_factor: 0.5
+
+eligibility:                       # initial values, to be refined by the audit
+  length_min_t_nm: 5000.0
+  length_max_t_nm: 255500.0
+  length_min_p_nm: 2000.0
+  invalid_section_fraction_max: 0.4   # pilot neuron, T-eligible of 94 ok branches: 0.2 -> 32, 0.3 -> 55, 0.4 -> 63, 0.5 -> 65 (the gain flattens)
+  radius_min_nm: 80.0
+  radius_max_nm: 1500.0
+  trim_max_nm: 2000.0
+  unknown_fraction_max: 0.1
+  centerline_inside_min: 0.7       # QC: share of the node polyline inside the mesh. 10 neurons: T-eligible 984 (0.6) / 967 (0.7) / 886 (0.8)
+  position_fraction_min: 0.9

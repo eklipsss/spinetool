@@ -1,0 +1,29 @@
+# Conditional MoGen A (docs/neuron-model/s-module-conditional-design.md): continue from the MoGen A run with a condition
+# vector through the Dense_0 input (cond_dim 22). Data, scale, solver: as A (_common.yaml).
+#   python scripts/neuron_model/train_mogen.py --config configs/neuron-model/mogen/conditional_finetune.yaml \
+#       "data.manifests=['<cache>/manifest.parquet']" data.path_mode=absolute data.splits=<splits> data.drop_unassigned=true \
+#       condition.effects_report=runs/analysis/neuron-model/<id>_condition-effects/condition_effects.json
+defaults: [_common.yaml]
+name: mogen-conditional
+model:
+  init: run                          # EMA weights of a finished run
+  init_run: runs/training/neuron-model/2026-10-20_213103_mogen-ft-dev   # MoGen A
+  init_checkpoint: latest
+optimizer:
+  name: adamw
+  lr: 1.0e-5                         # as the fine-tuning of A
+  weight_decay: 0.0
+train:
+  max_steps: 30000                   # stop by the conditional checks (design section 6), not by the loss plateau
+  tracked_metrics: {val_loss: min}
+condition:
+  enabled: true
+  # which blocks: an explicit list (blocks: [cell_type_binary, compartment]) or the step-0 report
+  # (scripts/neuron_model/condition_effects.py): mode auto = only the blocks with a real difference, all = every block
+  blocks: null
+  effects_report: null
+  mode: auto
+  p_block: 0.15                      # each block zeroed with this probability (partial conditions)
+  p_all: 0.10                        # the whole vector zeroed (unconditional mode, classifier-free guidance)
+  metadata_root: datasets            # cell types / compartments by the FIXED lookup (not the stale manifest columns)
+  exclude_compartments: [axon_like]

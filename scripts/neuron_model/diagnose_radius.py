@@ -8,6 +8,9 @@ Windows (CPU, a minute; the same data arguments as fit_t0.py):
 
 Prints, per radius class, sqrt(2 gamma(h)) = the typical relative change of the radius over a lag h (real | generated)
 and the ratio generated / real: a ratio << 1 at short lags = a missing fast component, at long lags = a missing slow one.
+``--feature kappa1`` does the same for the bending (kappa1, 1/nm; sqrt(2 gamma) is then a typical change of the bending
+between two nodes of the lag): the full run (2026-10-27) showed the same pattern as for the radius - generated bending too
+small (rms 1.7e-4 against 2.3e-4 /nm) and too smooth (autocorrelation at 1 um 0.52 against 0.34).
 """
 
 from __future__ import annotations
@@ -41,6 +44,8 @@ def main() -> None:
     parser.add_argument("--t0-run", type=Path, required=True)
     parser.add_argument("--t0-model", default=None, help="parabola / gam (default: the one chosen in report.json)")
     parser.add_argument("--split", default="train", choices=["train", "val"])
+    parser.add_argument("--feature", default="log_radius", choices=["log_radius", "kappa1"])
+    parser.add_argument("--max-branches", type=int, default=6000, help="random subsample of the branches (the generation of every request takes a while)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args()
@@ -53,13 +58,15 @@ def main() -> None:
     run = args.t0_run if args.t0_run.is_absolute() else REPO_ROOT / args.t0_run
     name = args.t0_model or json.loads((run / "report.json").read_text(encoding="utf-8"))["chosen"]
     model = T0Model.load(run / f"t0_{name}.json")
+    if len(sel) > args.max_branches:
+        sel = sel.sample(args.max_branches, random_state=args.seed).reset_index(drop=True)
     branches = t0_training_branches(sel, pack, model.encoder)
     requests = [dict(_cond(r), length_nm=b.length, step_nm=b.step) for r, b in zip(sel.to_dict("records"), branches)]
     gen = model.sample(requests, np.random.default_rng(args.seed))
     radii = [float(np.median(np.exp(b.log_radius))) for b in branches]
-    real = by_radius_class([b.log_radius for b in branches], [b.step for b in branches], radii)
-    fake = by_radius_class([g["log_radius"] for g in gen], [g["step"] for g in gen], radii)  # classes by the REAL median radius of the request
-    print(f"[radius] T0 {run.name}/{name}, {len(branches)} {args.split} branches; sqrt(2 gamma(h)) = typical relative radius change over the lag h")
+    real = by_radius_class([getattr(b, args.feature) for b in branches], [b.step for b in branches], radii)
+    fake = by_radius_class([g[args.feature] for g in gen], [g["step"] for g in gen], radii)  # classes by the REAL median radius of the request
+    print(f"[{args.feature}] T0 {run.name}/{name}, {len(branches)} {args.split} branches; sqrt(2 gamma(h)) = typical change of {args.feature} over the lag h")
     for cls in real:
         print(f"\n{cls} (n = {real[cls]['n']})")
         print("  lag, um      real   generated   generated/real")
