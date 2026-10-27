@@ -83,7 +83,7 @@ def main() -> None:
     if result["report"].get("radius_residual"):
         q = result["report"]["radius_residual"]
         if q.get("kind") == "multiscale":
-            comps = ", ".join(f"sd {sd:.3f} / memory {ln / 1000.0:.3g} um" for sd, ln in zip(q["sd"], q["length_nm"]))
+            comps = ", ".join(f"{k} sd {sd:.3f} / scale {ln / 1000.0:.3g} um" for k, sd, ln in zip(q.get("kernels", ["exp"] * len(q["sd"])), q["sd"], q["length_nm"]))
             vf = q["info"].get("variogram_fit", {})
             print(f"[t0] radius residual (multiscale, r = 300 nm, L = 20 um): components {comps}; white noise sd {q['nugget_sd']:.3f}; "
                   f"amplitude x exp({q['alpha']:.2f}) x r^{q['beta_r']:.2f} x L^{q['beta_l']:.2f}, spread between branches x/: {math.exp(q['tau']):.2f}; "

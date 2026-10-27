@@ -64,8 +64,18 @@ def main() -> None:
     requests = [dict(_cond(r), length_nm=b.length, step_nm=b.step) for r, b in zip(sel.to_dict("records"), branches)]
     gen = model.sample(requests, np.random.default_rng(args.seed))
     radii = [float(np.median(np.exp(b.log_radius))) for b in branches]
-    real = by_radius_class([getattr(b, args.feature) for b in branches], [b.step for b in branches], radii)
-    fake = by_radius_class([g[args.feature] for g in gen], [g["step"] for g in gen], radii)  # classes by the REAL median radius of the request
+    # each side is classified by ITS OWN median radius: a generated branch has its own radius (drawn from the conditions), not
+    # the radius of the real branch whose request it answers - classing both by the real radius compared a typical generated
+    # branch with a thin or a thick real one (that artefact made the thick classes look 'too bendy' and the thin ones 'too straight')
+    gen_radii = [float(np.median(np.exp(g["log_radius"]))) for g in gen]
+    series_real = [getattr(b, args.feature) for b in branches]
+    series_gen = [g[args.feature] for g in gen]
+    real = by_radius_class(series_real, [b.step for b in branches], radii)
+    fake = by_radius_class(series_gen, [g["step"] for g in gen], gen_radii)
+    from src.neuron_model.trunk_generation.variogram import semivariogram
+
+    real["all branches"] = {"n": len(branches), **semivariogram(series_real, [b.step for b in branches])}
+    fake["all branches"] = {"n": len(gen), **semivariogram(series_gen, [g["step"] for g in gen])}
     print(f"[{args.feature}] T0 {run.name}/{name}, {len(branches)} {args.split} branches; sqrt(2 gamma(h)) = typical change of {args.feature} over the lag h")
     for cls in real:
         print(f"\n{cls} (n = {real[cls]['n']})")
@@ -74,7 +84,7 @@ def main() -> None:
             r, g = real[cls].get(h), fake.get(cls, {}).get(h)
             if r is None or g is None:
                 continue
-            print(f"  {h / 1000.0:6.2f}   {np.sqrt(2 * r):7.3f}   {np.sqrt(2 * g):7.3f}   {np.sqrt(g / r):7.2f}")
+            print(f"  {h / 1000.0:6.2f}   {np.sqrt(2 * r):9.3g}   {np.sqrt(2 * g):9.3g}   {np.sqrt(g / r):7.2f}")
 
 
 if __name__ == "__main__":

@@ -330,7 +330,7 @@ def _two_scale_branches(rng, n, sd=(0.13, 0.07), length_nm=(2500.0, 40000.0), nu
     """Branches whose log-radius residual has two scales (swellings of a few um + slow drift) + white noise."""
     from src.neuron_model.trunk_generation.models.radius import RadiusMultiScale
 
-    true = RadiusMultiScale(list(sd), list(length_nm), nugget, 0.0, -0.3, 0.0, 0.25)
+    true = RadiusMultiScale(list(sd), list(length_nm), nugget, 0.0, -0.3, 0.0, 0.25, kernels=["gauss", "exp"])
     enc = DesignEncoder.fit([5000.0, 150000.0])
     out, rho = [], []
     for _ in range(n):
@@ -355,8 +355,10 @@ def test_multiscale_radius_recovers_two_scales_and_beats_one_scale_on_the_variog
     radii = [float(np.exp(np.median(b.log_radius))) for b in branches]
     lengths = [b.length for b in branches]
     fit = RadiusMultiScale().fit(rho, steps, radii, lengths, ["g"] * len(branches), min_group=10_000)
-    assert fit.length_nm[0] == pytest.approx(2500.0, rel=0.5) and fit.length_nm[1] > 10000.0
-    assert fit.sd[0] == pytest.approx(0.13, rel=0.3)
+    assert fit.kernels == ["gauss", "exp"]
+    assert fit.length_nm[0] == pytest.approx(2500.0, rel=0.35) and fit.length_nm[1] > 10000.0
+    assert fit.sd[0] == pytest.approx(0.13, rel=0.25)
+    assert fit.info["variogram_fit"]["relative_rms_error"] < 0.1
     assert fit.beta_r == pytest.approx(-0.3, abs=0.15) and fit.tau == pytest.approx(0.25, abs=0.12)
     one = RadiusResidualModel().fit(rho, steps, radii, lengths, ["g"] * len(branches), min_group=10_000)
 
@@ -393,3 +395,20 @@ def test_t0_multiscale_mode_fit_round_trip_and_default(tmp_path):
     old = T0Model("parabola", direction="kappa", radius_residual="branch").fit(branches, encoder=enc, max_iter=40)
     old.save(tmp_path / "old.json")
     assert T0Model.load(tmp_path / "old.json").radius.__class__.__name__ == "RadiusResidualModel"
+
+
+def test_gaussian_process_has_the_gaussian_covariance_and_a_smooth_variogram():
+    from src.neuron_model.trunk_generation.models.radius import _gamma_model, _gauss_process
+    from src.neuron_model.trunk_generation.variogram import semivariogram
+
+    rng = np.random.default_rng(1)
+    step, length, sd = 250.0, 2600.0, 0.134
+    series = [_gauss_process(300, step, sd, length, rng) for _ in range(400)]
+    assert float(np.mean([x.var() for x in series])) == pytest.approx(sd**2, rel=0.25)
+    lags = (250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0)
+    emp = semivariogram(series, [step] * len(series), lags)
+    for h in lags:
+        model = float(_gamma_model(np.array([h]), [sd], [length], 0.0, ["gauss"])[0])
+        assert emp[h] == pytest.approx(model, rel=0.15, abs=2e-5)
+    # smooth at short lags: sqrt(2 gamma) is ~linear in the lag (an exponential kernel gives ~ sqrt(lag))
+    assert emp[500.0] / emp[250.0] == pytest.approx(4.0, rel=0.25)

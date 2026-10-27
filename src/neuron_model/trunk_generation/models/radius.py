@@ -139,7 +139,16 @@ class RadiusResidualModel:
 # compartment: the real variation saturates at ~4 um (about 13 % around the local mean), the single exponential fitted a
 # memory of 54 um (a slow drift) and could not describe the swellings of a few micrometres as well.
 #
-# Model: rho = sum_k AR(1)(sd_k, l_k) + white noise (sd_0), all multiplied by the amplitude m_b of the branch
+# SECOND finding (full-data run 2026-10-28, first version of this model with two exponential components): the pooled
+# semivariogram of log r is NOT that of an Ornstein-Uhlenbeck process. sqrt(2 gamma) grows LINEARLY with the lag up to
+# ~2 um and saturates at ~4 um (0.020, 0.038, 0.070, 0.125, 0.182, 0.187, 0.191 at 0.25 ... 16 um): gamma ~ h^2 at short
+# lags = a SMOOTH (differentiable) process - the radius profile is smoothed by the preprocessing (radius_smoothing_nm
+# 1000), while an exponential kernel gives sqrt(2 gamma) ~ sqrt(h) (0.075 at 0.25 um). A Gaussian kernel
+# gamma = sd^2 (1 - exp(-(h/l)^2)) with sd 0.134 and l 2.66 um reproduces all seven points to 0.002. The first component
+# is therefore Gaussian; the second (exponential, slow drift) and the white noise stay as options of the fit.
+#
+# Model: rho = sum_k comp_k(sd_k, l_k) + white noise (sd_0), comp_k Gaussian-kernel ("gauss") or AR(1) ("exp"),
+# all multiplied by the amplitude m_b of the branch
 #   log m_b ~ N(alpha + alpha_group + beta_r log(r_b / 300 nm) + beta_l log(L_b / 20 um), tau^2).
 # (sd_k, l_k, sd_0) are fitted to the pooled empirical semivariogram of rho (relative least squares over log-spaced lag
 # bins); m_b comes from the ratio of the semivariogram of each branch to the model; tau^2 = spread of log m_b minus the
@@ -180,11 +189,24 @@ def pooled_variogram(series: Sequence[np.ndarray], steps: Sequence[float]):
     return sh[keep] / sc[keep], 0.5 * sg[keep] / sc[keep], sc[keep]
 
 
-def _gamma_model(h: np.ndarray, sd: Sequence[float], length: Sequence[float], nugget_sd: float) -> np.ndarray:
+def _gamma_model(h: np.ndarray, sd: Sequence[float], length: Sequence[float], nugget_sd: float, kernels: Sequence[str] = ("exp", "exp")) -> np.ndarray:
     g = nugget_sd**2 * np.ones_like(h, dtype=float)
-    for s, l in zip(sd, length):
-        g = g + s**2 * (1.0 - np.exp(-h / l))
+    for s, l, k in zip(sd, length, kernels):
+        g = g + s**2 * (1.0 - (np.exp(-((h / l) ** 2)) if k == "gauss" else np.exp(-h / l)))
     return g
+
+
+def _gauss_process(n: int, step: float, sd: float, length_nm: float, rng: np.random.Generator) -> np.ndarray:
+    """Stationary Gaussian process with covariance sd^2 exp(-(h/l)^2) on n nodes: circulant embedding (exact up to the
+    clipping of tiny negative eigenvalues of the embedding)."""
+    m = 2 * (2 * n)  # padded circulant: the Gaussian kernel is positive definite on the padded grid
+    j = np.arange(m)
+    lag = np.minimum(j, m - j) * step
+    cov = sd**2 * np.exp(-((lag / length_nm) ** 2))
+    lam = np.clip(np.fft.fft(cov).real, 0.0, None)
+    w = rng.standard_normal(m) + 1j * rng.standard_normal(m)
+    x = np.fft.fft(np.sqrt(lam / m) * w)  # real part and imaginary part are two independent samples
+    return x.real[:n]
 
 
 def _ar1_stationary(n: int, step: float, sd: float, length_nm: float, rng: np.random.Generator) -> np.ndarray:
@@ -207,6 +229,7 @@ class RadiusMultiScale:
     tau: float = TAU_FLOOR
     groups: Dict[str, float] = field(default_factory=dict)
     info: Dict[str, Any] = field(default_factory=dict)
+    kernels: List[str] = field(default_factory=lambda: ["exp", "exp"])  # per component: "gauss" | "exp"
     kind: str = "multiscale"
 
     def mean_log(self, group: str, radius_nm: Optional[float], length_nm: Optional[float]) -> float:
@@ -215,53 +238,58 @@ class RadiusMultiScale:
         return self.alpha + self.groups.get(group, 0.0) + self.beta_r * math.log(r / R_REF_NM) + self.beta_l * math.log(L / L_REF_NM)
 
     # -------------------------------------------------------------- fitting
-    def _fit_global(self, series: Sequence[np.ndarray], steps: Sequence[float]) -> None:
+    def _fit_global(self, series: Sequence[np.ndarray], steps: Sequence[float], kernels: Sequence[str]) -> None:
         from scipy.optimize import least_squares
 
         h, gamma, count = pooled_variogram(series, steps)
         if len(h) < 4:
             raise ValueError("too few lag bins with enough pairs to fit the variogram")
+        kernels = list(kernels)
         sill = float(gamma[-3:].mean())
-        x0 = np.log([max(math.sqrt(sill) * 0.6, 1e-3), 1500.0, max(math.sqrt(sill) * 0.6, 1e-3), 20000.0, max(math.sqrt(gamma[0]) * 0.3, 1e-4)])
+        wts = np.sqrt(count / count.max())
 
         def unpack(p):
             return [math.exp(p[0]), math.exp(p[2])], [math.exp(p[1]), math.exp(p[3])], math.exp(p[4])
 
+        # the residual is taken in the scale of sqrt(2 gamma) (the typical change of the radius): short lags, where gamma
+        # is tiny, are not over-weighted and a component that is not needed does not blow the fit up
         def resid(p):
             sd, ln, n0 = unpack(p)
-            return (_gamma_model(h, sd, ln, n0) - gamma) / gamma * np.sqrt(count / count.max())
+            return (np.sqrt(2 * _gamma_model(h, sd, ln, n0, kernels)) - np.sqrt(2 * gamma)) / np.sqrt(2 * gamma) * wts
 
         lo = np.log([1e-4, 200.0, 1e-4, 4000.0, 1e-5])
         hi = np.log([2.0, 20000.0, 2.0, 400000.0, 0.5])
         best = None
-        for l1, l2 in ((1000.0, 15000.0), (3000.0, 40000.0), (600.0, 8000.0)):
-            start = x0.copy(); start[1], start[3] = math.log(l1), math.log(l2)
+        for l1, l2, f1 in ((2500.0, 20000.0, 0.8), (1500.0, 40000.0, 0.6), (4000.0, 12000.0, 0.9)):
+            start = np.log([math.sqrt(sill) * f1, l1, math.sqrt(sill) * 0.3, l2, max(math.sqrt(gamma[0]) * 0.2, 1e-4)])
             res = least_squares(resid, np.clip(start, lo + 1e-6, hi - 1e-6), bounds=(lo, hi))
             if best is None or res.cost < best.cost:
                 best = res
         sd, ln, n0 = unpack(best.x)
-        order = np.argsort(ln)  # component 0 = the shorter memory
-        self.sd, self.length_nm, self.nugget_sd = [sd[i] for i in order], [ln[i] for i in order], n0
-        self.info["variogram_fit"] = {"h_nm": h.tolist(), "empirical": gamma.tolist(), "model": _gamma_model(h, self.sd, self.length_nm, n0).tolist(),
-                                      "relative_rms_error": float(np.sqrt(np.mean(((_gamma_model(h, self.sd, self.length_nm, n0) - gamma) / gamma) ** 2)))}
+        self.sd, self.length_nm, self.nugget_sd, self.kernels = sd, ln, n0, kernels
+        model = _gamma_model(h, sd, ln, n0, kernels)
+        self.info["variogram_fit"] = {"h_nm": h.tolist(), "empirical": gamma.tolist(), "model": model.tolist(),
+                                      "typical_change_empirical": np.sqrt(2 * gamma).tolist(), "typical_change_model": np.sqrt(2 * model).tolist(),
+                                      "relative_rms_error": float(np.sqrt(np.mean(((np.sqrt(2 * model) - np.sqrt(2 * gamma)) / np.sqrt(2 * gamma)) ** 2)))}
 
     def _log_scale(self, x: np.ndarray, step: float) -> Optional[tuple]:
         """(log m_hat, weight) of one branch: ratio of its semivariogram to the model's, weighted by the pairs."""
         h, ss, cnt = _branch_variogram(np.asarray(x, dtype=float), float(step))
         if len(h) < 3:
             return None
-        model = _gamma_model(h, self.sd, self.length_nm, self.nugget_sd)
+        model = _gamma_model(h, self.sd, self.length_nm, self.nugget_sd, self.kernels)
         ratio = (0.5 * ss.sum() / cnt.sum()) / float(np.sum(model * cnt) / cnt.sum())
         return 0.5 * math.log(max(ratio, 1e-6)), float(cnt.sum())
 
     def fit(self, rho: Sequence[np.ndarray], steps: Sequence[float], radii: Sequence[float], lengths: Sequence[float],
-            groups: Sequence[str], *, min_group: int = 50, n_bootstrap: int = 300, seed: int = 0) -> "RadiusMultiScale":
+            groups: Sequence[str], *, min_group: int = 50, n_bootstrap: int = 300, seed: int = 0,
+            kernels: Sequence[str] = ("gauss", "exp")) -> "RadiusMultiScale":
         keep = [i for i, r in enumerate(rho) if len(r) >= MIN_VALUES]
         if not keep:
             raise ValueError(f"no branch with at least {MIN_VALUES} nodes")
         series = [np.asarray(rho[i], dtype=float) for i in keep]
         st = [float(steps[i]) for i in keep]
-        self._fit_global(series, st)
+        self._fit_global(series, st, kernels)
         est = [self._log_scale(x, h) for x, h in zip(series, st)]
         ok = [k for k, e in enumerate(est) if e is not None]
         y = np.array([est[k][0] for k in ok])
@@ -304,18 +332,19 @@ class RadiusMultiScale:
                length_nm: Optional[float] = None) -> np.ndarray:
         m = math.exp(self.mean_log(group, radius_nm, length_nm) + self.tau * rng.standard_normal())
         out = self.nugget_sd * m * rng.standard_normal(n_nodes)
-        for sd, ln in zip(self.sd, self.length_nm):
-            out = out + _ar1_stationary(n_nodes, step, sd * m, ln, rng)
+        for sd, ln, k in zip(self.sd, self.length_nm, self.kernels):
+            out = out + (_gauss_process if k == "gauss" else _ar1_stationary)(n_nodes, step, sd * m, ln, rng)
         return out
 
     def to_dict(self) -> Dict[str, Any]:
         return {"kind": "multiscale", "sd": list(self.sd), "length_nm": list(self.length_nm), "nugget_sd": self.nugget_sd, "alpha": self.alpha,
-                "beta_r": self.beta_r, "beta_l": self.beta_l, "tau": self.tau, "groups": dict(self.groups), "info": dict(self.info)}
+                "beta_r": self.beta_r, "beta_l": self.beta_l, "tau": self.tau, "groups": dict(self.groups), "info": dict(self.info), "kernels": list(self.kernels)}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RadiusMultiScale":
         return cls([float(v) for v in d["sd"]], [float(v) for v in d["length_nm"]], float(d["nugget_sd"]), float(d["alpha"]), float(d.get("beta_r", 0.0)),
-                   float(d.get("beta_l", 0.0)), float(d.get("tau", TAU_FLOOR)), {k: float(v) for k, v in d.get("groups", {}).items()}, dict(d.get("info", {})))
+                   float(d.get("beta_l", 0.0)), float(d.get("tau", TAU_FLOOR)), {k: float(v) for k, v in d.get("groups", {}).items()}, dict(d.get("info", {})),
+                   list(d.get("kernels", ["exp", "exp"])))
 
 
 def radius_model_from_dict(d: Dict[str, Any]):
