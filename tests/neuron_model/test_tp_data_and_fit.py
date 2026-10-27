@@ -107,4 +107,4 @@ def test_fit_t0_reports_functionals_against_noise_floor():
     assert v["mean_w1_rel"] < 3 * rep["noise_floor_mean_w1_rel"] + 0.3
     # radius CV diagnostics on validation AND train branches; the branch radius residual is saved in the report
     assert v["radius_cv_by_radius"] and v["radius_cv_by_radius_train"]
-    assert rep["radius_residual"]["length_nm"] > 0
+    assert rep["radius_residual"]["kind"] == "multiscale" and min(rep["radius_residual"]["length_nm"]) > 0

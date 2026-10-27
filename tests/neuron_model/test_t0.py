@@ -324,3 +324,72 @@ def test_semivariogram_separates_fast_and_slow_components():
     assert g_fast[250.0] == pytest.approx(0.01, rel=0.15) and g_fast[8000.0] == pytest.approx(0.01, rel=0.15)
     cls = by_radius_class(fast, [step] * 40, [250.0] * 20 + [400.0] * 20)
     assert set(cls) == {"r < 300 nm", "300-500 nm"} and cls["r < 300 nm"]["n"] == 20
+
+
+def _two_scale_branches(rng, n, sd=(0.13, 0.07), length_nm=(2500.0, 40000.0), nugget=0.01):
+    """Branches whose log-radius residual has two scales (swellings of a few um + slow drift) + white noise."""
+    from src.neuron_model.trunk_generation.models.radius import RadiusMultiScale
+
+    true = RadiusMultiScale(list(sd), list(length_nm), nugget, 0.0, -0.3, 0.0, 0.25)
+    enc = DesignEncoder.fit([5000.0, 150000.0])
+    out, rho = [], []
+    for _ in range(n):
+        length = float(np.exp(rng.uniform(math.log(10000.0), math.log(100000.0))))
+        r = float(np.exp(rng.uniform(math.log(120.0), math.log(600.0))))
+        nn = int(length // 300.0) + 1
+        step = length / (nn - 1)
+        x = true.sample(nn, step, "g", rng, radius_nm=r, length_nm=length)
+        k = rng.normal(0.0, 5e-5, nn - 1)
+        out.append(T0Branch(k, k.copy(), math.log(r) + x, step, enc.row("mouse", "excitatory", "apical", length), "g"))
+        rho.append(x)
+    return out, enc, true, rho
+
+
+def test_multiscale_radius_recovers_two_scales_and_beats_one_scale_on_the_variogram():
+    from src.neuron_model.trunk_generation.models.radius import RadiusMultiScale, RadiusResidualModel, pooled_variogram
+    from src.neuron_model.trunk_generation.variogram import semivariogram
+
+    rng = np.random.default_rng(4)
+    branches, _, true, rho = _two_scale_branches(rng, 500)
+    steps = [b.step for b in branches]
+    radii = [float(np.exp(np.median(b.log_radius))) for b in branches]
+    lengths = [b.length for b in branches]
+    fit = RadiusMultiScale().fit(rho, steps, radii, lengths, ["g"] * len(branches), min_group=10_000)
+    assert fit.length_nm[0] == pytest.approx(2500.0, rel=0.5) and fit.length_nm[1] > 10000.0
+    assert fit.sd[0] == pytest.approx(0.13, rel=0.3)
+    assert fit.beta_r == pytest.approx(-0.3, abs=0.15) and fit.tau == pytest.approx(0.25, abs=0.12)
+    one = RadiusResidualModel().fit(rho, steps, radii, lengths, ["g"] * len(branches), min_group=10_000)
+
+    def gen(model):
+        r2 = np.random.default_rng(9)
+        return [model.sample(len(x), s, "g", r2, radius_nm=r, length_nm=L) for x, s, r, L in zip(rho, steps, radii, lengths)]
+
+    target = semivariogram(rho, steps, (500.0, 1000.0, 2000.0, 4000.0, 8000.0))
+    for name, model, limit in (("two scales", fit, 0.25), ("one scale", one, None)):
+        g = semivariogram(gen(model), steps, (500.0, 1000.0, 2000.0, 4000.0, 8000.0))
+        err = max(abs(math.sqrt(g[h] / target[h]) - 1.0) for h in target)
+        if limit is not None:
+            assert err < limit, (name, err)
+        else:
+            one_err = err
+    two_err = max(abs(math.sqrt(semivariogram(gen(fit), steps, (500.0, 1000.0, 2000.0, 4000.0, 8000.0))[h] / target[h]) - 1.0) for h in target)
+    assert two_err < one_err  # the single AR(1) cannot describe both scales
+
+
+def test_t0_multiscale_mode_fit_round_trip_and_default(tmp_path):
+    rng = np.random.default_rng(6)
+    branches, enc, _, _ = _two_scale_branches(rng, 120)
+    model = T0Model("parabola", direction="kappa").fit(branches, encoder=enc, max_iter=40)  # radius_residual default = multiscale
+    assert model.radius_mode == "multiscale" and model.radius.kind == "multiscale" and len(model.radius.sd) == 2
+    path = tmp_path / "t0.json"
+    model.save(path)
+    loaded = T0Model.load(path)
+    assert loaded.radius.kind == "multiscale"
+    req = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical", "length_nm": 30000.0, "step_nm": 300.0}]
+    a = model.sample(req, np.random.default_rng(1))[0]
+    b = loaded.sample(req, np.random.default_rng(1))[0]
+    assert np.allclose(a["log_radius"], b["log_radius"])
+    # an old model file (single AR(1), no 'kind') still loads
+    old = T0Model("parabola", direction="kappa", radius_residual="branch").fit(branches, encoder=enc, max_iter=40)
+    old.save(tmp_path / "old.json")
+    assert T0Model.load(tmp_path / "old.json").radius.__class__.__name__ == "RadiusResidualModel"

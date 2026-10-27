@@ -110,7 +110,7 @@ def fit_t0(
     max_iter: int = 200,
     length_bounds=(5000.0, 255500.0),
     direction: str = "tilt",
-    radius_residual: str = "branch",
+    radius_residual: str = "multiscale",
     train_conditions: Sequence[Dict[str, Any]] = None,
     seed: int = 0,
     log=print,

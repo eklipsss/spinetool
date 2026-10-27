@@ -82,9 +82,16 @@ def main() -> None:
               f"spread between branches x/: {math.exp(a.get('tau', 0.0)):.2f}; group offsets {({k: round(v, 2) for k, v in a.get('groups', {}).items()})}", flush=True)
     if result["report"].get("radius_residual"):
         q = result["report"]["radius_residual"]
-        print(f"[t0] radius residual: memory {q['length_nm'] / 1000.0:.3g} um; amplitude (sd of log r) of a branch with r = 300 nm, L = 20 um "
-              f"{math.exp(q['alpha']):.3f}, x r^{q['beta_r']:.2f} x L^{q['beta_l']:.2f}, spread between branches x/: {math.exp(q['tau']):.2f}; "
-              f"single pooled amplitude would be {q['info'].get('pooled_amplitude', float('nan')):.3f}, median branch {q['info'].get('median_branch_amplitude', float('nan')):.3f}", flush=True)
+        if q.get("kind") == "multiscale":
+            comps = ", ".join(f"sd {sd:.3f} / memory {ln / 1000.0:.3g} um" for sd, ln in zip(q["sd"], q["length_nm"]))
+            vf = q["info"].get("variogram_fit", {})
+            print(f"[t0] radius residual (multiscale, r = 300 nm, L = 20 um): components {comps}; white noise sd {q['nugget_sd']:.3f}; "
+                  f"amplitude x exp({q['alpha']:.2f}) x r^{q['beta_r']:.2f} x L^{q['beta_l']:.2f}, spread between branches x/: {math.exp(q['tau']):.2f}; "
+                  f"semivariogram fit error {vf.get('relative_rms_error', float('nan')):.3f}", flush=True)
+        else:
+            print(f"[t0] radius residual: memory {q['length_nm'] / 1000.0:.3g} um; amplitude (sd of log r) of a branch with r = 300 nm, L = 20 um "
+                  f"{math.exp(q['alpha']):.3f}, x r^{q['beta_r']:.2f} x L^{q['beta_l']:.2f}, spread between branches x/: {math.exp(q['tau']):.2f}; "
+                  f"single pooled amplitude would be {q['info'].get('pooled_amplitude', float('nan')):.3f}, median branch {q['info'].get('median_branch_amplitude', float('nan')):.3f}", flush=True)
     print(f"[t0] chosen: {result['chosen']}; noise floor W1/std {result['report']['noise_floor_mean_w1_rel']:.3f}; run -> {run.root}", flush=True)
 
 
