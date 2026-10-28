@@ -171,7 +171,7 @@ def main() -> None:
     if not args.no_real:
         try:
             real_src = load_real_source(tp_dir)
-            print(f"[report] real source branches: {len(real_src[2])} in the geometry pack", flush=True)
+            print(f"[report] real source branches: {len(real_src[2].index)} in the geometry pack", flush=True)
         except Exception as exc:  # the report is still useful without the real branches
             print(f"[report] real source branches unavailable ({exc!r}): the comparison with the real branch is skipped", flush=True)
     assembled = bt[bt["status"].isin(["ok", "invalid"]) & bt.get("mesh_path", pd.Series(dtype=object)).notna()].sort_values("branch_index")
