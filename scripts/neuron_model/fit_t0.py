@@ -65,7 +65,7 @@ def main() -> None:
     rows = va.to_dict("records")
     result = fit_t0(train, val, [_cond(r) for r in rows], [str(r["neuron_id"]) for r in rows], encoder=encoder, mean_models=m["mean_models"],
                     shrinkage_std=float(m["shrinkage_std"]), max_iter=int(m["max_iter"]), length_bounds=tuple(m["length_bounds_nm"]), seed=int(cfg["seed"]),
-                    direction=str(m.get("direction", "tilt")), radius_residual=str(m.get("radius_residual", "branch")),
+                    direction=str(m.get("direction", "multiscale")), radius_residual=str(m.get("radius_residual", "branch")),
                     train_conditions=[_cond(r) for r in tr.to_dict("records")])
     run = create_run(cfg, runs_root=resolve_path(cfg["runs_root"]), extra_info={"n_train": len(train), "n_val": len(val), "branches_root": str(d["branches_root"])})
     for name, model in result["models"].items():
@@ -73,7 +73,21 @@ def main() -> None:
     (run.root / "encoder.json").write_text(json.dumps(encoder.to_dict()), encoding="utf-8")
     (run.root / "limits.json").write_text(json.dumps(result["limits"].to_dict(), indent=2), encoding="utf-8")
     (run.root / "report.json").write_text(json.dumps(result["report"], indent=2, default=float), encoding="utf-8")
-    if result["report"].get("direction"):
+    if (result["report"].get("direction") or {}).get("kind") == "multiscale":
+        q = result["report"]["direction"]
+        a = q.get("amplitude") or {}
+        vf = q.get("info", {}).get("variogram_fit", {})
+        print(f"[t0] direction (multiscale): fast wiggle sd {q['sd_fast']:.3g} (tilt), Gaussian scale {q['length_fast_nm'] / 1000.0:.3g} um, node noise sd {q.get('noise_sd', 0.0):.3g}; slow turning: "
+              f"restoring L_d {q['restore_nm'] / 1000.0:.3g} um, rate memory {q['drive_length_nm'] / 1000.0:.3g} um, amplitude {q['drive_std'] * 1000.0:.3g} /um; "
+              f"branch amplitude x exp({a.get('alpha', 0.0):.2f}) x r^{a.get('beta', 0.0):.2f}, spread between branches x/: {math.exp(a.get('tau', 0.0)):.2f} "
+              f"(sampling noise x/: {math.exp(q.get('info', {}).get('tau_noise', 0.0)):.2f}); group offsets {({k: round(v, 2) for k, v in a.get('groups', {}).items()})}; "
+              f"semivariogram fit error {vf.get('relative_rms_error', float('nan')):.3f}", flush=True)
+        if vf:
+            print("       bending semivariogram sqrt(2 gamma), 1/nm (lag um: empirical / model): " + ", ".join(
+                f"{h / 1000.0:g}: {math.sqrt(2 * e):.3g}/{math.sqrt(2 * mm):.3g}" for h, e, mm in zip(vf["kappa_lags_nm"], vf["kappa_empirical"], vf["kappa_model"])), flush=True)
+            print("       tilt semivariogram sqrt(2 gamma) (lag um: empirical / model): " + ", ".join(
+                f"{h / 1000.0:g}: {math.sqrt(2 * e):.3g}/{math.sqrt(2 * mm):.3g}" for h, e, mm in zip(vf["tilt_lags_nm"], vf["tilt_empirical"], vf["tilt_model"])), flush=True)
+    elif result["report"].get("direction"):
         p = result["report"]["direction"]["pooled"]
         a = result["report"]["direction"].get("amplitude") or {}
         rest = "inf (no restoring)" if p["restore_nm"] is None else f"{p['restore_nm'] / 1000.0:g} um"

@@ -20,7 +20,9 @@ Mean log-radius profile ``m(s)``, two competing descriptions:
 
 Branch length for fully automatic generation: log-normal mixture (<= 3 components) per group.
 
-Direction (``direction="tilt"``, default): the bending of a generated trunk comes from ``direction.DirectionModel``
+Direction (``direction="multiscale"``, default since 2026-10-28: ``direction_ms.DirectionMultiScale`` = the model below
++ a smooth Gaussian-kernel wiggle of the heading fitted to the pooled semivariograms of kappa and of the tilt; ``"tilt"``:
+the model below alone; the text below describes ``"tilt"``): the bending of a generated trunk comes from ``direction.DirectionModel``
 (the heading relaxes to the branch axis, bounded tortuosity) instead of the kappa components of the OU above, which
 integrate to a free random walk of the heading (tortuosity growing with the length). The radius residual rho keeps its
 OU marginal (diagonal Phi: the rho component alone is an exact AR(1)); the bending-thickness cross terms are not used
@@ -45,6 +47,7 @@ import numpy as np
 
 from ..conditions import DesignEncoder, group_key
 from .direction import DirectionModel
+from .direction_ms import DirectionMultiScale, direction_model_from_dict
 from .radius import RadiusMultiScale, RadiusResidualModel, radius_model_from_dict
 
 
@@ -328,12 +331,12 @@ class OUParams:
 class T0Model:
     """Statistical trunk model (see module docstring)."""
 
-    def __init__(self, mean_model: str = "parabola", length_bounds: Tuple[float, float] = (5000.0, 255500.0), direction: str = "tilt",
+    def __init__(self, mean_model: str = "parabola", length_bounds: Tuple[float, float] = (5000.0, 255500.0), direction: str = "multiscale",
                  radius_residual: str = "multiscale") -> None:
         if mean_model not in MEAN_MODELS:
             raise ValueError(f"mean_model must be one of {tuple(MEAN_MODELS)}")
-        if direction not in ("tilt", "kappa"):
-            raise ValueError("direction must be 'tilt' or 'kappa'")
+        if direction not in ("multiscale", "tilt", "kappa"):
+            raise ValueError("direction must be 'multiscale', 'tilt' or 'kappa'")
         if radius_residual not in ("multiscale", "branch", "pooled"):
             raise ValueError("radius_residual must be 'multiscale', 'branch' or 'pooled'")
         self.direction_mode = direction
@@ -407,8 +410,8 @@ class T0Model:
         self.pooled = pooled.detach().numpy().copy()
         self.group_theta = {g: (pooled + delta[i]).detach().numpy().copy() for g, i in index.items()}
         self.fit_info = {"nll_per_node": final, "n_branches": len(branches), "n_nodes": int(n_total), "groups": names, "shrinkage_std": shrinkage_std}
-        if self.direction_mode == "tilt":
-            self.direction = DirectionModel().fit(branches, min_group=min_group)
+        if self.direction_mode in ("tilt", "multiscale"):
+            self.direction = (DirectionMultiScale() if self.direction_mode == "multiscale" else DirectionModel()).fit(branches, min_group=min_group)
             self.fit_info["direction"] = self.direction.to_dict()
         if self.radius_mode in ("branch", "multiscale"):
             rho_series = [b.log_radius - self.mean.branch_log_mean(b) for b in branches]
@@ -491,7 +494,7 @@ class T0Model:
     def from_dict(cls, d: Dict[str, Any]) -> "T0Model":
         mean = d["mean"]["kind"]
         obj = cls(mean, tuple(d["length_bounds"]), direction=d.get("direction_mode", "kappa"), radius_residual=d.get("radius_mode", "pooled"))
-        obj.direction = DirectionModel.from_dict(d["direction"]) if d.get("direction") else None
+        obj.direction = direction_model_from_dict(d["direction"]) if d.get("direction") else None
         obj.radius = radius_model_from_dict(d["radius_residual"]) if d.get("radius_residual") else None
         obj.mean = MEAN_MODELS[mean].from_dict(d["mean"])
         obj.length_model = LengthModel.from_dict(d["length_model"])

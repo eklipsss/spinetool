@@ -412,3 +412,40 @@ def test_gaussian_process_has_the_gaussian_covariance_and_a_smooth_variogram():
         assert emp[h] == pytest.approx(model, rel=0.15, abs=2e-5)
     # smooth at short lags: sqrt(2 gamma) is ~linear in the lag (an exponential kernel gives ~ sqrt(lag))
     assert emp[500.0] / emp[250.0] == pytest.approx(4.0, rel=0.25)
+
+
+def test_direction_multiscale_recovers_the_fast_wiggle_and_branch_amplitudes():
+    """Smooth Gaussian wiggle (0.6 um) + slow turning: the two pooled semivariograms give the scales, the branch
+    amplitude law (thinner branches bend more) and the spread are recovered, tortuosity stays bounded."""
+    from src.neuron_model.trunk_generation.models.direction import Amplitude
+    from src.neuron_model.trunk_generation.models.direction_ms import DirectionMultiScale, direction_model_from_dict
+
+    rng = np.random.default_rng(21)
+    true = DirectionMultiScale(sd_fast=0.08, length_fast_nm=600.0, noise_sd=0.01, drive_std=1.5e-5, drive_length_nm=3000.0, restore_nm=6000.0,
+                                 amplitude=Amplitude(0.0, beta=-0.6, tau=0.4))
+    enc = DesignEncoder.fit([5000.0, 100000.0])
+    branches = []
+    for _ in range(260):
+        length = float(np.exp(rng.uniform(math.log(15000.0), math.log(80000.0))))
+        r = float(np.exp(rng.uniform(math.log(150.0), math.log(600.0))))
+        step = float(rng.choice([250.0, 500.0]))
+        n = int(length // step) + 1
+        k1, k2 = true.sample_bending(n, step, "g", rng, radius_nm=r)
+        branches.append(T0Branch(k1, k2, np.full(n, math.log(r)), step, enc.row("mouse", "excitatory", "apical", length), "g"))
+    fitted = DirectionMultiScale().fit(branches, min_group=10_000, n_bootstrap=150)
+    assert fitted.length_fast_nm == pytest.approx(600.0, rel=0.35)
+    assert fitted.noise_sd == pytest.approx(0.01, rel=0.5)
+    assert fitted.info["variogram_fit"]["relative_rms_error"] < 0.15
+    a = fitted.amplitude
+    assert a.beta == pytest.approx(-0.6, abs=0.25)
+    assert a.tau == pytest.approx(0.4, abs=0.2)
+    # the typical bending of a generated branch matches (E m^2 = 1 normalisation)
+    real = np.sqrt(np.median([np.mean(b.kappa1**2 + b.kappa2**2) for b in branches]))
+    gen = np.sqrt(np.median([np.mean(np.concatenate(fitted.sample_bending(b.n_nodes, b.step, "g", rng, radius_nm=float(np.exp(b.log_radius[0])))) ** 2) * 2 for b in branches]))
+    assert gen == pytest.approx(real, rel=0.3)
+    long = [_tortuosity(*fitted.sample_bending(401, 500.0, "g", rng, radius_nm=300.0), 500.0) for _ in range(40)]
+    assert np.median(long) < 1.3
+    loaded = direction_model_from_dict(fitted.to_dict())
+    assert loaded.theta == pytest.approx(fitted.theta)
+    assert np.allclose(fitted.sample_bending(30, 500.0, "g", np.random.default_rng(1), radius_nm=300.0)[0],
+                       loaded.sample_bending(30, 500.0, "g", np.random.default_rng(1), radius_nm=300.0)[0])

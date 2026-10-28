@@ -17,7 +17,7 @@ data:
 model:
   mean_models: [parabola, gam]
   shrinkage_std: 0.3
-  direction: tilt                  # tilt: heading relaxes to the branch axis (bounded tortuosity); kappa: OU on the bending (old, tortuosity grows with L)
+  direction: multiscale            # multiscale: smooth Gaussian wiggle of the heading + slow turning relaxing to the axis; tilt: the slow part alone; kappa: OU on the bending (old, tortuosity grows with L)
   radius_residual: multiscale      # multiscale: two AR(1) scales + noise fitted to the semivariogram, amplitude = random effect of the branch (default since 2026-10-28; full-data diagnose_radius.py: one scale lost the 0.5-8 um variation); branch: ONE AR(1) with the branch amplitude; pooled: the joint OU (old)
   max_iter: 200
   length_bounds_nm: [5000.0, 255500.0]

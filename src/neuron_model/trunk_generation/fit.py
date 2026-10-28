@@ -109,7 +109,7 @@ def fit_t0(
     shrinkage_std: float = 0.3,
     max_iter: int = 200,
     length_bounds=(5000.0, 255500.0),
-    direction: str = "tilt",
+    direction: str = "multiscale",
     radius_residual: str = "multiscale",
     train_conditions: Sequence[Dict[str, Any]] = None,
     seed: int = 0,
