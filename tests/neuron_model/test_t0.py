@@ -449,3 +449,34 @@ def test_direction_multiscale_recovers_the_fast_wiggle_and_branch_amplitudes():
     assert loaded.theta == pytest.approx(fitted.theta)
     assert np.allclose(fitted.sample_bending(30, 500.0, "g", np.random.default_rng(1), radius_nm=300.0)[0],
                        loaded.sample_bending(30, 500.0, "g", np.random.default_rng(1), radius_nm=300.0)[0])
+
+
+def test_design_encoder_soma_columns_and_round_trip():
+    plain = DesignEncoder.fit([5000.0, 50000.0])
+    assert plain.row("mouse", "excitatory", "apical", 20000.0).shape == (len(plain.names),) and "z_log_soma" not in plain.names
+    enc = DesignEncoder.fit([5000.0, 50000.0], [0.0, 50000.0, 200000.0, float("nan")])
+    assert enc.names[-3:] == ("z_log_soma", "soma=unknown", "is_terminal")
+    near, far, unknown = (enc.row("mouse", "excitatory", "apical", 20000.0, d, True) for d in (1000.0, 300000.0, None))
+    assert near[-3] < far[-3] and near[-2] == 0.0 and unknown[-3] == 0.0 and unknown[-2] == 1.0 and near[-1] == 1.0
+    assert enc.row("mouse", "excitatory", "apical", 20000.0, 1000.0, False)[-1] == 0.0
+    back = DesignEncoder.from_dict(enc.to_dict())
+    assert back.names == enc.names and np.allclose(back.row("mouse", None, None, 9000.0, 5000.0, True), enc.row("mouse", None, None, 9000.0, 5000.0, True))
+    assert DesignEncoder.from_dict(plain.to_dict()).soma is None  # old model files
+
+
+def test_t0_radius_follows_the_soma_distance_when_it_is_in_the_design():
+    rng = np.random.default_rng(7)
+    soma = rng.uniform(5000.0, 400000.0, 160)
+    enc = DesignEncoder.fit([20000.0, 60000.0], soma)
+    branches, n = [], 50
+    for d in soma:
+        radius = 450.0 * math.exp(-0.45 * (math.log1p(d / 1000.0) - 3.5)) * math.exp(rng.normal(0, 0.05))  # thinner far from the soma
+        branches.append(T0Branch(rng.normal(0, 1e-4, n - 1), rng.normal(0, 1e-4, n - 1), np.full(n, math.log(radius)) + rng.normal(0, 0.01, n), 500.0,
+                                 enc.row("mouse", "excitatory", "apical", 25000.0, d, False), "mouse|excitatory|apical"))
+    model = T0Model("parabola", direction="kappa", radius_residual="pooled").fit(branches, encoder=enc, max_iter=30)
+    def median_radius(d):
+        req = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical", "length_nm": 25000.0, "step_nm": 500.0,
+                "soma_distance_start_nm": d, "is_terminal": False}] * 60
+        return float(np.median([np.exp(r["log_radius"]).mean() for r in model.sample(req, np.random.default_rng(1))]))
+    near, far = median_radius(10000.0), median_radius(300000.0)
+    assert far < 0.85 * near

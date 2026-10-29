@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -366,12 +367,16 @@ class T0Model:
             step[i] = b.step
         return k1, k2, rho, mask, step
 
-    def fit(self, branches: Sequence[T0Branch], *, encoder: DesignEncoder, shrinkage_std: float = 0.3, max_iter: int = 200, min_group: int = 50, verbose: bool = False) -> "T0Model":
+    def fit(self, branches: Sequence[T0Branch], *, encoder: DesignEncoder, shrinkage_std: float = 0.3, max_iter: int = 200, min_group: int = 50, verbose: bool = False, progress=None) -> "T0Model":
         import torch
 
+        say = progress or (lambda *_: None)  # progress(text): stage messages with elapsed time (fit_t0 passes its log)
+        t_start = time.time()
+        say(f"[t0-fit] {len(branches)} branches: mean radius profile and length model ...")
         self.encoder = encoder
         self.mean.fit(branches)
         self.length_model.fit([b.length for b in branches], [b.group for b in branches])
+        say(f"[t0-fit] profile and length done ({time.time() - t_start:.0f} s); OU likelihood (L-BFGS, up to {max_iter} iterations) ...")
         k1, k2, rho, mask, step = (torch.tensor(a, dtype=torch.float64) for a in self._residual_arrays(branches))
         groups = np.array([b.group for b in branches])
         names = [g for g in np.unique(groups) if (groups == g).sum() >= min_group]
@@ -396,7 +401,12 @@ class T0Model:
             extra = torch.where(group_of.unsqueeze(-1) >= 0, delta[group_of.clamp_min(0)], torch.zeros(1, N_PARAMS, dtype=torch.float64))
             return pooled + extra
 
+        evals = [0]
+
         def closure():
+            evals[0] += 1
+            if evals[0] % 25 == 0:
+                say(f"[t0-fit]   OU likelihood: {evals[0]} evaluations, {time.time() - t_start:.0f} s")
             optimizer.zero_grad()
             ll = _chain_loglik(branch_theta(), k1, k2, rho, mask, step)
             loss = -ll.sum() / n_total + (delta**2).sum() / (2.0 * shrinkage_std**2) / n_total
@@ -410,14 +420,17 @@ class T0Model:
         self.pooled = pooled.detach().numpy().copy()
         self.group_theta = {g: (pooled + delta[i]).detach().numpy().copy() for g, i in index.items()}
         self.fit_info = {"nll_per_node": final, "n_branches": len(branches), "n_nodes": int(n_total), "groups": names, "shrinkage_std": shrinkage_std}
+        say(f"[t0-fit] OU done ({time.time() - t_start:.0f} s, {evals[0]} evaluations); direction model ({self.direction_mode}) ...")
         if self.direction_mode in ("tilt", "multiscale"):
             self.direction = (DirectionMultiScale() if self.direction_mode == "multiscale" else DirectionModel()).fit(branches, min_group=min_group)
             self.fit_info["direction"] = self.direction.to_dict()
+        say(f"[t0-fit] direction done ({time.time() - t_start:.0f} s); radius residual ({self.radius_mode}) ...")
         if self.radius_mode in ("branch", "multiscale"):
             rho_series = [b.log_radius - self.mean.branch_log_mean(b) for b in branches]
             self.radius = (RadiusMultiScale() if self.radius_mode == "multiscale" else RadiusResidualModel()).fit(rho_series, [b.step for b in branches], [float(np.median(np.exp(b.log_radius))) for b in branches],
                                                     [b.length for b in branches], [b.group for b in branches], min_group=min_group)
             self.fit_info["radius_residual"] = self.radius.to_dict()
+        say(f"[t0-fit] done ({time.time() - t_start:.0f} s)")
         if verbose:
             print(self.fit_info)
         return self
@@ -442,7 +455,9 @@ class T0Model:
             step_req = float(step_req) if step_req is not None and np.isfinite(step_req) and step_req > 0 else 500.0
             n_nodes = max(int(math.ceil(length / step_req)) + 1, 3)
             meta.append({"group": group, "length": float(length), "n_nodes": n_nodes, "step": float(length) / (n_nodes - 1),
-                         "design": self.encoder.row(c.get("species"), c.get("cell_type_binary"), c.get("compartment"), float(length))})
+                         "design": self.encoder.row(c.get("species"), c.get("cell_type_binary"), c.get("compartment"), float(length),
+                                                    None if c.get("soma_distance_start_nm") is None else float(c["soma_distance_start_nm"]) + 0.5 * float(length),
+                                                    c.get("is_terminal"))})
         n_max = max(m["n_nodes"] for m in meta)
         z = np.zeros((n, n_max, 3))
         phi = np.zeros((n, 3))

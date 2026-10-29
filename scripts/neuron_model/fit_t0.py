@@ -59,7 +59,11 @@ def main() -> None:
     va = va[[branch_key(r) in pack for r in va.to_dict("records")]].reset_index(drop=True)
     if not len(tr) or not len(va):
         raise SystemExit(f"no train ({len(tr)}) or validation ({len(va)}) branches: is the split filled? (data.splits=...)")
-    encoder = DesignEncoder.fit(tr["length_nm"].astype(float).tolist())
+    soma_mid = None
+    if bool(m.get("use_soma_distance", False)):  # distance of the branch midpoint to the soma (NaN: unknown), terminal flag
+        soma_mid = (tr["soma_distance_start_nm"].astype(float) + 0.5 * tr["length_nm"].astype(float)).tolist()
+    encoder = DesignEncoder.fit(tr["length_nm"].astype(float).tolist(), soma_mid)
+    print(f"[t0] design columns: {list(encoder.names)}", flush=True)
     train, val = t0_training_branches(tr, pack, encoder), t0_training_branches(va, pack, encoder)
     print(f"[t0] train {len(train)} branches, validation {len(val)}", flush=True)
     rows = va.to_dict("records")

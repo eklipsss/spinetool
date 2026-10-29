@@ -8,6 +8,8 @@ Returns a JSON-serialisable report and the chosen models. Units: nm.
 
 from __future__ import annotations
 
+import functools
+
 import itertools
 import math
 from typing import Any, Dict, List, Optional, Sequence
@@ -91,9 +93,10 @@ def fit_p0(
     smooth_penalty: float = 1.0,
     max_iter: int = 300,
     seed: int = 0,
-    log=print,
+    log=functools.partial(print, flush=True),
 ) -> Dict[str, Any]:
     rng = np.random.default_rng(seed)
+    log(f"[p0] {len(train_cov)} train / {len(val_cov)} validation branches: {len(families) * len(exposures) * len(random_effects)} count models to fit (each takes up to ~1 min) ...")
     design = CountDesign(n_basis).fit(train_cov)
     variants = []
     best = None

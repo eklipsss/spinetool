@@ -193,7 +193,10 @@ def _cond(row: Any) -> Dict[str, Any]:
     def clean(v):
         return None if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)
 
-    return {"species": clean(row.get("species")), "cell_type_binary": clean(row.get("cell_type_binary")), "compartment": clean(row.get("compartment"))}
+    d0, term = row.get("soma_distance_start_nm"), row.get("is_terminal")
+    return {"species": clean(row.get("species")), "cell_type_binary": clean(row.get("cell_type_binary")), "compartment": clean(row.get("compartment")),
+            "soma_distance_start_nm": None if d0 is None or not np.isfinite(d0) else float(d0),
+            "is_terminal": None if term is None or (isinstance(term, float) and np.isnan(term)) else bool(term)}
 
 
 def _mean_radius(geom: Dict[str, np.ndarray]) -> float:
@@ -214,8 +217,10 @@ def t0_training_branches(table: pd.DataFrame, pack: GeometryPack, encoder) -> Li
         g = pack.get(key)
         step = float(g["s"][-1] / (len(g["s"]) - 1))
         c = _cond(row)
+        length = float(g["s"][-1])
+        soma_mid = None if c["soma_distance_start_nm"] is None else c["soma_distance_start_nm"] + 0.5 * length  # branch midpoint, as in P0
         out.append(T0Branch(g["kappa1"][:-1].astype(float), g["kappa2"][:-1].astype(float), np.log(g["radius"].astype(float)), step,
-                            encoder.row(c["species"], c["cell_type_binary"], c["compartment"], float(g["s"][-1])),
+                            encoder.row(c["species"], c["cell_type_binary"], c["compartment"], length, soma_mid, c["is_terminal"]),
                             group_key(c["species"], c["cell_type_binary"], c["compartment"])))
     return out
 

@@ -9,6 +9,8 @@ Units: nm.
 
 from __future__ import annotations
 
+import functools
+
 from typing import Any, Dict, List, Sequence
 
 import numpy as np
@@ -113,9 +115,10 @@ def fit_t0(
     radius_residual: str = "multiscale",
     train_conditions: Sequence[Dict[str, Any]] = None,
     seed: int = 0,
-    log=print,
+    log=functools.partial(print, flush=True),
 ) -> Dict[str, Any]:
     rng = np.random.default_rng(seed)
+    log(f"[t0] {len(train)} train / {len(val)} validation branches: calibrating the validity checks ...")
     limits = TrunkLimits.from_data([np.hypot(b.kappa1, b.kappa2) for b in train], [_real_functionals(b)["tortuosity"] for b in train])
     # the real branches must pass the checks (section 7): report the rejection rate on the validation set
     real_reject = []
@@ -137,7 +140,9 @@ def fit_t0(
     models: Dict[str, T0Model] = {}
     requests = [dict(c, length_nm=b.length, step_nm=b.step) for c, b in zip(val_conditions, val)]
     for mean in mean_models:
-        model = T0Model(mean, length_bounds=length_bounds, direction=direction, radius_residual=radius_residual).fit(train, encoder=encoder, shrinkage_std=shrinkage_std, max_iter=max_iter)
+        log(f"[t0] variant {mean}: fitting ...")
+        model = T0Model(mean, length_bounds=length_bounds, direction=direction, radius_residual=radius_residual).fit(train, encoder=encoder, shrinkage_std=shrinkage_std, max_iter=max_iter, progress=log)
+        log(f"[t0] variant {mean}: generating and checking the validation set ...")
         records, summary = generate_trunks(model, requests, limits, seed=seed, model_id=f"t0-{mean}")
         gen_f = [functionals(r["kappa1"], r["kappa2"], np.log(r["radius"]), r["step"], r["gamma"]) for r in records if r is not None]
         metrics = {f: compare([x[f] for x in gen_f], [x[f] for x in real_f]) for f in FUNCTIONALS}
