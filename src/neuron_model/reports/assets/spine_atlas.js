@@ -81,6 +81,7 @@ function hover(i) {
   const s = SRC[PTS.source[i]];
   const parts = [`<b>${s.name}</b>`, PTS.key[i]];
   if (s.kind === 'real') parts.push(`${PTS.cell_type[i] || 'тип неизвестен'} · ${PTS.compartment[i] || 'компартмент неизвестен'}`);
+  else if (s.kind === 'external') parts.push(`группа ${PTS.group ? PTS.group[i] : ''}`);
   else parts.push(PTS.valid[i] === false ? 'сетка невалидна' : 'сетка валидна');
   for (const m of ['Length', 'Volume']) if (PTS.metrics[m]) parts.push(`${D.metric_info[m].name}: ${fmt(disp(m, PTS.metrics[m][i]))}${unit(m).replace(', ', ' ')}`);
   if (PTS.mesh[i] >= 0) parts.push('<i>есть 3D-сетка</i>');
@@ -93,7 +94,7 @@ function drawMap(resetView) {
   for (const s of SRC) {
     const sid = ids.filter(i => PTS.source[i] === s.index);
     if (!sid.length) continue;
-    const marker = {size: s.kind === 'real' ? 5 : 6, symbol: SYMBOLS[s.index % SYMBOLS.length], opacity: s.kind === 'real' ? 0.55 : 0.8,
+    const marker = {size: s.kind === 'real' ? 5 : 6, symbol: s.symbol || SYMBOLS[s.index % SYMBOLS.length], opacity: s.kind === 'real' ? 0.55 : 0.8,
       line: {width: 0}};
     if (continuous) {
       marker.color = sid.map(colorValue); marker.colorscale = THEME.sequential;

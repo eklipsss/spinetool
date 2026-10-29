@@ -78,6 +78,11 @@ def main() -> None:
     parser.add_argument("--n-gen", type=int, default=600)
     parser.add_argument("--gen-meshes", type=int, default=120)
     parser.add_argument("--mesh-kind", default="postprocessed", choices=["raw", "postprocessed"])
+    parser.add_argument("--labid-manifest", type=Path, nargs="+", help="manifest(s) of the LabID S preprocessing (<converted tree>/labid/preprocessed/manifest.parquet): its spines are encoded by the same VAE and shown on both maps (not part of any comparison)")
+    parser.add_argument("--labid-path-mode", choices=("relative", "absolute"), default="relative")
+    parser.add_argument("--labid-groups", nargs="+", help="LabID groups to show (default: all present)")
+    parser.add_argument("--labid-n", type=int, default=150, help="spines per LabID group")
+    parser.add_argument("--labid-meshes", type=int, default=15, help="meshes per LabID group available in the viewer")
     parser.add_argument("--traversal-spines", type=int, default=4)
     parser.add_argument("--traversal-dirs", type=int, default=4)
     parser.add_argument("--traversal-steps", default="-2,-1,0,1,2")
@@ -105,21 +110,36 @@ def main() -> None:
         train = A.real_records(vae, train_index, args.n_train, seed=args.seed + 1, n_meshes=0, source="train") if len(train_index) else []
     gens = {name: A.generated_records(vae, path, name, n=args.n_gen, n_meshes=args.gen_meshes, mesh_kind=args.mesh_kind, seed=args.seed) for name, path in args.model}
 
-    # ---- sources and points (real first, then the generated sets)
+    labid = {}
+    if args.labid_manifest:
+        labid_index = load_spine_index(list(args.labid_manifest), path_mode=args.labid_path_mode, check_files=())
+        labid = A.labid_records(vae, labid_index, groups=args.labid_groups, n_per_group=args.labid_n, n_meshes=args.labid_meshes, seed=args.seed)
+        print(f"[atlas] LabID: " + ", ".join(f"{g} {len(rs)}" for g, rs in labid.items()), flush=True)
+
+    # ---- sources and points (real first, then the generated sets, then the LabID groups)
     colors = list(hk.SERIES)
     sources = [{"id": "real", "name": f"Реальные ({args.split})", "kind": "real", "color": hk.PALETTE["reference"], "n": len(real)}]
     for k, name in enumerate(gens):
         sources.append({"id": name, "name": name, "kind": "generated", "color": colors[k], "n": len(gens[name])})
-    records = list(real) + [r for name in gens for r in gens[name]]
+    # LabID groups: own colours (the 3-colour validated palette + two more, each group also by the diamond marker: Minnie = circles)
+    labid_colors = {"Wt": hk.PALETTE["series_2"], "Ab": hk.PALETTE["series_1"], "Wt+9009": "#2a6fb0", "Ab+9009": "#c46a00", "Wt_old": hk.PALETTE["series_3"]}
+    for g, rs in labid.items():
+        sources.append({"id": f"labid_{g}", "name": f"LabID {g}", "kind": "external", "symbol": "diamond", "color": labid_colors.get(g, "#555555"), "n": len(rs)})
+    records = list(real) + [r for name in gens for r in gens[name]] + [r for g in labid for r in labid[g]]
     src_index = {s["id"]: i for i, s in enumerate(sources)}
 
     lat = lambda rs: np.array([r.latent for r in rs if r.latent is not None]) if any(r.latent is not None for r in rs) else np.zeros((0, 1))
     real_lat = lat(real)
     gen_lat = {name: lat(rs) for name, rs in gens.items()}
-    xy_real, xy_gens, method = A.fit_map(real_lat, list(gen_lat.values()), method="umap", seed=args.seed)
+    lab_lat = {g: lat(rs) for g, rs in labid.items()}
+    xy_real, xy_all, method = A.fit_map(real_lat, list(gen_lat.values()) + list(lab_lat.values()), method="umap", seed=args.seed)
+    xy_gens, xy_lab = xy_all[: len(gens)], xy_all[len(gens):]
     xr, ref_stats = A.morph_matrix(real)
     xg = {name: A.morph_matrix(rs, ref_stats)[0] for name, rs in gens.items()}
-    pr, pg, _ = A.fit_map(xr, list(xg.values()), method="pca", seed=args.seed)
+    xl = {g: A.morph_matrix(rs, ref_stats)[0] for g, rs in labid.items()}
+    pr, pall, _ = A.fit_map(xr, list(xg.values()) + list(xl.values()), method="pca", seed=args.seed)
+    pg = pall[: len(gens)]
+    pl = pall[len(gens):]
 
     def place(rs, coords):
         out, k = [], 0
@@ -134,8 +154,10 @@ def main() -> None:
     latent_xy = place(real, xy_real)
     for (name, rs), c in zip(gens.items(), xy_gens):
         latent_xy += place(rs, c)
+    for (g, rs), c in zip(labid.items(), xy_lab):
+        latent_xy += place(rs, c)
     morph_xy = [[round(float(a), 4), round(float(b), 4)] for a, b in pr]
-    for c in pg:
+    for c in list(pg) + list(pl):
         morph_xy += [[round(float(a), 4), round(float(b), 4)] for a, b in c]
 
     meshes, mesh_ref = [], []
@@ -155,6 +177,7 @@ def main() -> None:
         "ctb": [r.meta.get("cell_type_binary") for r in records],
         "compartment": [r.meta.get("compartment") for r in records],
         "valid": [r.meta.get("valid") for r in records],
+        "group": [r.meta.get("labid_group") for r in records],
         "mesh": mesh_ref,
         "maps": {"latent": {"name": f"Латентное пространство VAE ({method})", "axis": method, "xy": latent_xy},
                  "morph": {"name": "Морфометрические признаки (PCA)", "axis": "ГК", "xy": morph_xy}},
@@ -219,6 +242,7 @@ def main() -> None:
         "split": args.split, "n_neurons": len(neurons),
         "footer": (f"Эталон — {len(real)} случайных шипиков сплита {args.split} из {len(neurons)} нейронов. Для оценки копирования закодировано "
                    f"{len(train)} обучающих шипиков. Сгенерированные наборы: " + ", ".join(f"{n} — {len(rs)} образцов ({p})" for (n, p), rs in zip(args.model, gens.values()))
+                   + (". Шипики LabID (ромбы; " + ", ".join(f"{g} — {len(rs)}" for g, rs in labid.items()) + ") закодированы тем же VAE и лишь проецируются на карты, построенные по шипикам Minnie65; в сравнения они не входят" if labid else "")
                    + f". Сетки в атласе упрощены для показа до {args.max_faces} треугольников, а все числа посчитаны по полным сеткам. Длины в мкм, объёмы в мкм³ (пересчёт из нм)."),
     }
     payload = {

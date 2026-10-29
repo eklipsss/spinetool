@@ -48,6 +48,7 @@ def main() -> None:
     parser.add_argument("--tp-dir", type=Path, required=True)
     parser.add_argument("--assembly", type=Path, help="output of assemble_branches.py on this set (assembled level)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--bootstrap", type=int, default=1000, help="resamplings of NEURONS for the interval of the median difference (0 = off)")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
@@ -82,6 +83,7 @@ def main() -> None:
         gen_rows.append({"branch_index": i, "length_nm": float(t["length"]), "n_spines": int(len(s)), **trunk_functionals(t)})
         gen_stats.append(spine_geometry_stats(s, th, r, float(t["length"])))
         sources.append(str(branches.loc[branches["branch_index"] == i, "source_branch"].iloc[0]))
+    gen_neurons = [k.split("/")[1] for k in sources]  # a generated branch shares the neuron of the request it copies (same conditions)
 
     # ---- real reference: the source branch of every request (paired list, duplicates kept)
     keys = key_series(table)
@@ -104,9 +106,9 @@ def main() -> None:
             real_stats.append(spine_geometry_stats(np.zeros(0), np.zeros(0), np.zeros(0), float(rec["length"])))
         real_neurons.append(key.split("/")[1])
 
-    gen_b, gen_s = collect(gen_rows, gen_stats)
-    real_b, real_s = collect(real_rows, real_stats)
-    result = compare_sets(gen_b, real_b, gen_s, real_s)
+    gen_b, gen_s = collect(gen_rows, gen_stats, gen_neurons)
+    real_b, real_s = collect(real_rows, real_stats, real_neurons)
+    result = compare_sets(gen_b, real_b, gen_s, real_s, n_boot=args.bootstrap)
     rng = np.random.default_rng(args.seed)
     half = split_halves(real_neurons, rng)
     idx_a, idx_b = np.flatnonzero(half), np.flatnonzero(~half)

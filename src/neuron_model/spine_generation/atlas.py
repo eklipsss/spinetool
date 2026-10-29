@@ -195,6 +195,27 @@ def real_records(vae: VAEHandle, index: Any, n: int, *, seed: int, n_meshes: int
     return out
 
 
+def labid_records(vae: VAEHandle, index: Any, *, groups: Optional[Sequence[str]] = None, n_per_group: int = 150, n_meshes: int = 20,
+                  seed: int = 0, progress: bool = True) -> Dict[str, List[SpineRecord]]:
+    """Spines of the LabID S preprocessing (converted tree, nm) per experimental group, encoded by the same VAE as the reference
+    (latent of the stored point cloud, stage-8 morphometrics, ``source`` = ``labid_<group>``). Not a reference set and not a
+    generated one: they only land on the maps fitted on the real Minnie65 spines (a shift = a difference of scale / microscopy)."""
+    from ..metadata import labid_group
+
+    frame = index.frame
+    group_of = frame["neuron_id"].astype(str).map(labid_group)
+    out: Dict[str, List[SpineRecord]] = {}
+    for g in (list(groups) if groups else sorted(group_of.dropna().unique())):
+        keys = frame.loc[group_of == g, "spine_key"]
+        if not len(keys):
+            continue
+        recs = real_records(vae, index.subset(keys), n_per_group, seed=seed, n_meshes=n_meshes, source=f"labid_{g}", progress=progress)
+        for r in recs:
+            r.meta["labid_group"] = g
+        out[g] = recs
+    return out
+
+
 def generated_records(vae: VAEHandle, seed_dir: Path, source: str, *, n: int, n_meshes: int, mesh_kind: str = "postprocessed",
                       seed: int = 0, progress: bool = True) -> List[SpineRecord]:
     """Samples of one generated set: latent of the mesh surface, morphometrics (attachment found geometrically, as in the
