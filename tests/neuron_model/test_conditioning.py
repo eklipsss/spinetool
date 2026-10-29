@@ -158,3 +158,19 @@ def test_neuron_level_permutation_separates_a_real_effect_from_neuron_style(tmp_
     path = tmp_path / "effects.json"
     path.write_text(__import__("json").dumps(report, default=float), encoding="utf-8")
     assert enabled_from_report(path) == ["real"] and enabled_from_report(path, mode="all") is None
+
+
+def test_refresh_manifest_metadata_fills_the_stale_columns():
+    if not (REPO / "datasets/minnie65/minnie65_limb_compartments_length_rule.parquet").exists():
+        pytest.skip("local metadata tables not present")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("refresh_manifest_metadata", REPO / "scripts/neuron_model/refresh_manifest_metadata.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    frame = pd.DataFrame({"dataset": ["minnie65"] * 3, "neuron_id": ["864691134886335738"] * 3, "limb_id": ["000", "001", "002"],
+                          "compartment": [None] * 3, "cell_type_binary": [None] * 3, "health": [None] * 3, "extra": [1, 2, 3]})
+    out = module.refresh_metadata(frame, REPO / "datasets")
+    assert list(out["compartment"]) == ["apical", "axon_like", "basal"]
+    assert set(out["cell_type_binary"]) == {"excitatory"} and set(out["health"]) == {"healthy"} and set(out["species"]) == {"mouse"}
+    assert list(out["extra"]) == [1, 2, 3] and frame["compartment"].isna().all()  # the input is not modified
