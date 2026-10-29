@@ -11,7 +11,7 @@ data:
   io_threads: 16
   train_splits: [train]
   val_splits: [val]
-  exclude_compartments: [axon_like]  # user decision 2026-10-20: dendrites only (axon_like is not a condition category, it was pooled with unknown); [] = keep
+  exclude_compartments: [axon_like, None, nan]  # dendrites with a KNOWN compartment (the same population as P0, 2026-10-29); [axon_like] = also neurons without a compartment table; [] = keep all
   max_val_branches: 3000           # generation + functionals on at most this many validation branches
 
 model:
