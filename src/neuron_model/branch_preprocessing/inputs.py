@@ -28,6 +28,10 @@ def _mapping_paths(cfg: BranchPreprocessingConfig):
         raise ValueError(f"no merged-branch mapping known for dataset {cfg.dataset!r}")
     folder, mapping_name, summary_name = MAPPING_FILES[kind]
     base = Path(cfg.metadata_root) / folder / "merged_branches"
+    if kind == "h01":
+        from ..metadata import h01_merged_branches_dir
+
+        base = h01_merged_branches_dir(Path(cfg.metadata_root))
     return base / mapping_name, (base / summary_name) if summary_name else None
 
 
@@ -52,8 +56,8 @@ def load_members(cfg: BranchPreprocessingConfig) -> pd.DataFrame:
             "merged_parent_ambiguous": raw.get("merged_parent_ambiguous", pd.Series(False, index=raw.index)).astype(bool),
         }
     )
-    # H01 prefixes carry a "neuron_" prefix in front of the id while folders do not
-    out["neuron_id"] = out["neuron_id"].str.replace(r"^neuron_", "", regex=True)
+    # H01_Seg: folders are ``neuron_<id>`` and the prefixes carry the same name, so neuron_id is kept as is
+    # (the same key as in the S tables, which take the folder name)
     return out
 
 

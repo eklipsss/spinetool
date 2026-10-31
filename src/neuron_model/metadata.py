@@ -68,6 +68,18 @@ def labid_group(neuron_id: str) -> Optional[str]:
 PREFIX_RE = re.compile(r"^(?P<neuron>.+)_limb_(?P<limb>\d+)_branch_(?P<branch>\d+)$")
 
 
+H01_MERGED_DIRS = ("h01/merged_branches", "H01/merged_branches", "H01/H01_Seg/merged_branches")
+
+
+def h01_merged_branches_dir(metadata_root: Path) -> Path:
+    """First existing ``merged_branches`` folder of H01 (the segmentation ``H01_Seg`` lies one level deeper)."""
+    root = Path(metadata_root)
+    for rel in H01_MERGED_DIRS:
+        if (root / rel).exists():
+            return root / rel
+    return root / H01_MERGED_DIRS[0]
+
+
 def load_metadata_tables(metadata_root: Path) -> Dict[str, Any]:
     metadata_root = Path(metadata_root)
     if not metadata_root.exists():
@@ -95,7 +107,7 @@ def load_metadata_tables(metadata_root: Path) -> Dict[str, Any]:
     mapping_paths = {
         "minnie65": minnie_root / "merged_branches" / "single_child_merge_mapping.parquet",
         "minnie": minnie_root / "merged_branches" / "single_child_merge_mapping.parquet",
-        "h01": h01_root / "merged_branches" / "h01_single_child_merge_mapping.parquet",
+        "h01": h01_merged_branches_dir(metadata_root) / "h01_single_child_merge_mapping.parquet",
     }
     metadata["merge_lookup"] = {}
     for dataset, path in mapping_paths.items():
