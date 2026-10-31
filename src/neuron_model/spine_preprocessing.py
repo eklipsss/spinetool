@@ -49,6 +49,7 @@ from .spine_geometry import (
     atomic_export_mesh,
     boundary_edge_count,
     boundary_loops,
+    clean_input_mesh,
     cgal_skeleton_segments_from_trimesh_isolated,
     detect_attachment_loop,
     distance_to_segments,
@@ -191,6 +192,10 @@ class SpinePreprocessingConfig:
     attachment_weight_area: float = 0.28
     attachment_weight_distance: float = 0.4
     attachment_ambiguity_ratio: float = 0.85
+    # raw-mesh cleaning before sealing (spine_geometry.clean_input_mesh; off for Minnie65, on for H01_Seg). Enter the
+    # seal hash only when switched on (OPTIONAL_HASH_DEFAULTS), so the Minnie65 hash is unchanged
+    input_drop_duplicate_faces: bool = False
+    input_min_component_face_fraction: float = 0.0
 
     # stage 2: false spines
     false_spine_threshold_nm: float = 300.0
@@ -277,11 +282,22 @@ class SpinePreprocessingConfig:
         )
 
     def false_spine_threshold(self, dataset: str) -> float:
-        return float(dict(self.false_spine_threshold_nm_by_dataset).get(dataset, self.false_spine_threshold_nm))
+        """Per-dataset threshold: exact dataset name first, then its kind (``H01_Seg`` -> ``h01``: the folder name of
+        a segmentation is not the key of the config), else the global value."""
+        from .metadata import dataset_kind
+
+        by_dataset = dict(self.false_spine_threshold_nm_by_dataset)
+        if dataset in by_dataset:
+            return float(by_dataset[dataset])
+        return float(by_dataset.get(dataset_kind(dataset), self.false_spine_threshold_nm))
 
     def stage_hash(self, stage: str) -> str:
         """Hash of the parameters that affect the results of ``stage`` (not selection/execution)."""
-        payload = {name: _jsonable(getattr(self, name)) for name in STAGE_PARAMS.get(stage, ())}
+        payload = {
+            name: _jsonable(getattr(self, name))
+            for name in STAGE_PARAMS.get(stage, ())
+            if name not in OPTIONAL_HASH_DEFAULTS or getattr(self, name) != OPTIONAL_HASH_DEFAULTS[name]
+        }
         payload.update(
             {
                 "stage": stage,
@@ -292,6 +308,10 @@ class SpinePreprocessingConfig:
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
+# parameters added after datasets were processed: hashed only when they differ from these defaults, so adding them
+# does not invalidate finished stages
+OPTIONAL_HASH_DEFAULTS: Dict[str, Any] = {"input_drop_duplicate_faces": False, "input_min_component_face_fraction": 0.0}
+
 STAGE_PARAMS: Dict[str, Tuple[str, ...]] = {
     STAGE_SEAL: (
         "attachment_weight_perimeter",
@@ -300,6 +320,8 @@ STAGE_PARAMS: Dict[str, Tuple[str, ...]] = {
         "attachment_ambiguity_ratio",
         "degenerate_area_tol",
         "check_self_intersections",
+        "input_drop_duplicate_faces",
+        "input_min_component_face_fraction",
     ),
     STAGE_FALSE_SPINE: ("false_spine_threshold_nm", "false_spine_threshold_nm_by_dataset", "skeleton_sample_points"),
     STAGE_ORIENT: ("only_valid_for_orientation", "min_tangent_component", "physical_unit"),
@@ -2183,6 +2205,9 @@ def _seal_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: Step
         raise FileNotFoundError(f"Missing branch skeleton: {record.branch_skeleton_path}")
 
     mesh = timer.run("load mesh", lambda: load_trimesh(record.source_path, process=False))
+    mesh, clean_info = clean_input_mesh(
+        mesh, drop_duplicate_faces=cfg.input_drop_duplicate_faces, min_component_face_fraction=cfg.input_min_component_face_fraction
+    )
     segments = load_skeleton_segments_cached(record.branch_skeleton_path)
     n_boundary_before = boundary_edge_count(mesh)
 
@@ -2328,6 +2353,7 @@ def _seal_worker(record: SpineRecord, cfg: SpinePreprocessingConfig, timer: Step
         "attachment_ambiguous": bool(review_reason is not None),
         "attachment_method": attachment_method,
         "n_boundary_edges_before": n_boundary_before,
+        **clean_info,
         "n_boundary_edges_after": report["n_boundary_edges"],
         "n_holes_before": n_holes_before,
         "n_holes_filled": n_holes_before - len(boundary_loops(repaired)),

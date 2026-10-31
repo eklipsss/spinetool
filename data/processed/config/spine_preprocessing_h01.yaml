@@ -71,6 +71,11 @@ general:
   staging_move_threads: 8      # parallel file copies to the NAS
 
 sealing:
+  # H01_Seg (2026-11-01): spine meshes carry loose fragments of 1-9 faces and duplicated faces; 30 % failed sealing
+  # (watertight=False, boundary_edges=0). Drop exact duplicate faces and components < 5 % of the faces before sealing
+  # (spine_geometry.clean_input_mesh; only faces are removed, vertex indices stay those of the raw mesh).
+  input_drop_duplicate_faces: true
+  input_min_component_face_fraction: 0.05
   # Distance to the branch skeleton raised from 0.25 to 0.4 (perimeter/area
   # scaled down, same 8:7 ratio as before) - decided after manual review of
   # every spine whose seal status changed on a real neuron (864691134886335738):

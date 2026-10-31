@@ -112,8 +112,10 @@ def main() -> None:
     parser.add_argument("--mode", choices=("prior", "reconstruction"), default="prior")
     parser.add_argument("--n-samples", type=int, default=50)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--temperature", type=float, default=1.0, help="prior mode: z = temperature * N(0, I); <1 stays closer to the data manifold (less diverse)")
-    parser.add_argument("--prior", choices=("normal", "data"), default="normal", help="prior mode: 'normal' = N(0, I); 'data' = a Gaussian (or mixture, --gmm-components) fitted to the encoder means of --fit-n real spines of --fit-split. Meshes go to meshes_data_prior/")
+    parser.add_argument("--temperature", type=float, default=1.0, help="prior mode: z = temperature * N(0, I) (with --prior learned: eps scaled before the inverse flow); <1 stays closer to the data manifold (less diverse)")
+    parser.add_argument("--prior", choices=("normal", "data", "learned"), default="normal", help="prior mode: 'normal' = N(0, I); 'data' = a Gaussian (or mixture, --gmm-components) fitted to the encoder means of --fit-n real spines of --fit-split. Meshes go to meshes_data_prior/; "
+                        "'learned' = a prior saved by fit_latent_prior.py (--latent-prior: flow_prior.pt or gaussian_prior.npz; z = f^-1(temperature * eps)), meshes go to meshes_<flow|gaussian>_prior/")
+    parser.add_argument("--latent-prior", type=Path, help="--prior learned: file (or folder) written by fit_latent_prior.py")
     parser.add_argument("--fit-split", default="train")
     parser.add_argument("--fit-n", type=int, default=2000)
     parser.add_argument("--gmm-components", type=int, default=1, help="--prior data: 1 = one full-covariance Gaussian")
@@ -155,6 +157,15 @@ def main() -> None:
         z_all = _sample_data_prior(codes, args.n_samples, args.seed, args.gmm_components)
         keys = [None] * len(z_all)
         out_root = run.root / "meshes_data_prior"
+    elif args.mode == "prior" and args.prior == "learned":
+        if args.latent_prior is None:
+            parser.error("--prior learned needs --latent-prior")
+        from src.neuron_model.spine_generation.models.spine_vae.latent_prior import load_prior
+
+        prior = load_prior(args.latent_prior)
+        z_all = prior.sample(args.n_samples, temperature=args.temperature, seed=args.seed).astype(np.float32)
+        keys = [None] * len(z_all)
+        out_root = run.root / (f"meshes_{prior.kind}_prior" + (f"_T{args.temperature:g}" if args.temperature != 1.0 else ""))
     elif args.mode == "prior":
         z_all = (args.temperature * model.sample_prior(args.n_samples, generator=torch.Generator().manual_seed(args.seed), device="cpu")).numpy()
         keys = [None] * len(z_all)
@@ -183,6 +194,7 @@ def main() -> None:
         )
         config = {
             "mode": args.mode, "resolution": resolution, "coord_scale": coord_scale, "temperature": args.temperature if args.mode == "prior" else None,
+            "prior": args.prior if args.mode == "prior" else None, "latent_prior": str(args.latent_prior) if args.latent_prior else None,
             "spine_key": key, "split": args.split if args.mode == "reconstruction" else None, "generation_seed": args.seed,
         }
         config["bbox_nm"] = {"low": list(box[0]), "high": list(box[1]), "cropped_to_spine": bool(args.crop_to_spine)}

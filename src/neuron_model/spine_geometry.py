@@ -70,6 +70,41 @@ def atomic_export_mesh(mesh: Any, output_path: Path) -> None:
     tmp_path.replace(output_path)
 
 
+def clean_input_mesh(mesh: Any, *, drop_duplicate_faces: bool = False, min_component_face_fraction: float = 0.0):
+    """``(mesh, info)``: the raw spine mesh without exact duplicate faces (the same three vertices, any order) and
+    without connected components smaller than ``min_component_face_fraction`` of the faces.
+
+    Why (H01_Seg, 2026-11-01): 30 % of the H01 spines failed sealing ("watertight=False, boundary_edges=0"). Their meshes
+    carry a few loose fragments of 1-9 faces (< 3 % of the area) and duplicated faces, i.e. edges shared by more than two
+    faces; hole filling cannot make such a mesh watertight. Without them every checked spine seals watertight.
+
+    Only FACES are removed, the vertex array is kept as is, so vertex indices written by the sealing stage (attachment
+    loop) still refer to the raw mesh. With both options off the mesh is returned unchanged."""
+    info = {"input_duplicate_faces_dropped": 0, "input_components_dropped": 0, "input_faces_dropped": 0}
+    if not drop_duplicate_faces and min_component_face_fraction <= 0:
+        return mesh, info
+    trimesh = require_trimesh()
+    faces = np.asarray(mesh.faces)
+    n0 = len(faces)
+    if drop_duplicate_faces and len(faces):
+        _, first = np.unique(np.sort(faces, axis=1), axis=0, return_index=True)
+        faces = faces[np.sort(first)]
+        info["input_duplicate_faces_dropped"] = int(n0 - len(faces))
+    if min_component_face_fraction > 0 and len(faces):
+        tmp = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=faces, process=False)
+        labels = trimesh.graph.connected_component_labels(tmp.face_adjacency, node_count=len(faces))
+        counts = np.bincount(labels)
+        keep = counts[labels] >= float(min_component_face_fraction) * len(faces)
+        if not keep.any():  # never drop everything: keep the largest component
+            keep = labels == int(np.argmax(counts))
+        info["input_components_dropped"] = int((counts < float(min_component_face_fraction) * len(faces)).sum()) if keep.sum() < len(faces) else 0
+        faces = faces[keep]
+    info["input_faces_dropped"] = int(n0 - len(faces))
+    if info["input_faces_dropped"] == 0:
+        return mesh, info
+    return trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=faces, process=False), info
+
+
 def boundary_edge_count(mesh: Any) -> int:
     if len(mesh.faces) == 0:
         return 0
