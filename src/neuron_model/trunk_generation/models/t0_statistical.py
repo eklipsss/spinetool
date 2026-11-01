@@ -16,7 +16,9 @@ Mean log-radius profile ``m(s)``, two competing descriptions:
 
 - ``parabola`` (T0-a): r(s) = r_L + alpha (L - s)^2 (Bird, Cuntz 2016), per-branch pair (log r_L, log r_0/r_L)
   distributed N(B^T x, S) with a linear dependence on log L and the conditions;
-- ``gam`` (T0-b): m(s) = f(u, log L, C) + b_branch, penalised B-spline model plus a random branch shift.
+- ``gam`` (T0-b): m(s) = f(u, log L, C) + b_branch, penalised B-spline model plus a random branch shift;
+- ``parabola_mix``: T0-a with a mixture of experts for the pair (``ParabolicMixtureMean``: components with their own
+  regression and covariance, the component probabilities a softmax regression on the design; the thin distal population).
 
 Branch length for fully automatic generation: log-normal mixture (<= 3 components) per group.
 
@@ -142,6 +144,159 @@ class ParabolicMean:
         return obj
 
 
+def _softmax(z: np.ndarray) -> np.ndarray:
+    z = z - z.max(axis=1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=1, keepdims=True)
+
+
+def _gauss_logpdf(x: np.ndarray, mean: np.ndarray, cov: np.ndarray) -> np.ndarray:
+    """Row-wise log N(x_i; mean_i, cov) for 2-D (or d-D) rows."""
+    chol = np.linalg.cholesky(cov)
+    diff = np.linalg.solve(chol, (x - mean).T)
+    return -0.5 * ((diff ** 2).sum(0) + 2.0 * np.log(np.diag(chol)).sum() + x.shape[1] * math.log(2.0 * math.pi))
+
+
+class ParabolicMixtureMean(ParabolicMean):
+    """T0-a with a mixture of experts for the per-branch pair theta = (log r_L, log r_0/r_L):
+
+        p(theta | x) = sum_k pi_k(x) N(theta; B_k^T x, S_k),   pi(x) = softmax(G^T x)
+
+    Why (2026-10-29): with one Gaussian the generated radii miss the thin tail of the real ones (5th percentile 141 vs
+    107 nm, share <= 150 nm 7.5 % vs 18.5 %), and thin real branches are distal and spine-free; a Gaussian whose mean
+    is linear in the soma distance shifts the whole distribution instead of adding a separate thin population. Here a
+    component can be "thin" and the design (soma distance, terminal flag, cell type, compartment, log L) sets how
+    likely a branch falls into it. ``n_components = 1`` is exactly ``ParabolicMean``.
+
+    Fitting: EM. M-step = weighted ridge regressions (the intercept unpenalised) and weighted covariances (floor
+    ``cov_floor`` on the diagonal) per component, the gating = multinomial logistic regression on the soft labels with a
+    ridge penalty (L-BFGS); start = k-means of the residuals of the one-Gaussian fit. ``n_components="auto"``: the K
+    of 1..``max_components`` with the lowest BIC (written to ``fit_info``)."""
+
+    kind = "parabola_mix"
+
+    def __init__(self, n_components: Any = "auto", max_components: int = 3, ridge: float = 1.0, gate_ridge: float = 1.0,
+                 cov_floor: float = 1e-4, max_iter: int = 300, tol: float = 1e-7, seed: int = 0) -> None:
+        super().__init__()
+        self.n_components = n_components
+        self.max_components = int(max_components)
+        self.ridge, self.gate_ridge, self.cov_floor = float(ridge), float(gate_ridge), float(cov_floor)
+        self.max_iter, self.tol, self.seed = int(max_iter), float(tol), int(seed)
+        self.coefs: Optional[np.ndarray] = None  # [K, d, 2]
+        self.covs: Optional[np.ndarray] = None   # [K, 2, 2]
+        self.gate: Optional[np.ndarray] = None   # [d, K] (last column 0)
+        self.fit_info: Dict[str, Any] = {}
+
+    # ------------------------------------------------------------ EM
+    def _penalty(self, d: int) -> np.ndarray:
+        pen = self.ridge * np.eye(d)
+        pen[0, 0] = 0.0
+        return pen
+
+    def _fit_gate(self, x: np.ndarray, resp: np.ndarray, start: np.ndarray) -> np.ndarray:
+        from scipy.optimize import minimize
+
+        n, d = x.shape
+        k = resp.shape[1]
+        if k == 1:
+            return np.zeros((d, 1))
+        pen = np.ones(d)
+        pen[0] = 0.0
+
+        def fun(flat):
+            g = np.zeros((d, k))
+            g[:, :-1] = flat.reshape(d, k - 1)
+            logits = x @ g
+            logp = logits - np.logaddexp.reduce(logits, axis=1, keepdims=True)
+            loss = -(resp * logp).sum() + 0.5 * self.gate_ridge * (pen[:, None] * g[:, :-1] ** 2).sum()
+            grad = x.T @ (np.exp(logp) - resp)
+            grad = grad[:, :-1] + self.gate_ridge * pen[:, None] * g[:, :-1]
+            return loss, grad.ravel()
+
+        res = minimize(fun, start[:, :-1].ravel(), jac=True, method="L-BFGS-B", options={"maxiter": 200})
+        g = np.zeros((d, k))
+        g[:, :-1] = res.x.reshape(d, k - 1)
+        return g
+
+    def _em(self, theta: np.ndarray, x: np.ndarray, k: int) -> Dict[str, Any]:
+        n, d = x.shape
+        pen = self._penalty(d)
+        if k == 1:
+            resp = np.ones((n, 1))
+        else:
+            from sklearn.cluster import KMeans
+
+            base = np.linalg.solve(x.T @ x + pen, x.T @ theta)
+            labels = KMeans(n_clusters=k, n_init=10, random_state=self.seed).fit_predict(theta - x @ base)
+            resp = np.eye(k)[labels] * 0.9 + 0.1 / k
+        gate = np.zeros((d, k))
+        loglik_old = -np.inf
+        coefs, covs = np.zeros((k, d, 2)), np.zeros((k, 2, 2))
+        for it in range(self.max_iter):
+            for j in range(k):
+                w = resp[:, j]
+                coefs[j] = np.linalg.solve(x.T @ (x * w[:, None]) + pen, x.T @ (theta * w[:, None]))
+                res = theta - x @ coefs[j]
+                covs[j] = (res * w[:, None]).T @ res / max(w.sum(), 1e-9) + self.cov_floor * np.eye(2)
+            gate = self._fit_gate(x, resp, gate)
+            log_pi = np.log(np.clip(_softmax(x @ gate), 1e-300, None))
+            comp = np.column_stack([log_pi[:, j] + _gauss_logpdf(theta, x @ coefs[j], covs[j]) for j in range(k)])
+            total = np.logaddexp.reduce(comp, axis=1)
+            resp = np.exp(comp - total[:, None])
+            loglik = float(total.sum())
+            if loglik - loglik_old < self.tol * n:
+                break
+            loglik_old = loglik
+        n_params = k * (2 * d + 3) + (k - 1) * d
+        return {"k": k, "coefs": coefs.copy(), "covs": covs.copy(), "gate": gate, "loglik": loglik, "iterations": it + 1,
+                "bic": -2.0 * loglik + n_params * math.log(n), "weights": resp.mean(axis=0).tolist()}
+
+    def fit(self, branches: Sequence[T0Branch], ridge: Optional[float] = None) -> "ParabolicMixtureMean":
+        if ridge is not None:
+            self.ridge = float(ridge)
+        theta = np.vstack([self._fit_branch(b) for b in branches])
+        x = np.vstack([b.design for b in branches])
+        ks = range(1, self.max_components + 1) if self.n_components == "auto" else [int(self.n_components)]
+        fits = [self._em(theta, x, k) for k in ks]
+        best = min(fits, key=lambda f: f["bic"])
+        self.coefs, self.covs, self.gate = best["coefs"], best["covs"], best["gate"]
+        # the one-Gaussian fields of the parent: the first component (keeps ParabolicMean users working)
+        self.coef, self.cov = self.coefs[0], self.covs[0]
+        self.fit_info = {
+            "chosen_k": best["k"],
+            "per_k": {str(f["k"]): {"bic": f["bic"], "loglik": f["loglik"], "iterations": f["iterations"], "weights": f["weights"]} for f in fits},
+            "components": [{"weight": w, "log_r_L_intercept_nm": float(math.exp(c[0, 0])), "sd_log_r_L": float(math.sqrt(v[0, 0]))}
+                           for w, c, v in zip(best["weights"], best["coefs"], best["covs"])],
+        }
+        return self
+
+    # ------------------------------------------------------------ sampling / io
+    def component_probabilities(self, design: np.ndarray) -> np.ndarray:
+        return _softmax(np.atleast_2d(design) @ self.gate)
+
+    def sample_theta(self, design: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        pi = self.component_probabilities(design)[0]
+        k = int(rng.choice(len(pi), p=pi))
+        return rng.multivariate_normal(design @ self.coefs[k], self.covs[k])
+
+    def sample_log_mean(self, design: np.ndarray, n_nodes: int, rng: np.random.Generator) -> np.ndarray:
+        return self._profile(self.sample_theta(design, rng), n_nodes)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "coefs": self.coefs.tolist(), "covs": self.covs.tolist(), "gate": self.gate.tolist(),
+                "settings": {"n_components": self.n_components, "max_components": self.max_components, "ridge": self.ridge,
+                             "gate_ridge": self.gate_ridge, "cov_floor": self.cov_floor},
+                "fit_info": self.fit_info}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ParabolicMixtureMean":
+        obj = cls(**d.get("settings", {}))
+        obj.coefs, obj.covs, obj.gate = np.asarray(d["coefs"]), np.asarray(d["covs"]), np.asarray(d["gate"])
+        obj.coef, obj.cov = obj.coefs[0], obj.covs[0]
+        obj.fit_info = d.get("fit_info", {})
+        return obj
+
+
 class GamMean:
     """T0-b: m = f(u, z log L, conditions) + b_branch, b ~ N(0, sigma_b^2)."""
 
@@ -198,7 +353,7 @@ class GamMean:
         return obj
 
 
-MEAN_MODELS = {"parabola": ParabolicMean, "gam": GamMean}
+MEAN_MODELS = {"parabola": ParabolicMean, "parabola_mix": ParabolicMixtureMean, "gam": GamMean}
 
 
 # ---------------------------------------------------------------------------

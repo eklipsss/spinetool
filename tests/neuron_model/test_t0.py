@@ -85,7 +85,7 @@ def test_group_shrinkage_separates_large_groups_and_keeps_small_close_to_pooled(
     assert model.params_for("mouse|human|unseen").length_scales[0] == pytest.approx(pooled)  # unknown group -> pooled
 
 
-@pytest.mark.parametrize("mean", ["parabola", "gam"])
+@pytest.mark.parametrize("mean", ["parabola", "parabola_mix", "gam"])
 def test_sampling_reproduces_statistics_and_geometry_checks(mean):
     rng = np.random.default_rng(3)
     branches, enc = _simulate(rng, 400)

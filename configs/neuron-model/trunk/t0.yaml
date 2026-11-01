@@ -15,7 +15,7 @@ data:
   max_val_branches: 3000           # generation + functionals on at most this many validation branches
 
 model:
-  mean_models: [parabola, gam]
+  mean_models: [parabola, parabola_mix, gam]   # parabola_mix (2026-11-01): mixture of experts for the pair (log r_L, log r_0/r_L), K by BIC; the variant with the best validation functionals is kept
   shrinkage_std: 0.3
   direction: multiscale            # multiscale: smooth Gaussian wiggle of the heading + slow turning relaxing to the axis; tilt: the slow part alone; kappa: OU on the bending (old, tortuosity grows with L)
   radius_residual: multiscale      # multiscale: two AR(1) scales + noise fitted to the semivariogram, amplitude = random effect of the branch (default since 2026-10-28; full-data diagnose_radius.py: one scale lost the 0.5-8 um variation); branch: ONE AR(1) with the branch amplitude; pooled: the joint OU (old)
