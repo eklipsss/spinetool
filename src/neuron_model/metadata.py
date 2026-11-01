@@ -26,8 +26,13 @@ EXCITATORY_CELL_TYPES = {
     "6P-U",
     "WM-P",
     "Unsure E",
+    # H01 (h01_celltype.csv): pyramidal and spiny non-pyramidal neurons
+    "PYRAMIDAL",
+    "SPINY_ATYPICAL",
 }
-INHIBITORY_CELL_TYPES = {"BC", "BPC", "MC", "NGC", "Unsure I"}
+INHIBITORY_CELL_TYPES = {"BC", "BPC", "MC", "NGC", "Unsure I", "INTERNEURON"}
+# not neurons (H01 "OLIGO" = oligodendrocyte): no binary type; excluded from the spine and branch models by the callers
+NON_NEURONAL_CELL_TYPES = {"OLIGO"}
 
 # LabID: group folder -> (health, treatment, imaging series). branch ids: labid_unit_id
 LABID_GROUPS = {
@@ -117,6 +122,19 @@ def load_metadata_tables(metadata_root: Path) -> Dict[str, Any]:
             metadata["merge_lookup"][dataset] = {
                 (str(row.neuron_id), int(row.limb_id), int(row.original_branch_id)): int(row.merged_branch_id)
                 for row in mapping.itertuples()
+            }
+
+    # H01: h01_celltype.csv / h01_layer.csv next to the merged_branches folder of the segmentation (neuron_id without the
+    # "neuron_" prefix of the folders, which is added here so the keys match the S / branch tables)
+    h01_dir = h01_merged_branches_dir(metadata_root).parent
+    for name, key, column in (("h01_celltype.csv", "cell_types", "cell_type"), ("h01_layer.csv", "layers", "layer")):
+        path = h01_dir / name
+        if path.exists():
+            table = pd.read_csv(path)
+            metadata.setdefault(key, {})["h01"] = {
+                f"neuron_{int(row.neuron_id)}": str(getattr(row, column))
+                for row in table.itertuples()
+                if pd.notna(row.neuron_id) and pd.notna(getattr(row, column))
             }
 
     cell_path = minnie_root / "cell_types_with_nucleus.csv"

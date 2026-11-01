@@ -66,7 +66,10 @@ def prepare_conditions(index, condition_cfg, cond_dim: int, *, resume_dir=None):
         if enabled is None and not condition_cfg.get("effects_report") and str(condition_cfg.get("mode", "auto")) != "all":
             print("WARNING: condition.blocks and condition.effects_report are not set: EVERY block is enabled; run "
                   "scripts/neuron_model/condition_effects.py first (design section 6, check 0) or set condition.mode=all explicitly", flush=True)
-        encoder = ConditionEncoder(cond_dim=int(cond_dim), enabled=list(enabled) if enabled is not None else None)
+        from src.neuron_model.spine_generation.conditioning import default_blocks
+
+        enabled = list(enabled) if enabled is not None else None
+        encoder = ConditionEncoder(default_blocks(int(cond_dim), enabled), cond_dim=int(cond_dim), enabled=enabled)
     conditions = spine_conditions(index.frame, resolve_path(condition_cfg.get("metadata_root", "datasets")))
     excluded = set(condition_cfg.get("exclude_compartments", ["axon_like"]))
     keep = ~conditions["compartment"].isin(excluded)
@@ -75,6 +78,28 @@ def prepare_conditions(index, condition_cfg, cond_dim: int, *, resume_dir=None):
     info = {"n_spines": int(keep.sum()), "n_excluded_compartment": int((~keep).sum()), "counts": condition_summary(conditions[keep], encoder),
             "encoder": encoder.to_dict()}
     return encoder, cond_by_key, info
+
+
+def balance_weights(train_ds, encoder, balance_cfg):
+    """Sampling weights that up-weight rare values of one condition block: ``condition.balance: {block: cell_type_binary,
+    power: 0.5}`` -> weight of a spine = (number of training spines with its value) ** -power (spines without a value
+    form their own group). power 0 = plain shuffling, 1 = every value equally often. Printed: the share of each value
+    before and after."""
+    if not balance_cfg or not balance_cfg.get("block") or float(balance_cfg.get("power", 0.0)) <= 0:
+        return None
+    import numpy as np
+
+    block, power = str(balance_cfg["block"]), float(balance_cfg["power"])
+    sl = encoder.slices()[block]
+    onehot = np.asarray(train_ds.cond)[:, sl]
+    groups = np.where(onehot.max(axis=1) > 0, onehot.argmax(axis=1), -1)
+    values, counts = np.unique(groups, return_counts=True)
+    count_of = dict(zip(values.tolist(), counts.tolist()))
+    weights = np.array([count_of[g] ** -power for g in groups], dtype=float)
+    names = dict(encoder.blocks)[block]
+    share = {(names[v] if v >= 0 else "unknown"): (round(c / len(groups), 4), round(float(weights[groups == v].sum() / weights.sum()), 4)) for v, c in count_of.items()}
+    print(f"balance {block} power {power}: share of spines per value (data, sampled) {share}", flush=True)
+    return weights
 
 
 def main() -> None:
@@ -130,7 +155,9 @@ def main() -> None:
     # optimizer.schedule: e.g. "optimizer.schedule={type: cosine, min_lr: 1.0e-5}" (default: constant lr); on --resume of a
     # run without one it starts at the current step (loop.run_training)
     scheduler = make_lr_scheduler(optimizer, cfg["optimizer"].get("schedule"), int(train_cfg["max_steps"]))
-    loader = make_loader(train_ds, batch_size=int(data_cfg["batch_size"]), shuffle=True, seed=int(cfg["seed"]), num_workers=int(data_cfg.get("num_workers", 0)), drop_last=True)
+    weights = balance_weights(train_ds, encoder, condition_cfg.get("balance")) if encoder is not None else None
+    loader = make_loader(train_ds, batch_size=int(data_cfg["batch_size"]), shuffle=True, seed=int(cfg["seed"]), num_workers=int(data_cfg.get("num_workers", 0)), drop_last=True,
+                         weights=weights)
     loop = LoopConfig.from_mapping({**train_cfg, "precision": cfg.get("precision")})
     result = run_training(
         run,

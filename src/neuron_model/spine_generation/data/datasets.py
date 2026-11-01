@@ -215,16 +215,23 @@ class SDFDataset:
         return item
 
 
-def make_loader(dataset, *, batch_size: int, shuffle: bool, seed: int, num_workers: int = 0, drop_last: bool = False, pin_memory: Optional[bool] = None):
-    """DataLoader with reproducible shuffling and worker seeding."""
+def make_loader(dataset, *, batch_size: int, shuffle: bool, seed: int, num_workers: int = 0, drop_last: bool = False, pin_memory: Optional[bool] = None,
+                weights: Optional[Sequence[float]] = None):
+    """DataLoader with reproducible shuffling and worker seeding. ``weights``: draw items with these probabilities
+    (with replacement, ``len(dataset)`` per epoch) instead of shuffling - balancing of rare condition values."""
     import torch
 
     from ..experiment.seed import torch_generator, worker_init_fn
 
+    sampler = None
+    if weights is not None:
+        sampler = torch.utils.data.WeightedRandomSampler(torch.as_tensor(weights, dtype=torch.double), num_samples=len(dataset), replacement=True,
+                                                         generator=torch_generator(seed))
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle and sampler is None,
+        sampler=sampler,
         num_workers=num_workers,
         drop_last=drop_last,
         generator=torch_generator(seed),

@@ -36,7 +36,7 @@ def test_encoder_layout_encode_decode_parse_and_persistence(tmp_path):
     enc.save(tmp_path / "enc.json")
     assert ConditionEncoder.load(tmp_path / "enc.json").to_dict() == enc.to_dict()
     with pytest.raises(ValueError, match="cond_dim"):
-        ConditionEncoder(cond_dim=6)
+        ConditionEncoder([(n, v) for n, v in DEFAULT_BLOCKS], cond_dim=6)  # an explicit schema too wide for the model
 
 
 def test_block_dropout_rates():
@@ -174,3 +174,63 @@ def test_refresh_manifest_metadata_fills_the_stale_columns():
     assert list(out["compartment"]) == ["apical", "axon_like", "basal"]
     assert set(out["cell_type_binary"]) == {"excitatory"} and set(out["health"]) == {"healthy"} and set(out["species"]) == {"mouse"}
     assert list(out["extra"]) == [1, 2, 3] and frame["compartment"].isna().all()  # the input is not modified
+
+
+def test_cell_type_block_fits_a_wider_model_and_implies_the_binary_type():
+    from src.neuron_model.spine_generation.conditioning import default_blocks
+
+    old = ConditionEncoder(enabled=["cell_type_binary"])  # cond_dim 22: the layout of the earlier runs
+    assert "cell_type" not in old.names and old.width == 15
+    assert [n for n, _ in default_blocks(22, ["cell_type_binary"])] == old.names
+    wide = ConditionEncoder(default_blocks(32, ["cell_type_binary", "cell_type"]), cond_dim=32, enabled=["cell_type_binary", "cell_type"])
+    assert wide.names[-1] == "cell_type" and wide.width == 31
+    assert wide.slices()["cell_type_binary"] == old.slices()["cell_type_binary"]  # the first 15 inputs keep their place
+    parsed = wide.parse("cell_type=BPC")
+    assert parsed == {"cell_type": "BPC", "cell_type_binary": "inhibitory"}
+    vec = wide.encode(parsed)
+    assert vec[wide.slices()["cell_type"]].sum() == 1 and vec[wide.slices()["cell_type_binary"]][1] == 1
+    assert wide.encode({"cell_type": "Unsure I"})[wide.slices()["cell_type"]].sum() == 0  # outside the list = unknown
+
+
+def test_block_specific_dropout():
+    import torch
+
+    enc = ConditionEncoder(enabled=None, cond_dim=22)
+    cond = torch.ones(20000, 22)
+    out = enc.drop_blocks(cond, p_block={"default": 0.0, "compartment": 0.5}, p_all=0.0, generator=torch.Generator().manual_seed(0))
+    sl = enc.slices()
+    assert float(out[:, sl["compartment"]].mean()) == pytest.approx(0.5, abs=0.02)
+    assert float(out[:, sl["species"]].mean()) == 1.0
+
+
+def test_expand_cond_dim_keeps_the_output_and_balance_weights():
+    import torch
+
+    from src.neuron_model.spine_generation.models.spine_mogen.pointinfinity import PointInfinity, PointInfinityConfig
+    from src.neuron_model.spine_generation.models.spine_mogen.train import expand_cond_dim
+
+    torch.manual_seed(0)
+    small = PointInfinity(PointInfinityConfig(point_dim=16, latent_dim=32, n_latents=8, n_blocks=1, n_subblocks=1, n_heads=2, k_nn=4, cond_dim=22)).eval()
+    wide = expand_cond_dim(small, 32).eval()
+    assert wide.cfg.cond_dim == 32 and wide.Dense_0.weight.shape[1] == 32
+    x, t = torch.randn(2, 64, 3), torch.rand(2)
+    c = torch.rand(2, 22)
+    with torch.no_grad():
+        a = small(x, t, c)
+        b = wide(x, t, torch.cat([c, torch.zeros(2, 10)], dim=1))
+    assert torch.allclose(a, b, atol=1e-6)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("train_mogen", "scripts/neuron_model/train_mogen.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class DS:
+        cond = np.zeros((100, 22), dtype=np.float32)
+    enc = ConditionEncoder(enabled=["cell_type_binary"])
+    sl = enc.slices()["cell_type_binary"]
+    DS.cond[:90, sl.start] = 1.0  # 90 excitatory
+    DS.cond[90:, sl.start + 1] = 1.0  # 10 inhibitory
+    w = mod.balance_weights(DS, enc, {"block": "cell_type_binary", "power": 1.0})
+    assert w[90:].sum() == pytest.approx(w[:90].sum())  # power 1: both values drawn equally often
+    assert mod.balance_weights(DS, enc, None) is None

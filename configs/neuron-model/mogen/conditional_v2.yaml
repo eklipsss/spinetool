@@ -1,0 +1,24 @@
+# Conditional MoGen v2 (2026-11-01): binary AND detailed cell type, rare values sampled more often.
+# Why: real spines differ strongly by cell type (inhibitory vs excitatory 20-30 % on 10 of 11 metrics, detailed types
+# even more; runs/analysis/neuron-model/2026-11-01_184009_morphology-by-condition), but v1 (binary block only, 2.6 %
+# inhibitory spines) used the condition weakly (check_condition_use: +0.00045 +- 0.00018 on train, not visible on val).
+#   python scripts/neuron_model/train_mogen.py --config configs/neuron-model/mogen/conditional_v2.yaml \
+#       "data.manifests=['<cache>/manifest.parquet']" data.splits=<splits_v1> data.drop_unassigned=true \
+#       "data.variants=[1,2]" "data.check_files=[]"
+# Generation: --condition "cell_type_binary=inhibitory" (any subtype of the class) or "cell_type=BPC" (the binary type
+# is filled in), --guidance > 1 strengthens the condition.
+defaults: [conditional_finetune.yaml]
+name: mogen-conditional-v2
+model:
+  init: pretrained                   # mouse_mixed (the dev-trained A saw neurons of val/test v1)
+  pretrained_weights: data/external/mogen/mouse_mixed_750000_weights.npz
+  pretrained_collection: ema_params
+  expand_cond_dim: 32                # 22 inputs of mouse_mixed + zero columns for the cell_type block (31 used)
+train:
+  max_steps: 30000
+  validate_every: 30000              # validation only at the end (as v1)
+condition:
+  blocks: [cell_type_binary, cell_type]
+  p_block: {default: 0.15, cell_type: 0.4}   # the detailed type is dropped more often: the model also learns the binary type alone
+  p_all: 0.10
+  balance: {block: cell_type_binary, power: 0.5}   # inhibitory spines drawn ~6x more often than their share (2.6 % -> ~14 %)

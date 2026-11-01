@@ -25,8 +25,36 @@ from .pointinfinity import PointInfinity, PointInfinityConfig
 from .weights import load_flax_npz, load_pointinfinity_from_flax
 
 
+def expand_cond_dim(model: PointInfinity, new_dim: int) -> PointInfinity:
+    """The same network with a wider condition input: the extra columns of ``Dense_0`` are ZERO, so the expanded model
+    computes exactly what the original does for any condition whose new inputs are 0 (the new blocks start "unknown")."""
+    import dataclasses
+
+    import torch
+
+    old_dim = model.cfg.cond_dim
+    if new_dim <= old_dim:
+        return model
+    if old_dim == 0:
+        raise ValueError("the model has no condition input (cond_dim 0) to expand")
+    wide = PointInfinity(dataclasses.replace(model.cfg, cond_dim=int(new_dim)))
+    state = model.state_dict()
+    weight = state["Dense_0.weight"]
+    state["Dense_0.weight"] = torch.cat([weight, torch.zeros(weight.shape[0], new_dim - old_dim, dtype=weight.dtype)], dim=1)
+    wide.load_state_dict(state)
+    return wide
+
+
 def build_model(model_cfg: Mapping[str, Any]) -> PointInfinity:
-    """``init: pretrained`` -> exported MoGen weights (``collection``: ema_params/params); ``init: random`` -> fresh."""
+    """``init: pretrained`` -> exported MoGen weights (``collection``: ema_params/params); ``init: random`` -> fresh.
+    ``expand_cond_dim``: widen the condition input of a pretrained / run model (zero columns, ``expand_cond_dim``)."""
+    model = _build_model(model_cfg)
+    if model_cfg.get("expand_cond_dim"):
+        model = expand_cond_dim(model, int(model_cfg["expand_cond_dim"]))
+    return model
+
+
+def _build_model(model_cfg: Mapping[str, Any]) -> PointInfinity:
     init = model_cfg.get("init", "random")
     if init == "pretrained":
         path = resolve_path(model_cfg["pretrained_weights"])
@@ -102,7 +130,9 @@ def make_loss_fn(flow_cfg: Mapping[str, Any], device, *, encoder=None, condition
     probabilities ``condition.p_block`` / ``condition.p_all``) before the model."""
     schedule = flow_cfg.get("time_schedule", "mogen_cosine")
     condition_cfg = condition_cfg or {}
-    p_block, p_all = float(condition_cfg.get("p_block", 0.15)), float(condition_cfg.get("p_all", 0.10))
+    p_block = condition_cfg.get("p_block", 0.15)
+    p_block = dict(p_block) if isinstance(p_block, Mapping) else float(p_block)
+    p_all = float(condition_cfg.get("p_all", 0.10))
 
     def loss_fn(model, batch, step: int) -> Tuple[Any, Dict[str, float]]:
         x1 = batch["points"].to(device, non_blocking=True)

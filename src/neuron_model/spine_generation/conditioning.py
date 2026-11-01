@@ -36,17 +36,37 @@ DEFAULT_BLOCKS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("treatment", ("9009",)),
     ("cell_type_binary", ("excitatory", "inhibitory")),
     ("compartment", ("apical", "basal", "uncertain")),
+    # detailed cell type (2026-11-01): LAST, so the first 15 inputs keep the layout of the earlier runs and a model with
+    # cond_dim 22 can be expanded by zero columns (model.expand_cond_dim). Minnie65 types (not "Unsure") + H01 types;
+    # a value outside the list (Unsure, LabID) = unknown. Needs cond_dim >= 31.
+    ("cell_type", ("23P", "4P", "5P-IT", "5P-NP", "5P-PT", "6P-CT", "6P-IT", "6P-U", "WM-P", "BC", "BPC", "MC", "NGC",
+                   "PYRAMIDAL", "SPINY_ATYPICAL", "INTERNEURON")),
 )
 SOURCE_MICROSCOPY = {"minnie65": "electron", "h01": "electron", "labid": "confocal"}
 
 
+def default_blocks(cond_dim: int, enabled: Optional[Sequence[str]] = None) -> List[Tuple[str, Tuple[str, ...]]]:
+    """The default schema that fits ``cond_dim``: trailing blocks that are not enabled are dropped while the schema is
+    too wide (a model with cond_dim 22 keeps the 15-input layout of the runs before the ``cell_type`` block)."""
+    blocks = [(n, tuple(v)) for n, v in DEFAULT_BLOCKS]
+    wanted = None if enabled is None else set(enabled)
+    while sum(len(v) for _, v in blocks) > cond_dim and blocks and wanted is not None and blocks[-1][0] not in wanted:
+        blocks.pop()
+    return blocks
+
+
 @dataclass
 class ConditionEncoder:
-    blocks: List[Tuple[str, Tuple[str, ...]]] = field(default_factory=lambda: [(n, tuple(v)) for n, v in DEFAULT_BLOCKS])
+    blocks: Optional[List[Tuple[str, Tuple[str, ...]]]] = None  # None = DEFAULT_BLOCKS that fit cond_dim (default_blocks)
     cond_dim: int = 22
     enabled: Optional[List[str]] = None  # None = every block
 
     def __post_init__(self) -> None:
+        if self.blocks is None:
+            self.blocks = default_blocks(self.cond_dim, self.enabled)
+            if self.enabled is None:  # every block enabled: keep the leading blocks that fit
+                while sum(len(v) for _, v in self.blocks) > self.cond_dim and len(self.blocks) > 1:
+                    self.blocks.pop()
         self.blocks = [(str(n), tuple(str(v) for v in values)) for n, values in self.blocks]
         names = [n for n, _ in self.blocks]
         if len(set(names)) != len(names):
@@ -111,7 +131,8 @@ class ConditionEncoder:
         return out
 
     def parse(self, text: str) -> Dict[str, str]:
-        """``"species=mouse,compartment=apical"`` -> dict; checks block names and values."""
+        """``"species=mouse,compartment=apical"`` -> dict; checks block names and values. A detailed ``cell_type``
+        without ``cell_type_binary`` gets the binary type it implies (the two blocks are consistent in training)."""
         out: Dict[str, str] = {}
         for item in filter(None, (t.strip() for t in str(text).split(","))):
             if "=" not in item:
@@ -125,20 +146,33 @@ class ConditionEncoder:
             if not self.is_enabled(key):
                 raise ValueError(f"block {key!r} is disabled in this model (enabled: {self.enabled})")
             out[key] = value
+        if "cell_type" in out and "cell_type_binary" not in out and self.is_enabled("cell_type_binary") and "cell_type_binary" in self.names:
+            from ..metadata import cell_type_binary
+
+            implied = cell_type_binary(out["cell_type"])
+            if implied is not None:
+                out["cell_type_binary"] = implied
         return out
 
     # --------------------------------------------------------------- dropout
-    def drop_blocks(self, cond, *, p_block: float, p_all: float, generator=None):
+    def drop_blocks(self, cond, *, p_block: Any, p_all: float, generator=None):
         """Training-time condition dropout on a torch batch [B, cond_dim]: every block independently zeroed with
-        probability ``p_block``, the whole vector with ``p_all`` (returns a new tensor)."""
+        probability ``p_block`` (a number, or ``{block: p}`` with ``default`` for the others), the whole vector with
+        ``p_all`` (returns a new tensor). A higher p for the detailed ``cell_type`` teaches the model the binary type
+        alone."""
         import torch
 
-        if p_block <= 0 and p_all <= 0:
+        if isinstance(p_block, Mapping):
+            default = float(p_block.get("default", 0.15))
+            probs = {name: float(p_block.get(name, default)) for name in self.names}
+        else:
+            probs = {name: float(p_block) for name in self.names}
+        if max(probs.values()) <= 0 and p_all <= 0:
             return cond
         b = cond.shape[0]
         keep = torch.ones_like(cond)
-        for sl in self.slices().values():
-            drop = torch.rand(b, device="cpu", generator=generator) < p_block
+        for name, sl in self.slices().items():
+            drop = torch.rand(b, device="cpu", generator=generator) < probs[name]
             keep[drop.to(cond.device), sl] = 0.0
         if p_all > 0:
             drop_all = (torch.rand(b, device="cpu", generator=generator) < p_all).to(cond.device)
@@ -183,7 +217,7 @@ def spine_conditions(frame: pd.DataFrame, metadata_root: Path) -> pd.DataFrame:
     out["source"] = kinds.where(kinds.isin(list(SOURCE_MICROSCOPY)), None)
     out["species"] = kinds.map({"minnie65": "mouse", "labid": "mouse", "h01": "human"})
     out["microscopy"] = out["source"].map(SOURCE_MICROSCOPY)
-    health, treatment, ctype, comp = [], [], [], []
+    health, treatment, ctype, cdetail, comp = [], [], [], [], []
     for k, n, l in zip(kinds, neuron, limb):
         h = t = None
         if k in ("minnie65", "h01"):
@@ -194,12 +228,15 @@ def spine_conditions(frame: pd.DataFrame, metadata_root: Path) -> pd.DataFrame:
                 h, t, _ = LABID_GROUPS[g]
         health.append(h)
         treatment.append(t)
-        ctype.append(cell_type_binary(meta.get("cell_types", {}).get(k, {}).get(n)))
+        raw = meta.get("cell_types", {}).get(k, {}).get(n)
+        ctype.append(cell_type_binary(raw))
+        cdetail.append(raw)
         c = None if pd.isna(l) else meta.get("compartments", {}).get(k, {}).get((n, int(l)))
         comp.append(c)
     out["health"] = health
     out["treatment"] = treatment
     out["cell_type_binary"] = ctype
+    out["cell_type"] = cdetail  # raw detailed type; values outside the block list are encoded as unknown
     out["compartment"] = comp  # may contain axon_like: excluded from training by the caller, never encoded
     return out
 
