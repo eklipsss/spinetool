@@ -9,12 +9,14 @@ stages 1-8). Cell types and compartments from the repository metadata tables (fi
 
 Options: --splits/--split restrict the neurons (default: all, this is a description of the data, no model is fitted);
 --min-neurons (detailed cell types with fewer neurons are left out, default 10), --min-spines per neuron (20).
-Writes ``runs/analysis/neuron-model/<time>_morphology-by-condition/{<table>.csv, summary.md}``.
+Writes ``runs/analysis/neuron-model/<time>_morphology-by-condition/{<table>.csv, neuron_medians.csv,
+neuron_compartment_medians.csv, summary.md, report.html}`` (the report alone again: build_morphology_report.py --dir <folder>).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -27,7 +29,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.neuron_model.metadata import cell_type_binary, dataset_kind, load_metadata_tables  # noqa: E402
-from src.neuron_model.spine_generation.evaluation.morphology_by_condition import KEYS, morphology_by_condition  # noqa: E402
+from src.neuron_model.spine_generation.evaluation.morphology_by_condition import KEYS, morphology_by_condition, neuron_medians  # noqa: E402
 from src.neuron_model.spine_morphometrics import SCALAR_METRICS  # noqa: E402
 
 
@@ -112,6 +114,19 @@ def main() -> None:
     for name, table in tables.items():
         table.to_csv(out / f"{name}.csv", index=False)
     (out / "summary.md").write_text(summarize(tables, frame, args), encoding="utf-8")
+    # neuron-level medians (the values every test works on) for the plots of the report
+    info = frame.groupby("neuron_id")[["cell_type", "cell_type_binary"]].first()
+    neuron_medians(frame, list(SCALAR_METRICS), ["neuron_id"], args.min_spines).merge(info, on="neuron_id").to_csv(out / "neuron_medians.csv", index=False)
+    neuron_medians(frame[frame["compartment"].notna()], list(SCALAR_METRICS), ["neuron_id", "compartment"], args.min_spines).merge(
+        info, on="neuron_id").to_csv(out / "neuron_compartment_medians.csv", index=False)
+    (out / "run_info.json").write_text(json.dumps({
+        "morphometrics_table": str(args.morphometrics_table), "splits": str(args.splits) if args.splits else None, "split": args.split,
+        "min_neurons": args.min_neurons, "min_spines": args.min_spines, "n_permutations": args.n_permutations,
+        "n_spines": int(len(frame)), "n_neurons": int(frame["neuron_id"].nunique()), "created": time.strftime("%Y-%m-%d %H:%M")}, ensure_ascii=False, indent=2), encoding="utf-8")
+    from src.neuron_model.reports.morphology_report import build_report
+
+    report = build_report(out)
+    print(f"[morph] report -> {report}")
 
     for name, table in tables.items():
         if not len(table) or "q_bh" not in table.columns:

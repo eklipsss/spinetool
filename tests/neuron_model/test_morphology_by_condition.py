@@ -63,3 +63,26 @@ def test_bh_and_cliffs_delta():
     assert np.isnan(q[3]) and np.allclose(q[[0, 2, 1, 4]], [0.04, 0.0533333, 0.0533333, 0.5])
     assert cliffs_delta(np.array([3.0, 4.0]), np.array([1.0, 2.0])) == 1.0
     assert cliffs_delta(np.array([1.0, 2.0]), np.array([1.0, 2.0])) == 0.0
+
+
+def test_report_is_built_from_the_output_folder(tmp_path):
+    import json
+
+    from src.neuron_model.reports.morphology_report import build_payload, build_report
+    from src.neuron_model.spine_generation.evaluation.morphology_by_condition import neuron_medians
+
+    frame = _synthetic(n_neurons=80)
+    metrics = ["Length", "Volume", "Area"]
+    tables = morphology_by_condition(frame, metrics, min_neurons=10, min_spines=20, n_permutations=500, log=lambda *_: None)
+    for name, table in tables.items():
+        table.to_csv(tmp_path / f"{name}.csv", index=False)
+    info = frame.groupby("neuron_id")[["cell_type", "cell_type_binary"]].first()
+    neuron_medians(frame, metrics, ["neuron_id"], 20).merge(info, on="neuron_id").to_csv(tmp_path / "neuron_medians.csv", index=False)
+    neuron_medians(frame, metrics, ["neuron_id", "compartment"], 20).merge(info, on="neuron_id").to_csv(tmp_path / "neuron_compartment_medians.csv", index=False)
+    (tmp_path / "run_info.json").write_text(json.dumps({"n_spines": len(frame), "n_neurons": 80}))
+    payload = build_payload(tmp_path)
+    assert payload["columns"][0]["key"] == "binary_all" and len(payload["types"]) == 4
+    length = [m["id"] for m in payload["metrics"]].index("Length")
+    assert payload["cells"]["binary_all"][length]["rel"] is not None
+    html = build_report(tmp_path).read_text(encoding="utf-8")
+    assert "Сводная карта" in html and "NaN" not in html.split('id="payload"')[1].split("</script>")[0]
