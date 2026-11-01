@@ -135,10 +135,12 @@ def build_payload(folder: Path) -> Dict[str, Any]:
                     dist["paired"][key][m] = clean_floats(100.0 * (pair[(m, a)] / pair[(m, b)] - 1.0))
 
     counts_binary = med.drop_duplicates("neuron_id")["cell_type_binary"].value_counts().to_dict() if not med.empty else {}
+    # neurons of each binary type that have at least one limb with a known compartment (inhibitory: none in Minnie65)
+    with_comp = cmed.drop_duplicates("neuron_id")["cell_type_binary"].value_counts().to_dict() if not cmed.empty else {}
     n_sig = {name: (int(t["significant"].sum()) if "significant" in t.columns else 0, int(t["p"].notna().sum()) if "p" in t.columns else 0)
              for name, t in (("binary", binary), ("within", within), ("compartment", comp), ("types", pairs), ("omnibus", omni))}
     return {"metrics": metric_meta, "columns": columns, "cells": cells, "types": type_info, "matrices": matrices, "omnibus": omnibus,
-            "dist": dist, "compartment_ru": COMPARTMENT_RU, "binary_ru": BINARY_RU, "info": info, "counts_binary": counts_binary, "n_sig": n_sig}
+            "dist": dist, "compartment_ru": COMPARTMENT_RU, "binary_ru": BINARY_RU, "info": info, "counts_binary": counts_binary, "with_compartment": with_comp, "n_sig": n_sig}
 
 
 def _table_html(df: pd.DataFrame, columns: List[tuple], factor_col: Optional[str] = None) -> str:
@@ -198,6 +200,13 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
         "**Множественные сравнения.** Внутри каждой таблицы (метрики × пары) p-значения поправлены методом Бенджамини–Хохберга; значимым считается сравнение с q < 0,05. Значимость говорит о том, что различие не случайно, а не о том, что оно велико: при сотнях нейронов значимой может быть и разница в 1–2 %. Поэтому рядом всегда показан размер эффекта — относительная разность медиан.",
     ], title="О чём эта страница"))
 
+    wc = payload["with_compartment"]
+    if cb.get("inhibitory") and not wc.get("inhibitory"):
+        body.append(note([
+            f"**У тормозных нейронов нет ни одного лимба с известным компартментом** (в таблице компартментов есть лимбы {wc.get('excitatory', 0)} "
+            f"из {cb.get('excitatory', 0)} возбуждающих нейронов и ни одного из {cb.get('inhibitory', 0)} тормозных). Поэтому сравнение типов клеток внутри "
+            "компартмента невозможно, и нельзя проверить, не объясняется ли различие тормозных и возбуждающих клеток составом компартментов. "
+            "Сравнение компартментов относится только к возбуждающим нейронам."], title="Ограничение данных", tone="pink"))
     body.append(section("Сводная карта", "Строки — морфометрики, столбцы — сравнения. Цвет — относительная разность медиан (первая группа к второй), серый — различие не значимо.",
                         card("Относительная разность медиан, %", '<div id="overview" class="plot" style="height:520px"></div>', hint="наведите на клетку: медианы, число нейронов, q")
                         + note(["Цветная клетка означает значимое различие (q < 0,05), её цвет — знак и величину эффекта: розовый — у первой группы значение больше, зелёный — меньше, насыщенность растёт с величиной разности (шкала обрезана на ±50 %). Серая клетка — различие не значимо, число в ней показывает наблюдаемую разность, которую нельзя отличить от случайной. Пустая клетка — сравнение невозможно (например, у тормозных клеток нет апикальных дендритов).",
