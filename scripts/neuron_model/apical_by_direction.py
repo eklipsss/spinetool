@@ -115,7 +115,9 @@ def main() -> None:
         if len(ids) < 10 or len({lay[n] for n in ids}) < 3:
             raise SystemExit(f"[apical] only {len(ids)} neurons with a layer ({len({lay[n] for n in ids})} distinct layers): cannot estimate the pia "
                              "axis, give --pia-axis x,y,z")
-        pia, r2 = estimate_pia_axis(np.array([centers[n] for n in ids]), np.array([lay[n] for n in ids]))
+        xyz = np.array([centers[n] for n in ids])
+        print(f"[apical] soma spread (std, um) x / y / z: {np.round(xyz.std(axis=0) / 1000.0, 1).tolist()}", flush=True)
+        pia, r2 = estimate_pia_axis(xyz, np.array([lay[n] for n in ids]))
         print(f"[apical] pia axis from the layers of {len(ids)} neurons: {np.round(pia, 3).tolist()} (R^2 of layer ~ soma position {r2:.2f})", flush=True)
 
     def features(d):

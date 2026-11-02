@@ -1,0 +1,21 @@
+# Conditional MoGen v3 (2026-11-03): v2 + a 100x larger learning rate for the condition -> token layer (Dense_0).
+# Why: in v2 (runs/training/neuron-model/2026-11-02_023219_mogen-conditional-v2) the ZERO-initialised condition columns
+# (expand_cond_dim 22 -> 32: cell types 6P-U, WM-P, BC, BPC, MC, NGC) stayed near 0 after 30 000 steps (column norms
+# 0.04-0.1 against 18-165 of the pretrained columns): with lr 1e-5 Adam moves a weight by at most ~lr per step.
+# check_condition_use: binary type +0.0004 on train (as v1), detailed types not used. Starts from the EMA weights of v2,
+# the rest of the network keeps lr 1e-5.
+#   python scripts/neuron_model/train_mogen.py --config configs/neuron-model/mogen/conditional_v3.yaml \
+#       "data.manifests=['<cache>/manifest.parquet']" data.splits=<splits_v1> data.drop_unassigned=true \
+#       "data.variants=[1,2]" "data.check_files=[]"
+defaults: [conditional_v2.yaml]
+name: mogen-conditional-v3
+model:
+  init: run
+  init_run: runs/training/neuron-model/2026-11-02_023219_mogen-conditional-v2
+  init_checkpoint: latest
+  expand_cond_dim: null              # v2 already has cond_dim 32
+optimizer:
+  cond_lr_mult: 100                  # Dense_0: 1e-3, the rest 1e-5
+train:
+  max_steps: 15000
+  validate_every: 15000

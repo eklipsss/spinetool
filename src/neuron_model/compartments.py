@@ -105,13 +105,18 @@ def limb_features(neuron_dir: Path, center: np.ndarray, *, init_range_nm: Tuple[
     return rows
 
 
-def estimate_pia_axis(centers: np.ndarray, layers: np.ndarray) -> Tuple[np.ndarray, float]:
-    """Unit vector towards the pia: layer ~ a + g . x by least squares, axis = -g / |g|; R^2 of the fit."""
+def estimate_pia_axis(centers: np.ndarray, layers: np.ndarray, *, min_spread_ratio: float = 0.2) -> Tuple[np.ndarray, float]:
+    """Unit vector towards the pia: layer ~ a + g . x by least squares, axis = -g / |g|; R^2 of the fit.
+    Coordinates along which the somata spread less than ``min_spread_ratio`` of the widest one (a thin slab: H01 z)
+    are left out (g = 0 there): a slope along a thin direction is estimated from noise and tilts the axis."""
     centers, layers = np.asarray(centers, float), np.asarray(layers, float)
     ok = np.isfinite(layers) & np.isfinite(centers).all(axis=1)
     x = centers[ok] - centers[ok].mean(axis=0)
     y = layers[ok] - layers[ok].mean()
-    g, *_ = np.linalg.lstsq(x, y, rcond=None)
+    spread = x.std(axis=0)
+    use = spread >= min_spread_ratio * spread.max()
+    g = np.zeros(x.shape[1])
+    g[use], *_ = np.linalg.lstsq(x[:, use], y, rcond=None)
     pred = x @ g
     r2 = 1.0 - float(((y - pred) ** 2).sum() / max((y ** 2).sum(), 1e-12))
     return -g / np.linalg.norm(g), r2

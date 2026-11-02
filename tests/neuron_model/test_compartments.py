@@ -17,6 +17,13 @@ def test_layer_values_and_pia_axis_from_layers():
     layers = 1 + 5 * (centers @ depth_axis - (centers @ depth_axis).min()) / np.ptp(centers @ depth_axis) + rng.normal(0, 0.2, 200)
     pia, r2 = estimate_pia_axis(centers, layers)
     assert np.dot(pia, -depth_axis) > 0.99 and r2 > 0.9
+    # a thin slab (z spread 1 %): the z slope is noise and must not tilt the axis
+    flat_axis = np.array([0.3, 0.95, 0.0]) / np.linalg.norm([0.3, 0.95, 0.0])
+    slab = rng.uniform(0, 1e6, (60, 3))
+    slab[:, 2] = rng.normal(3e4, 1e4, 60)
+    layers = 1 + 5 * (slab @ flat_axis - (slab @ flat_axis).min()) / np.ptp(slab @ flat_axis) + rng.normal(0, 0.4, 60)
+    pia, _ = estimate_pia_axis(slab, layers)
+    assert pia[2] == 0.0 and np.dot(pia, -flat_axis) > 0.99
 
 
 def _write_limb(root, limb, start, direction, length=60000.0, step=500.0, branch=None):

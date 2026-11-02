@@ -234,3 +234,26 @@ def test_expand_cond_dim_keeps_the_output_and_balance_weights():
     w = mod.balance_weights(DS, enc, {"block": "cell_type_binary", "power": 1.0})
     assert w[90:].sum() == pytest.approx(w[:90].sum())  # power 1: both values drawn equally often
     assert mod.balance_weights(DS, enc, None) is None
+
+
+def test_condition_layer_learning_rate_multiplier():
+    import torch
+
+    from src.neuron_model.spine_generation.experiment.training import make_lr_scheduler
+    from src.neuron_model.spine_generation.models.spine_mogen.pointinfinity import PointInfinity, PointInfinityConfig
+    from src.neuron_model.spine_generation.models.spine_mogen.train import make_optimizer
+
+    model = PointInfinity(PointInfinityConfig(point_dim=16, latent_dim=32, n_latents=8, n_blocks=1, n_subblocks=1, n_heads=2, k_nn=4, cond_dim=22))
+    opt = make_optimizer(model, {"name": "adamw", "lr": 1e-5, "cond_lr_mult": 100})
+    assert [g["lr"] for g in opt.param_groups] == pytest.approx([1e-5, 1e-3])
+    cond_ids = {id(p) for p in model.Dense_0.parameters()}
+    assert {id(p) for p in opt.param_groups[1]["params"]} == cond_ids
+    assert not cond_ids & {id(p) for p in opt.param_groups[0]["params"]}
+    assert sum(len(g["params"]) for g in opt.param_groups) == len(list(model.parameters()))
+    sched = make_lr_scheduler(opt, {"type": "cosine", "min_lr": 1e-6}, 100)
+    for _ in range(50):
+        opt.step()
+        sched.step()
+    lr0, lr1 = (g["lr"] for g in opt.param_groups)
+    assert lr1 / lr0 == pytest.approx(100.0)  # the schedule keeps the ratio
+    assert len(make_optimizer(model, {"name": "adamw", "lr": 1e-5}).param_groups) == 1

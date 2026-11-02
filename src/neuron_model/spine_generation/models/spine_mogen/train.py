@@ -89,6 +89,20 @@ def _build_model(model_cfg: Mapping[str, Any]) -> PointInfinity:
     raise ValueError(f"model.init must be 'pretrained', 'run' or 'random', got {init!r}")
 
 
+def param_groups(model, lr: float, cond_lr_mult: float = 1.0):
+    """Parameter groups: the condition -> token layer (top-level ``Dense_0``) gets ``lr * cond_lr_mult``. Why: with a
+    small fine-tuning lr (1e-5) Adam moves a weight by at most ~lr per step, so ZERO-initialised condition columns
+    (``expand_cond_dim``) stay near 0 after 30 000 steps (v2: norm 0.04-0.1 against 18-165 of the pretrained columns)
+    and the model cannot use the condition. The first group is the main one (the lr schedule reads its lr)."""
+    if cond_lr_mult == 1.0:
+        return model.parameters()
+    cond = [p for n, p in model.named_parameters() if n.startswith("Dense_0.")]
+    rest = [p for n, p in model.named_parameters() if not n.startswith("Dense_0.")]
+    if not cond:
+        raise ValueError("optimizer.cond_lr_mult is set but the model has no condition layer (cond_dim 0)")
+    return [{"params": rest, "lr": lr}, {"params": cond, "lr": lr * cond_lr_mult}]
+
+
 def make_optimizer(model, opt_cfg: Mapping[str, Any]):
     import torch
 
@@ -97,7 +111,7 @@ def make_optimizer(model, opt_cfg: Mapping[str, Any]):
     wd = float(opt_cfg.get("weight_decay", 0.0))
     if name == "adamw":
         betas = tuple(opt_cfg.get("betas", (0.9, 0.999)))
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd, betas=betas)
+        return torch.optim.AdamW(param_groups(model, lr, float(opt_cfg.get("cond_lr_mult", 1.0))), lr=lr, weight_decay=wd, betas=betas)
     if name == "prodigy":
         try:
             from prodigyopt import Prodigy
