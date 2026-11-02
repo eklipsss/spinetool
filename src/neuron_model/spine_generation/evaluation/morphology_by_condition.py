@@ -123,7 +123,7 @@ def compare_neuron_groups(med: pd.DataFrame, column: str, a: str, b: str, metric
                "n_spines_a": int(sub.loc[ok & labels, "n_spines"].sum()), "n_spines_b": int(sub.loc[ok & ~labels, "n_spines"].sum())}
         if len(xa) >= 3 and len(xb) >= 3:
             ma, mb = float(np.median(xa)), float(np.median(xb))
-            row.update({"median_a": ma, "median_b": mb, "rel_diff_a_vs_b": ma / mb - 1.0 if mb != 0 else float("nan"),
+            row.update({"median_a": ma, "median_b": mb, "rel_diff_a_vs_b": ma / mb - 1.0 if mb != 0 else float("nan"), "abs_diff_a_vs_b": ma - mb,
                         "cliffs_delta": cliffs_delta(xa, xb), "p": _perm_two_groups(x[ok], labels[ok], n_permutations, rng)})
         rows.append(row)
     return rows
@@ -148,7 +148,7 @@ def compare_within_neuron(frame: pd.DataFrame, column: str, a: str, b: str, metr
             va, vb = pair[(m, a)].to_numpy(float), pair[(m, b)].to_numpy(float)
             d = va - vb
             row.update({"median_a": float(np.median(va)), "median_b": float(np.median(vb)),
-                        "median_paired_rel_diff": float(np.median(np.where(vb != 0, va / vb - 1.0, np.nan))),
+                        "median_paired_rel_diff": float(np.median(np.where(vb != 0, va / vb - 1.0, np.nan))), "median_paired_abs_diff": float(np.median(d)),
                         "share_neurons_a_gt_b": float(np.mean(d > 0)), "p": _perm_sign_flip(d, n_permutations, rng)})
         rows.append(row)
     return rows

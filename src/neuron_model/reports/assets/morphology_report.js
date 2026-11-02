@@ -5,6 +5,9 @@ const LIMIT = 50;  // colour scale clipped at +-50 %
 const GREY = P.muted_points;
 const label = m => m.name + (m.unit ? ', ' + m.unit : '');
 const pct = v => (v === null || v === undefined) ? '—' : (v >= 0 ? '+' : '') + fmt(100 * v, 1) + ' %';
+// a metric with "abs": the difference in its own units (shares, g(r), correlations); colour: 0.5 of that unit = full scale
+const diffText = (v, m) => (v === null || v === undefined) ? '—' : (m && m.abs ? (v >= 0 ? '+' : '') + fmt(v, 2) : pct(v));
+const diffColour = (v, m) => v === null ? null : Math.max(-LIMIT, Math.min(LIMIT, 100 * v));
 const qtxt = q => (q === null || q === undefined) ? '—' : (q < 0.001 ? q.toExponential(1) : fmt(q, 3));
 
 function fillSelect(id, onChange) {
@@ -27,16 +30,16 @@ function drawOverview() {
     cols.forEach(c => {
       const cell = D.cells[c.key][i];
       const rel = cell.rel;
-      const v = rel === null ? null : Math.max(-LIMIT, Math.min(LIMIT, 100 * rel));
+      const v = diffColour(rel, m);
       rs.push(cell.sig ? v : null);
       rn.push(!cell.sig && rel !== null ? 0 : null);
-      rt.push(rel === null ? '' : pct(rel) + (cell.sig ? ' *' : ''));
+      rt.push(rel === null ? '' : diffText(rel, m) + (cell.sig ? ' *' : ''));
       const unit = m.unit ? ' ' + m.unit : '';
       const effect = c.kind === 'compartment'
         ? 'доля нейронов «первый больше»: ' + fmt(cell.share, 2) + '<br>нейронов с обоими: ' + fmt(cell.na)
         : 'медианы: ' + fmt(cell.ma) + unit + ' / ' + fmt(cell.mb) + unit + '<br>нейронов: ' + fmt(cell.na) + ' / ' + fmt(cell.nb) + '<br>дельта Клиффа: ' + fmt(cell.delta, 2);
       rh.push(rel === null ? 'нет данных' :
-        '<b>' + m.name + '</b><br>' + c.label.replace('<br>', ', ') + '<br>разность: ' + pct(rel) + '<br>' + effect +
+        '<b>' + m.name + '</b><br>' + c.label.replace('<br>', ', ') + '<br>разность: ' + diffText(rel, m) + (m.abs ? ' (абсолютная)' : '') + '<br>' + effect +
         '<br>p = ' + qtxt(cell.p) + ', q = ' + qtxt(cell.q) + '<br>' + (cell.sig ? '<b>значимо</b>' : 'не значимо'));
     });
     zSig.push(rs); zNon.push(rn); text.push(rt); hover.push(rh);
@@ -55,7 +58,7 @@ function drawOverview() {
     annotations.push({x: x[j], y: y[i], text: text[i][j], showarrow: false,
       font: {size: 11.5, color: strong ? '#ffffff' : (cell.sig ? P.ink : P.ink_muted)}});
   }));
-  Plotly.newPlot('overview', traces, layout({annotations: annotations, margin: {l: 230, r: 20, t: 70, b: 10},
+  Plotly.newPlot('overview', traces, layout({annotations: annotations, margin: {l: 250, r: 20, t: 70, b: 10},
     xaxis: {side: 'top', tickfont: {size: 11.5, color: P.ink_secondary}, showgrid: false, zeroline: false},
     yaxis: {autorange: 'reversed', showgrid: false, zeroline: false, tickfont: {size: 12, color: P.ink}}}), PLOT_CONFIG);
 }
@@ -65,7 +68,7 @@ function drawBinary(m) {
   const data = (D.dist.by_binary || {})[m.id];
   if (!data) { $('plot-binary').innerHTML = '<div class="empty">Нет данных</div>'; return; }
   const groups = Object.keys(data);
-  const groupLabel = g => g === 'all' ? 'все шипики' : (D.compartment_ru[g] || g);
+  const groupLabel = g => g === 'all' ? 'все' : (D.compartment_ru[g] || g);
   const traces = [['inhibitory', P.series_1], ['excitatory', P.series_2]].map(([b, color]) => {
     const xs = [], ys = [];
     groups.forEach(g => (data[g][b] || []).forEach(v => { if (v !== null) { xs.push(groupLabel(g)); ys.push(v); } }));
@@ -90,11 +93,11 @@ function drawTypes(m) {
     const rs = [], rn = [], rh = [];
     for (let j = 0; j < n; j++) {
       const rel = mat.rel[i][j], sig = mat.sig[i][j];
-      const v = rel === null ? null : Math.max(-LIMIT, Math.min(LIMIT, 100 * rel));
+      const v = diffColour(rel, m);
       rs.push(sig ? v : null);
       rn.push(!sig && rel !== null ? 0 : null);
-      rh.push(i === j || rel === null ? types[i] : '<b>' + types[i] + ' / ' + types[j] + '</b><br>' + m.name + ': ' + pct(rel) + '<br>q = ' + qtxt(mat.q[i][j]) + '<br>' + (sig ? '<b>значимо</b>' : 'не значимо'));
-      if (rel !== null && i !== j) annotations.push({x: types[j], y: types[i], text: (rel >= 0 ? '+' : '') + Math.round(100 * rel), showarrow: false,
+      rh.push(i === j || rel === null ? types[i] : '<b>' + types[i] + ' / ' + types[j] + '</b><br>' + m.name + ': ' + diffText(rel, m) + '<br>q = ' + qtxt(mat.q[i][j]) + '<br>' + (sig ? '<b>значимо</b>' : 'не значимо'));
+      if (rel !== null && i !== j) annotations.push({x: types[j], y: types[i], text: m.abs ? (rel >= 0 ? '+' : '') + fmt(rel, 2) : (rel >= 0 ? '+' : '') + Math.round(100 * rel), showarrow: false,
         font: {size: 10, color: sig && Math.abs(100 * rel) > 0.6 * LIMIT ? '#ffffff' : (sig ? P.ink : P.ink_muted)}});
     }
     zSig.push(rs); zNon.push(rn); hover.push(rh);

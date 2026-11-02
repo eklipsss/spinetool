@@ -173,8 +173,8 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
     """Recompute the QC flags and ``train_eligible_T/P`` of finished neurons from the STORED quantities with the
     thresholds of ``cfg`` (no mesh is read, minutes for the whole dataset). ``write=False``: only count.
     The spine position rule is re-applied to the stored offsets (``has_position``, ``n_with_position``).
-    ``refresh_metadata``: also re-read the compartment of every limb from the metadata tables (the lookup was fixed after
-    the first runs). Returns counts and, per check, how many ok branches fail it."""
+    ``refresh_metadata``: also re-read the compartment of every limb and the cell type of the neuron from the metadata
+    tables (the compartment lookup was fixed after the first runs; H01 cell types were added later). Returns counts and, per check, how many ok branches fail it."""
     from collections import Counter
 
     from .process import _finalize_eligibility, position_outlier
@@ -185,6 +185,7 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
     reasons: Counter = Counter()
     keys = ["limb_id", "merged_branch_id"]
     compartments = None
+    neuron_meta: Dict[str, Any] = {}
     if refresh_metadata:
         metadata = load_metadata(cfg)
     for neuron_id in names:
@@ -193,7 +194,8 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
             continue
         frame = pd.read_parquet(d / "branches.parquet")
         if refresh_metadata:
-            compartments = neuron_metadata(cfg, metadata, neuron_id, sorted(frame["limb_id"].astype(int).unique()))["compartment_by_limb"]
+            neuron_meta = neuron_metadata(cfg, metadata, neuron_id, sorted(frame["limb_id"].astype(int).unique()))
+            compartments = neuron_meta["compartment_by_limb"]
         # spine positions: the outlier rule is applied to the stored d = |v_perp| - r(s)
         spines_path = d / "branch_spines.parquet"
         spines = pd.read_parquet(spines_path) if spines_path.exists() else None
@@ -216,6 +218,9 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
                 record["n_with_position"] = int(n_with_position.get((record["limb_id"], record["merged_branch_id"]), 0))
             if compartments is not None:
                 record["compartment"] = compartments.get(int(record["limb_id"]))
+                for key in ("cell_type", "cell_type_binary"):
+                    if key in frame.columns:
+                        record[key] = neuron_meta[key]
             _finalize_eligibility(cfg, record)
             rows.append(record)
         new = pd.DataFrame(rows).reindex(columns=list(frame.columns))

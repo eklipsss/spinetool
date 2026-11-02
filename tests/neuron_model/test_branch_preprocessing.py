@@ -269,3 +269,15 @@ def test_compartment_lookup_uses_limb_suffix():
     lookup = compartment_lookup(frame)
     assert lookup[("2", 0)] == "axon_like" and lookup[("2", 1)] == "apical" and ("2", 2) not in lookup
     assert compartment_lookup(frame.drop(columns="limb"))[("2", 2)] == "axon_like"
+
+
+def test_reapply_refreshes_cell_type(mini, monkeypatch):
+    from src.neuron_model.branch_preprocessing import reapply_eligibility, runner
+
+    cfg = mini["cfg"]
+    run(cfg)
+    fake = {"cell_types": {"minnie65": {NEURON: "BPC"}}, "compartments": {}}
+    monkeypatch.setattr(runner, "load_metadata", lambda c: fake)
+    reapply_eligibility(cfg, refresh_metadata=True)
+    branches = pd.read_parquet(cfg.out_root / "branches.parquet")
+    assert (branches["cell_type"] == "BPC").all() and (branches["cell_type_binary"] == "inhibitory").all()

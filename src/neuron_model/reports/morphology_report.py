@@ -35,12 +35,15 @@ def _read(folder: Path, name: str) -> pd.DataFrame:
     return pd.read_csv(path) if path.exists() and path.stat().st_size > 1 else pd.DataFrame()
 
 
-def _cell(row: Optional[pd.Series], rel_col: str, factor: float) -> Dict[str, Any]:
+def _cell(row: Optional[pd.Series], rel_col: str, factor: float, absolute: bool = False) -> Dict[str, Any]:
+    """``absolute``: the difference in the metric's own units instead of the relative one (shares, g(r), correlations)."""
     if row is None:
         return {"rel": None}
     sig = bool(row.get("significant")) if pd.notna(row.get("significant")) else False
+    col = rel_col.replace("rel_diff", "abs_diff") if absolute else rel_col
+    value = _num(row.get(col))
     return {
-        "rel": _num(row.get(rel_col)), "q": _num(row.get("q_bh")), "p": _num(row.get("p")), "sig": sig,
+        "rel": None if value is None else (value * factor if absolute else value), "abs": absolute, "q": _num(row.get("q_bh")), "p": _num(row.get("p")), "sig": sig,
         "ma": None if _num(row.get("median_a")) is None else float(row["median_a"]) * factor,
         "mb": None if _num(row.get("median_b")) is None else float(row["median_b"]) * factor,
         "na": _num(row.get("n_neurons_a", row.get("n_neurons_paired"))), "nb": _num(row.get("n_neurons_b", row.get("n_neurons_paired"))),
@@ -48,8 +51,38 @@ def _cell(row: Optional[pd.Series], rel_col: str, factor: float) -> Dict[str, An
     }
 
 
+PROFILES: Dict[str, Dict[str, Any]] = {
+    "spines": {
+        "title": "Морфология шипиков по типу клетки и компартменту",
+        "subtitle": "Где реальные шипики Minnie65 статистически значимо различаются по каждой из 11 морфометрик",
+        "unit_word": "шипиков", "value_word": "медиана метрики по его шипикам",
+        "intro": "Страница показывает, отличаются ли реальные шипики Minnie65 по каждой морфометрике между тормозными и возбуждающими клетками, между подробными типами клеток и между компартментами. Это нужно, чтобы решить, какие условия имеет смысл подавать генератору шипиков и насколько сильным должен быть их эффект в сгенерированных формах.",
+        "neuron_value": "Для каждого нейрона берётся медиана метрики по его шипикам (не меньше 20)",
+    },
+    "branches": {
+        "title": "Ствол и расположение шипиков по типу клетки и компартменту",
+        "subtitle": "Где реальные ветви значимо различаются по метрикам модулей T (ствол) и P (число и расположение шипиков)",
+        "unit_word": "ветвей", "value_word": "значение метрики нейрона (медиана по ветвям или статистика по всем его шипикам)",
+        "intro": "Страница показывает, отличаются ли реальные ветви между тормозными и возбуждающими клетками, между подробными типами клеток и между компартментами по метрикам ствола (модуль T: радиус, сужение, сплюснутость сечения, извилистость, изгиб, длина) и расположения шипиков (модуль P: плотность, доля пустых ветвей, парная корреляционная функция положений вдоль ветви, регулярность интервалов, сходство соседних шипиков по объёму и длине, связь размера шипика с положением). Это нужно, чтобы решить, какие условия подавать моделям T и P и проверять ли их эффект в сгенерированных ветвях.",
+        "neuron_value": "Для каждого нейрона (или нейрона и компартмента) метрики ствола и простые метрики шипиков — медианы по его ветвям (не меньше 10 пригодных ветвей), а пространственные метрики считаются по всем шипикам его ветвей вместе: на одной ветви их слишком мало для устойчивой оценки",
+    },
+}
+
+
+def _profile(info: Dict[str, Any]):
+    """(metric info, metric order, texts) of the analysis that wrote the folder (run_info.json ``profile``)."""
+    name = info.get("profile", "spines")
+    if name == "branches":
+        from ..branch_statistics import ALL_METRICS, METRIC_INFO as BRANCH_INFO
+
+        return BRANCH_INFO, list(ALL_METRICS), PROFILES["branches"]
+    return METRIC_INFO, list(SCALAR_METRICS), PROFILES["spines"]
+
+
 def build_payload(folder: Path) -> Dict[str, Any]:
     folder = Path(folder)
+    info0 = json.loads((folder / "run_info.json").read_text(encoding="utf-8")) if (folder / "run_info.json").exists() else {}
+    METRIC_INFO_, ORDER, _texts = _profile(info0)
     binary = _read(folder, "cell_type_binary")
     within = _read(folder, "cell_type_binary_within_compartment")
     comp = _read(folder, "compartment")
@@ -59,9 +92,9 @@ def build_payload(folder: Path) -> Dict[str, Any]:
     cmed = _read(folder, "neuron_compartment_medians")
     info = json.loads((folder / "run_info.json").read_text(encoding="utf-8")) if (folder / "run_info.json").exists() else {}
 
-    tested = set(binary["metric"]) if "metric" in binary.columns else set(SCALAR_METRICS)
-    metrics = [m for m in SCALAR_METRICS if m in METRIC_INFO and m in tested and (med.empty or m in med.columns)]
-    metric_meta = [{"id": m, **{k: METRIC_INFO[m][k] for k in ("name", "unit", "factor", "about")}} for m in metrics]
+    tested = set(binary["metric"]) if "metric" in binary.columns else set(ORDER)
+    metrics = [m for m in ORDER if m in METRIC_INFO_ and m in tested and (med.empty or m in med.columns)]
+    metric_meta = [{"id": m, "abs": METRIC_INFO_[m].get("diff") == "abs", **{k: METRIC_INFO_[m][k] for k in ("name", "unit", "factor", "about")}} for m in metrics]
 
     # ---- overview: binary (all, within compartments), compartment pairs
     columns: List[Dict[str, Any]] = []
@@ -71,14 +104,14 @@ def build_payload(folder: Path) -> Dict[str, Any]:
         if rows.empty:
             return
         by_metric = {r["metric"]: r for _, r in rows.iterrows()}
-        col = [_cell(by_metric.get(m), rel_col, METRIC_INFO[m]["factor"]) for m in metrics]
+        col = [_cell(by_metric.get(m), rel_col, METRIC_INFO_[m]["factor"], METRIC_INFO_[m].get("diff") == "abs") for m in metrics]
         if all(c["rel"] is None for c in col):
             return
         columns.append({"key": key, "label": label, "kind": kind})
         cells[key] = col
 
     if not binary.empty:
-        add_column("binary_all", "Тормозные / возбуждающие<br>все шипики", "binary", binary, "rel_diff_a_vs_b")
+        add_column("binary_all", "Тормозные / возбуждающие<br>все " + _texts["unit_word"], "binary", binary, "rel_diff_a_vs_b")
     if not within.empty:
         for c in ("basal", "uncertain", "apical"):
             add_column(f"binary_{c}", f"Тормозные / возбуждающие<br>только {COMPARTMENT_RU[c]}", "binary", within[within["compartment"] == c], "rel_diff_a_vs_b")
@@ -103,9 +136,14 @@ def build_payload(folder: Path) -> Dict[str, Any]:
             sig = [[False] * len(names) for _ in names]
             for _, r in pairs[pairs["metric"] == m].iterrows():
                 i, j = index[r["a"]], index[r["b"]]
-                v = _num(r.get("rel_diff_a_vs_b"))
-                rel[i][j] = v
-                rel[j][i] = None if v is None or v <= -1 else 1.0 / (1.0 + v) - 1.0
+                if METRIC_INFO_[m].get("diff") == "abs":
+                    v = _num(r.get("abs_diff_a_vs_b"))
+                    rel[i][j] = v
+                    rel[j][i] = None if v is None else -v
+                else:
+                    v = _num(r.get("rel_diff_a_vs_b"))
+                    rel[i][j] = v
+                    rel[j][i] = None if v is None or v <= -1 else 1.0 / (1.0 + v) - 1.0
                 q[i][j] = q[j][i] = _num(r.get("q_bh"))
                 sig[i][j] = sig[j][i] = bool(r.get("significant")) if pd.notna(r.get("significant")) else False
             matrices[m] = {"rel": rel, "q": q, "sig": sig}
@@ -115,13 +153,13 @@ def build_payload(folder: Path) -> Dict[str, Any]:
     dist: Dict[str, Any] = {"by_type": {}, "by_binary": {}, "paired": {}}
     if not med.empty:
         for m in metrics:
-            f = METRIC_INFO[m]["factor"]
+            f = METRIC_INFO_[m]["factor"]
             dist["by_type"][m] = {t: clean_floats(med.loc[med["cell_type"] == t, m] * f) for t in types}
             dist["by_binary"][m] = {"all": {b: clean_floats(med.loc[med["cell_type_binary"] == b, m] * f) for b in BINARY_RU}}
     if not cmed.empty:
         present = [c for c in ("basal", "uncertain", "apical") if (cmed["compartment"] == c).any()]
         for m in metrics:
-            f = METRIC_INFO[m]["factor"]
+            f = METRIC_INFO_[m]["factor"]
             for c in present:
                 sub = cmed[cmed["compartment"] == c]
                 dist["by_binary"].setdefault(m, {})[c] = {b: clean_floats(sub.loc[sub["cell_type_binary"] == b, m] * f) for b in BINARY_RU}
@@ -140,10 +178,10 @@ def build_payload(folder: Path) -> Dict[str, Any]:
     n_sig = {name: (int(t["significant"].sum()) if "significant" in t.columns else 0, int(t["p"].notna().sum()) if "p" in t.columns else 0)
              for name, t in (("binary", binary), ("within", within), ("compartment", comp), ("types", pairs), ("omnibus", omni))}
     return {"metrics": metric_meta, "columns": columns, "cells": cells, "types": type_info, "matrices": matrices, "omnibus": omnibus,
-            "dist": dist, "compartment_ru": COMPARTMENT_RU, "binary_ru": BINARY_RU, "info": info, "counts_binary": counts_binary, "with_compartment": with_comp, "n_sig": n_sig}
+            "dist": dist, "metric_info": METRIC_INFO_, "compartment_ru": COMPARTMENT_RU, "binary_ru": BINARY_RU, "info": info, "counts_binary": counts_binary, "with_compartment": with_comp, "n_sig": n_sig}
 
 
-def _table_html(df: pd.DataFrame, columns: List[tuple], factor_col: Optional[str] = None) -> str:
+def _table_html(df: pd.DataFrame, columns: List[tuple], factor_col: Optional[str] = None, metric_info: Optional[Dict[str, Any]] = None) -> str:
     """columns: (source column, header, kind) with kind in text / int / pct / sci / num / median."""
     if df.empty:
         return '<p class="muted small">Нет проверяемых сравнений.</p>'
@@ -154,7 +192,7 @@ def _table_html(df: pd.DataFrame, columns: List[tuple], factor_col: Optional[str
         for col, _, kind in columns:
             v = r.get(col)
             if kind == "text":
-                txt = {"metric": METRIC_INFO.get(v, {}).get("name", v)}.get(col, COMPARTMENT_RU.get(v, BINARY_RU.get(v, v))) if isinstance(v, str) else ""
+                txt = {"metric": (metric_info or METRIC_INFO).get(v, {}).get("name", v)}.get(col, COMPARTMENT_RU.get(v, BINARY_RU.get(v, v))) if isinstance(v, str) else ""
             elif _num(v) is None:
                 txt = "—"
             elif kind == "int":
@@ -164,7 +202,7 @@ def _table_html(df: pd.DataFrame, columns: List[tuple], factor_col: Optional[str
             elif kind == "sci":
                 txt = f"{float(v):.2g}"
             elif kind == "median":
-                info = METRIC_INFO.get(r.get("metric"), {})
+                info = (metric_info or METRIC_INFO).get(r.get("metric"), {})
                 txt = f"{float(v) * info.get('factor', 1.0):.3g}" + (f" {info.get('unit')}" if info.get("unit") else "")
             else:
                 txt = f"{float(v):.2f}"
@@ -182,20 +220,20 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
     n_sig = payload["n_sig"]
     cb = payload["counts_binary"]
 
-    body = [header("Морфология шипиков по типу клетки и компартменту",
-                   "Где реальные шипики Minnie65 статистически значимо различаются по каждой из 11 морфометрик",
-                   [f"нейронов {info.get('n_neurons', '—')}, шипиков {info.get('n_spines', '—')}", f"перестановок {info.get('n_permutations', '—')}",
+    texts = _profile(info)[2]
+    body = [header(texts["title"], texts["subtitle"],
+                   [f"нейронов {info.get('n_neurons', '—')}, {texts['unit_word']} {info.get('n_spines', info.get('n_branches', '—'))}", f"перестановок {info.get('n_permutations', '—')}",
                     f"создано {info.get('created', '—')}"])]
     body.append(tiles([
-        {"label": "Нейронов: тормозных / возбуждающих", "value": f"{cb.get('inhibitory', 0)} / {cb.get('excitatory', 0)}", "note": f"не меньше {info.get('min_spines', 20)} шипиков на нейрон"},
+        {"label": "Нейронов: тормозных / возбуждающих", "value": f"{cb.get('inhibitory', 0)} / {cb.get('excitatory', 0)}", "note": f"не меньше {info.get('min_spines', 20)} {texts['unit_word']} на нейрон"},
         {"label": "Тормозные против возбуждающих", "value": f"{n_sig['binary'][0]} из {n_sig['binary'][1]}", "note": "метрик различаются значимо", "accent": "pink"},
         {"label": "Подробные типы, общий тест", "value": f"{n_sig['omnibus'][0]} из {n_sig['omnibus'][1]}", "note": "метрик различаются между типами"},
         {"label": "Пары подробных типов", "value": f"{n_sig['types'][0]} из {n_sig['types'][1]}", "note": "сравнений значимы"},
         {"label": "Компартменты внутри нейрона", "value": f"{n_sig['compartment'][0]} из {n_sig['compartment'][1]}", "note": "сравнений значимы", "accent": "green"},
     ]))
     body.append(note([
-        "Страница показывает, отличаются ли реальные шипики Minnie65 по каждой морфометрике между тормозными и возбуждающими клетками, между подробными типами клеток и между компартментами. Это нужно, чтобы решить, какие условия имеет смысл подавать генератору шипиков и насколько сильным должен быть их эффект в сгенерированных формах.",
-        "**Единица сравнения — нейрон, а не шипик.** Шипики одного нейрона похожи друг на друга сильнее, чем шипики разных нейронов (общий «стиль» сегментации, размера клетки, условий), поэтому сотни тысяч шипиков нельзя считать независимыми: тогда значимым оказалось бы почти любое различие. Для каждого нейрона берётся медиана метрики по его шипикам (не меньше 20), и группы нейронов сравниваются перестановочным тестом: метки типа клетки случайно переставляются между нейронами, и наблюдаемая разность медиан сравнивается с разностями при перестановках.",
+        texts["intro"],
+        "**Единица сравнения — нейрон.** Шипики и ветви одного нейрона похожи друг на друга сильнее, чем у разных нейронов (общий «стиль» сегментации, размера клетки, условий), поэтому их нельзя считать независимыми: тогда значимым оказалось бы почти любое различие. " + texts["neuron_value"] + ", и группы нейронов сравниваются перестановочным тестом: метки типа клетки случайно переставляются между нейронами, и наблюдаемая разность медиан сравнивается с разностями при перестановках.",
         "**Компартменты сравниваются внутри нейрона.** Компартмент — свойство лимба, и у одного нейрона часто есть апикальные и базальные лимбы. Для каждого такого нейрона вычисляется разность медиан двух компартментов, а нулевое распределение получается случайной сменой знаков этих разностей. Так стиль нейрона сокращается, и остаётся только эффект компартмента.",
         "**Множественные сравнения.** Внутри каждой таблицы (метрики × пары) p-значения поправлены методом Бенджамини–Хохберга; значимым считается сравнение с q < 0,05. Значимость говорит о том, что различие не случайно, а не о том, что оно велико: при сотнях нейронов значимой может быть и разница в 1–2 %. Поэтому рядом всегда показан размер эффекта — относительная разность медиан.",
     ], title="О чём эта страница"))
@@ -215,7 +253,7 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
 
     body.append(section("Тормозные и возбуждающие клетки", "Распределение медиан нейронов по выбранной морфометрике: все шипики и внутри компартментов.",
                         card("Медианы нейронов", '<div style="max-width:320px;margin-bottom:8px"><select id="sel-binary"></select></div><div id="plot-binary" class="plot" style="height:420px"></div>')
-                        + note(["Каждая точка ящика — один нейрон (медиана метрики по его шипикам). Ящик — межквартильный размах, линия — медиана нейронов. Розовый — тормозные клетки, зелёный — возбуждающие. Если ящики сдвинуты и при этом клетка сводной карты цветная, сдвиг больше, чем различие случайных групп нейронов."], title="Как читать", collapsible=True),
+                        + note(["Каждая точка ящика — один нейрон (" + texts["value_word"] + "). Ящик — межквартильный размах, линия — медиана нейронов. Розовый — тормозные клетки, зелёный — возбуждающие. Если ящики сдвинуты и при этом клетка сводной карты цветная, сдвиг больше, чем различие случайных групп нейронов."], title="Как читать", collapsible=True),
                         anchor="sec-binary"))
 
     body.append(section("Подробные типы клеток", "Типы с достаточным числом нейронов; матрица попарных сравнений и распределения медиан нейронов по выбранной морфометрике.",
@@ -230,7 +268,7 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
 
     body.append(section("Компартменты внутри нейрона", "Распределение относительных разностей медиан двух компартментов у одного и того же нейрона.",
                         card("Разность внутри нейрона, %", '<div style="max-width:320px;margin-bottom:8px"><select id="sel-comp"></select></div><div id="plot-comp" class="plot" style="height:400px"></div>')
-                        + note(["Каждая точка — один нейрон, у которого есть оба компартмента (не меньше 20 шипиков в каждом): насколько медиана метрики в первом компартменте больше (положительно) или меньше (отрицательно), чем во втором. Если ящик стоит на нуле, у нейронов нет систематической разницы между компартментами, даже если отдельные нейроны различаются в обе стороны."],
+                        + note(["Каждая точка — один нейрон, у которого есть оба компартмента: насколько медиана метрики в первом компартменте больше (положительно) или меньше (отрицательно), чем во втором. Если ящик стоит на нуле, у нейронов нет систематической разницы между компартментами, даже если отдельные нейроны различаются в обе стороны."],
                                title="Как читать", collapsible=True),
                         anchor="sec-comp"))
 
@@ -246,7 +284,7 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
         ("cell_type_omnibus", "Подробные типы: общий тест", [("metric", "Метрика", "text"), ("n_types", "Типов", "int"), ("n_neurons", "Нейронов", "int"), ("p", "p", "sci"), ("q_bh", "q", "sci")]),
     ]:
         df = _read(folder, name)
-        folder_tables.append(f'<details class="note"><summary>{esc(title)}</summary>{_table_html(df, cols)}</details>')
+        folder_tables.append(f'<details class="note"><summary>{esc(title)}</summary>{_table_html(df, cols, metric_info=payload["metric_info"])}</details>')
     body.append(section("Таблицы", "Все сравнения с числами; попарные сравнения подробных типов — в файле cell_type.csv рядом со страницей.", "".join(folder_tables), anchor="sec-tables"))
     body.append(f'<footer class="page">Данные: таблица морфометрик этапа 8 предобработки S ({esc(info.get("morphometrics_table", "—"))}); типы клеток — '
                 f'cell_types_with_nucleus.csv, компартменты — minnie65_limb_compartments_length_rule.parquet. Анализ: scripts/neuron_model/morphology_by_condition.py, '
