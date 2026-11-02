@@ -1,7 +1,7 @@
 """HTML report of ``scripts/neuron_model/morphology_by_condition.py``: where the spine morphology differs significantly
 between cell types and compartments (style: docs/neuron-model/html-materials-style-guide.md, kit: html_kit.py).
 
-Reads the output folder of the analysis (the test tables + the neuron-level medians) and writes ``report.html`` next to
+Reads the output folder of the analysis (the test tables + the neuron-level medians) and writes ``<date>_<what it compares>.html`` (``report_name``) next to
 them. Page logic: ``assets/morphology_report.js``.
 """
 
@@ -54,6 +54,7 @@ def _cell(row: Optional[pd.Series], rel_col: str, factor: float, absolute: bool 
 PROFILES: Dict[str, Dict[str, Any]] = {
     "spines": {
         "title": "Морфология шипиков по типу клетки и компартменту",
+        "file": "spine-morphology-by-celltype-compartment",
         "subtitle": "Где реальные шипики Minnie65 статистически значимо различаются по каждой из 11 морфометрик",
         "unit_word": "шипиков", "value_word": "медиана метрики по его шипикам",
         "intro": "Страница показывает, отличаются ли реальные шипики Minnie65 по каждой морфометрике между тормозными и возбуждающими клетками, между подробными типами клеток и между компартментами. Это нужно, чтобы решить, какие условия имеет смысл подавать генератору шипиков и насколько сильным должен быть их эффект в сгенерированных формах.",
@@ -61,6 +62,7 @@ PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "branches": {
         "title": "Ствол и расположение шипиков по типу клетки и компартменту",
+        "file": "branch-trunk-placement-by-celltype-compartment",
         "subtitle": "Где реальные ветви значимо различаются по метрикам модулей T (ствол) и P (число и расположение шипиков)",
         "unit_word": "ветвей", "value_word": "значение метрики нейрона (медиана по ветвям или статистика по всем его шипикам)",
         "intro": "Страница показывает, отличаются ли реальные ветви между тормозными и возбуждающими клетками, между подробными типами клеток и между компартментами по метрикам ствола (модуль T: радиус, сужение, сплюснутость сечения, извилистость, изгиб, длина) и расположения шипиков (модуль P: плотность, доля пустых ветвей, парная корреляционная функция положений вдоль ветви, регулярность интервалов, сходство соседних шипиков по объёму и длине, связь размера шипика с положением). Это нужно, чтобы решить, какие условия подавать моделям T и P и проверять ли их эффект в сгенерированных ветвях.",
@@ -213,6 +215,16 @@ def _table_html(df: pd.DataFrame, columns: List[tuple], factor_col: Optional[str
     return f'<div style="overflow-x:auto"><table class="metrics"><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
 
 
+def report_name(info: Dict[str, Any]) -> str:
+    """``<date of the analysis>_<what it compares>.html`` instead of a generic report.html (pages are passed around)."""
+    import time
+
+    date = str(info.get("created") or time.strftime("%Y-%m-%d"))[:10]
+    if info.get("dataset"):
+        return f"{date}_{info['dataset']}_{_profile(info)[2]['file']}.html"
+    return f"{date}_{_profile(info)[2]['file']}.html"
+
+
 def build_report(folder: Path, out: Optional[Path] = None) -> Path:
     folder = Path(folder)
     payload = build_payload(folder)
@@ -291,6 +303,6 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
                 f'страница: src/neuron_model/reports/morphology_report.py. Значения показаны в мкм (пересчёт из нм).</footer>')
 
     js = (Path(__file__).parent / "assets" / "morphology_report.js").read_text(encoding="utf-8")
-    out = Path(out) if out else folder / "report.html"
+    out = Path(out) if out else folder / report_name(info)
     out.write_text(page("Морфология по условиям", "".join(body), payload, js), encoding="utf-8")
     return out

@@ -183,6 +183,7 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
     names = neurons if neurons is not None else sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
     n_t = n_p = n_ok = n_total = n_pos = n_pos_before = 0
     reasons: Counter = Counter()
+    neuron_types: Counter = Counter()
     keys = ["limb_id", "merged_branch_id"]
     compartments = None
     neuron_meta: Dict[str, Any] = {}
@@ -196,6 +197,7 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
         if refresh_metadata:
             neuron_meta = neuron_metadata(cfg, metadata, neuron_id, sorted(frame["limb_id"].astype(int).unique()))
             compartments = neuron_meta["compartment_by_limb"]
+            neuron_types.update([str(neuron_meta["cell_type_binary"])])
         # spine positions: the outlier rule is applied to the stored d = |v_perp| - r(s)
         spines_path = d / "branch_spines.parquet"
         spines = pd.read_parquet(spines_path) if spines_path.exists() else None
@@ -236,6 +238,8 @@ def reapply_eligibility(cfg: BranchPreprocessingConfig, *, write: bool = True, n
             _write(new, d / "branches.parquet")
     out = {"branches": n_total, "ok": n_ok, "train_eligible_T": n_t, "train_eligible_P": n_p, "spines_with_position": {"before": n_pos_before, "after": n_pos},
            "failed_checks_among_ok": dict(reasons.most_common())}
+    if refresh_metadata:
+        out["neurons_by_cell_type_binary"] = dict(neuron_types.most_common())  # all None: the cell type table was not found
     if write:
         out.update(consolidate(cfg, names))
     return out

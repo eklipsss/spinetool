@@ -13,7 +13,7 @@ branch.
         --branches-root C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches \
         --morphometrics-table C:/Users/Student/LipsEkaterina/GitHub/spinetool/cache/morphometrics_minnie65_full.parquet
 
-Writes ``runs/analysis/neuron-model/<time>_branch-stats-by-condition/{<table>.csv, groups.csv, summary.md, report.html}``.
+Writes ``runs/analysis/neuron-model/<time>_branch-stats-by-condition/{<table>.csv, groups.csv, summary.md, <date>_<what>.html}``.
 """
 
 from __future__ import annotations

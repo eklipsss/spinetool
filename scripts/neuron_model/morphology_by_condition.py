@@ -10,7 +10,7 @@ stages 1-8). Cell types and compartments from the repository metadata tables (fi
 Options: --splits/--split restrict the neurons (default: all, this is a description of the data, no model is fitted);
 --min-neurons (detailed cell types with fewer neurons are left out, default 10), --min-spines per neuron (20).
 Writes ``runs/analysis/neuron-model/<time>_morphology-by-condition/{<table>.csv, neuron_medians.csv,
-neuron_compartment_medians.csv, summary.md, report.html}`` (the report alone again: build_morphology_report.py --dir <folder>).
+neuron_compartment_medians.csv, summary.md, <date>_<what>.html}`` (the report alone again: build_morphology_report.py --dir <folder>).
 """
 
 from __future__ import annotations
