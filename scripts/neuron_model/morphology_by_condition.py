@@ -33,7 +33,7 @@ from src.neuron_model.spine_generation.evaluation.morphology_by_condition import
 from src.neuron_model.spine_morphometrics import SCALAR_METRICS  # noqa: E402
 
 
-def load_spines(table_path: Path, metadata_root: Path, splits=None, split=None) -> pd.DataFrame:
+def load_spines(table_path: Path, metadata_root: Path, splits=None, split=None, compartment_table=None) -> pd.DataFrame:
     import pyarrow.parquet as pq
 
     paths = [table_path] + sorted(Path(f"{table_path}.parts").glob("*.parquet")) if Path(f"{table_path}.parts").exists() else [table_path]
@@ -53,7 +53,7 @@ def load_spines(table_path: Path, metadata_root: Path, splits=None, split=None) 
         neuron_split = dict(zip(s["spine_key"].astype(str).str.split("/").str[1], s["split"].astype(str)))
         frame["split"] = frame["neuron_id"].map(neuron_split)
         frame = frame[frame["split"] == split] if split else frame[frame["split"].notna()]
-    meta = load_metadata_tables(metadata_root)
+    meta = load_metadata_tables(metadata_root, compartment_table)
     types = meta["cell_types"].get("minnie65", {})
     comps = meta["compartments"].get("minnie65", {})
     frame["cell_type"] = frame["neuron_id"].map(types)
@@ -93,6 +93,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--morphometrics-table", type=Path, required=True)
     parser.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
+    parser.add_argument("--compartment-table", type=Path, help="limb compartments instead of the default table")
     parser.add_argument("--splits", type=Path)
     parser.add_argument("--split")
     parser.add_argument("--min-neurons", type=int, default=10)
@@ -103,7 +104,7 @@ def main() -> None:
     args = parser.parse_args()
 
     t0 = time.time()
-    frame = load_spines(args.morphometrics_table, args.metadata_root.resolve(), args.splits, args.split)
+    frame = load_spines(args.morphometrics_table, args.metadata_root.resolve(), args.splits, args.split, args.compartment_table)
     print(f"[morph] {len(frame)} spines, {frame['neuron_id'].nunique()} neurons ({time.time() - t0:.0f} s); "
           f"cell types {frame.drop_duplicates('neuron_id')['cell_type'].value_counts(dropna=False).to_dict()}; "
           f"compartments (spines) {frame['compartment'].value_counts(dropna=False).to_dict()}", flush=True)
@@ -121,6 +122,7 @@ def main() -> None:
         info, on="neuron_id").to_csv(out / "neuron_compartment_medians.csv", index=False)
     (out / "run_info.json").write_text(json.dumps({
         "morphometrics_table": str(args.morphometrics_table), "splits": str(args.splits) if args.splits else None, "split": args.split,
+        "compartment_table": str(args.compartment_table) if args.compartment_table else "default",
         "min_neurons": args.min_neurons, "min_spines": args.min_spines, "n_permutations": args.n_permutations,
         "n_spines": int(len(frame)), "n_neurons": int(frame["neuron_id"].nunique()), "created": time.strftime("%Y-%m-%d %H:%M")}, ensure_ascii=False, indent=2), encoding="utf-8")
     from src.neuron_model.reports.morphology_report import build_report

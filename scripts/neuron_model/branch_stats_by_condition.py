@@ -61,7 +61,7 @@ def load(args):
         keep = branches["neuron_id"].map(split_of)
         branches = branches[keep == args.split] if args.split else branches[keep.notna()]
     kind = dataset_kind(str(branches["dataset"].iloc[0]))
-    meta = load_metadata_tables(args.metadata_root.resolve())
+    meta = load_metadata_tables(args.metadata_root.resolve(), args.compartment_table)
     types = meta.get("cell_types", {}).get(kind, {})
     comps = meta.get("compartments", {}).get(kind, {})
     branches["cell_type"] = branches["neuron_id"].map(types)
@@ -91,6 +91,7 @@ def main() -> None:
     parser.add_argument("--branches-root", type=Path, required=True)
     parser.add_argument("--morphometrics-table", type=Path)
     parser.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
+    parser.add_argument("--compartment-table", type=Path, help="limb compartments instead of the default table")
     parser.add_argument("--splits", type=Path)
     parser.add_argument("--split")
     parser.add_argument("--min-branches", type=int, default=10, help="per group, for the branch medians")
@@ -122,6 +123,7 @@ def main() -> None:
     neuron_medians(cm, metrics, ["neuron_id", "compartment"], 1).merge(info, on="neuron_id").to_csv(out / "neuron_compartment_medians.csv", index=False)
     (out / "run_info.json").write_text(json.dumps({
         "profile": "branches", "branches_root": str(args.branches_root), "morphometrics_table": str(args.morphometrics_table),
+        "compartment_table": str(args.compartment_table) if args.compartment_table else "default",
         "min_branches": args.min_branches, "min_pairs": args.min_pairs, "min_spines": args.min_branches, "n_permutations": args.n_permutations,
         "n_branches": int(len(branches)), "n_neurons": int(branches["neuron_id"].nunique()), "n_positioned_spines": int(len(spines)),
         "created": time.strftime("%Y-%m-%d %H:%M")}, ensure_ascii=False, indent=2), encoding="utf-8")

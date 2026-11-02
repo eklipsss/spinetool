@@ -71,6 +71,9 @@ def main() -> None:
     parser.add_argument("--neurons", nargs="*", help="only these neuron folders")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--min-cos", type=float, default=0.6)
+    parser.add_argument("--axon-rule", choices=("auto", "table", "branches", "either"), default="auto",
+                        help="axon-like limbs: the table flag (Minnie65), the rule from the branches (--branches-root), or "
+                             "either of them (auto: either when both exist - the table misses axons, 2026-11-03)")
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--reuse", type=Path, help="folder of an earlier run: take the soma centres and limb directions from its "
                         "limb_features.parquet (no NAS reading, seconds) - to try another --pia-axis / --min-cos")
@@ -155,13 +158,25 @@ def main() -> None:
         branch_axon = axon_like_from_branches(stats)
     if branch_axon is not None:
         limbs["axon_like_branches"] = [(n, int(l)) in branch_axon for n, l in zip(limbs["neuron_id"], limbs["limb_id"])]
-    if "axon_like_table" in limbs.columns and limbs["axon_like_table"].notna().any():
-        limbs["axon_like"] = limbs["axon_like_table"].fillna(False).astype(bool)
-    elif branch_axon is not None:
-        limbs["axon_like"] = limbs["axon_like_branches"]
+    has_table = "axon_like_table" in limbs.columns and limbs["axon_like_table"].notna().any()
+    table_flag = limbs["axon_like_table"].astype("boolean").fillna(False).astype(bool) if has_table else None
+    rule = args.axon_rule
+    if rule == "auto":
+        rule = "either" if has_table and branch_axon is not None else "table" if has_table else "branches" if branch_axon is not None else "none"
+    if rule in ("table", "either") and not has_table:
+        parser.error(f"--axon-rule {rule} needs the Minnie65 compartment table")
+    if rule in ("branches", "either") and branch_axon is None:
+        parser.error(f"--axon-rule {rule} needs --branches-root")
+    if rule == "table":
+        limbs["axon_like"] = table_flag
+    elif rule == "branches":
+        limbs["axon_like"] = limbs["axon_like_branches"].astype(bool)
+    elif rule == "either":
+        limbs["axon_like"] = table_flag | limbs["axon_like_branches"].astype(bool)
     else:
         limbs["axon_like"] = False
         print("[apical] WARNING: no axon-like flags (no table, no --branches-root): the axon limb competes as a dendrite", flush=True)
+    print(f"[apical] axon rule: {rule} ({int(limbs['axon_like'].sum())} axon-like limbs)", flush=True)
 
     applicable = {n: (types.get(n) not in NO_APICAL_TYPES) for n in limbs["neuron_id"].unique()}
     labelled, neurons = classify_by_direction(limbs, pia, min_cos=args.min_cos, applicable=applicable)
@@ -169,6 +184,7 @@ def main() -> None:
     neurons["cell_type_binary"] = neurons["cell_type"].map(lambda t: cell_type_binary(t) if isinstance(t, str) else None)
 
     summary = {"dataset": args.dataset, "n_neurons": int(len(neurons)), "n_limbs": int(len(labelled)), "pia_axis": pia.tolist(), "pia_r2": r2,
+               "axon_rule": rule, "min_cos": args.min_cos,
                "confident_share": float(neurons["confident"].mean()),
                "confident_by_type": neurons.groupby("cell_type", dropna=False)["confident"].mean().round(3).to_dict(),
                "reasons": neurons["reason"].str.replace(r" \((best )?cos .*\)$", "", regex=True).value_counts().to_dict()}  # without the cos values
@@ -204,10 +220,18 @@ def main() -> None:
         features_table.to_parquet(out / "limb_features.parquet", index=False)  # for --reuse
     neurons.to_csv(out / "neurons.csv", index=False)
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    # the compartment table (format of minnie65_limb_compartments_length_rule.parquet; metadata.load_metadata_tables(...,
+    # compartment_table=...)): neurons without an apical dendrite (interneurons) get not_applicable on EVERY limb, also
+    # on the axon-like ones - the branch rule (thin, no spines) cannot tell their aspiny dendrites from the axon, so their
+    # compartments stay unknown as with the length rule
     conf = labelled.merge(neurons[["neuron_id", "confident"]], on="neuron_id", how="left")
-    pd.DataFrame({"limb_id": conf["limb_id"], "cable_um": conf["cable_nm"] / 1000.0, "neuron": conf["neuron_id"], "limb": conf["limb"],
-                  "axon_like": conf["axon_like"], "compartment": conf["compartment_dir"], "cos_pia": conf["cos_pia"],
-                  "classification_confident": conf["confident"]}).to_parquet(out / "limb_compartments_direction.parquet", index=False)
+    label = conf["compartment_dir"].copy()
+    label[conf["neuron_id"].map(applicable).eq(False)] = "not_applicable"
+    pd.DataFrame({"dataset": args.dataset, "limb_id": conf["limb_id"], "cable_um": conf["cable_nm"] / 1000.0, "neuron": conf["neuron_id"],
+                  "limb": conf["limb"], "axon_like": conf["axon_like"] & label.ne("not_applicable"), "compartment": label,
+                  "cos_pia": conf["cos_pia"], "classification_confident": conf["confident"], "rule": "direction",
+                  "axon_rule": rule}).to_parquet(out / "limb_compartments_direction.parquet", index=False)
+    print(f"[apical] compartment table: {label.value_counts().to_dict()} -> {out / 'limb_compartments_direction.parquet'}")
     print(f"-> {out}  ({time.time() - t0:.0f} s)")
 
 

@@ -27,6 +27,7 @@ _ELIGIBILITY_FIELDS = {
 _RUNTIME_FIELDS = {
     "raw_data_root", "metadata_root", "s_preprocessed_root", "output_root", "splits",
     "neuron_ids", "limit_neurons", "workers", "io_threads", "force", "merged_branch_ids", "limit_branches", "only_s_neurons",
+    "compartment_table",
 }
 
 
@@ -35,6 +36,7 @@ class BranchPreprocessingConfig:
     dataset: str = "minnie65"
     raw_data_root: Path = Path("datasets")
     metadata_root: Path = Path("datasets")
+    compartment_table: Optional[Path] = None  # limb compartments instead of the default table (metadata.load_metadata_tables)
     s_preprocessed_root: Optional[Path] = None  # default <raw_data_root>/<dataset>/preprocessed
     output_root: Optional[Path] = None  # default <raw_data_root>/<dataset>/preprocessed_branches
     splits: Optional[Path] = None  # splits_*.parquet; the split of a branch is the split of its neuron
@@ -132,7 +134,7 @@ class BranchPreprocessingConfig:
         extra: Dict[str, Any] = {}
         for key, value in values.items():
             (kwargs if key in known else extra)[key] = value
-        for key in ("raw_data_root", "metadata_root", "s_preprocessed_root", "output_root", "splits"):
+        for key in ("raw_data_root", "metadata_root", "s_preprocessed_root", "output_root", "splits", "compartment_table"):
             if kwargs.get(key) is not None:
                 kwargs[key] = Path(kwargs[key])
         cfg = cls(**kwargs)

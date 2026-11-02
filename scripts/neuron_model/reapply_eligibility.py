@@ -45,6 +45,8 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="only count, write nothing")
     parser.add_argument("--refresh-metadata", action="store_true", help="re-read the compartments and cell types from the metadata tables")
     parser.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
+    parser.add_argument("--compartment-table", type=Path, help="limb compartments instead of the default table (with "
+                        "--refresh-metadata), e.g. limb_compartments_direction.parquet of apical_by_direction.py")
     parser.add_argument("--dataset", default=None, help="dataset of the output (minnie65, H01_Seg, labid); default: the config's")
     args = parser.parse_args()
     overrides = {}
@@ -54,6 +56,8 @@ def main() -> None:
             parser.error(f"{name!r} is not an eligibility threshold ({sorted(_ELIGIBILITY_FIELDS)}); other parameters change the geometry")
         overrides[name] = float(value)
     extra = {"dataset": args.dataset} if args.dataset else {}
+    if args.compartment_table:
+        extra["compartment_table"] = args.compartment_table.resolve()
     cfg = load_config(args.config, {"output_root": args.output_root.resolve(), "metadata_root": args.metadata_root.resolve(), **extra, **overrides})
     print("thresholds:", {k: getattr(cfg, k) for k in sorted(_ELIGIBILITY_FIELDS)})
     result = reapply_eligibility(cfg, write=not args.dry_run, refresh_metadata=args.refresh_metadata)

@@ -85,7 +85,10 @@ def h01_merged_branches_dir(metadata_root: Path) -> Path:
     return root / H01_MERGED_DIRS[0]
 
 
-def load_metadata_tables(metadata_root: Path) -> Dict[str, Any]:
+def load_metadata_tables(metadata_root: Path, compartment_table: Optional[Path] = None) -> Dict[str, Any]:
+    """``compartment_table``: a limb compartment table to use INSTEAD of the default one of its dataset (column
+    ``dataset``, default minnie65), e.g. the direction rule (scripts/neuron_model/apical_by_direction.py
+    ``limb_compartments_direction.parquet``). Same format as minnie65_limb_compartments_length_rule.parquet."""
     metadata_root = Path(metadata_root)
     if not metadata_root.exists():
         # A relative default (SpinePreprocessingConfig.metadata_root =
@@ -153,6 +156,15 @@ def load_metadata_tables(metadata_root: Path) -> Dict[str, Any]:
         metadata["compartments"]["minnie65"] = compartment_lookup(compartments)
         metadata["compartments"]["minnie"] = metadata["compartments"]["minnie65"]
 
+    if compartment_table is not None:
+        table = pd.read_parquet(compartment_table)
+        kind = str(table["dataset"].iloc[0]) if "dataset" in table.columns and len(table) else "minnie65"
+        kind = "h01" if kind.lower().startswith("h01") else "minnie65" if kind.lower().startswith("minnie") else kind
+        metadata["compartments"][kind] = compartment_lookup(table)
+        if kind == "minnie65":
+            metadata["compartments"]["minnie"] = metadata["compartments"]["minnie65"]
+        metadata["compartment_table"] = str(compartment_table)
+
     return metadata
 
 
@@ -179,6 +191,7 @@ def parse_branch_prefix(prefix: str) -> Dict[str, Any]:
 
 
 _LIMB_SUFFIX = re.compile(r"_limb_(\d+)$")
+NO_COMPARTMENT_LABELS = {"not_applicable", "nan", "None", ""}  # = no row (compartment unknown)
 
 
 def compartment_lookup(frame: pd.DataFrame) -> Dict[Tuple[str, int], str]:
@@ -194,7 +207,8 @@ def compartment_lookup(frame: pd.DataFrame) -> Dict[Tuple[str, int], str]:
             limb = int(match.group(1)) if match else None
         if limb is None:
             limb = int(row.limb_id)
-        result[(str(row.neuron), limb)] = str(row.compartment)
+        if isinstance(row.compartment, str) and row.compartment not in NO_COMPARTMENT_LABELS:
+            result[(str(row.neuron), limb)] = str(row.compartment)
     return result
 
 

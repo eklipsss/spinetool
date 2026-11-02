@@ -162,7 +162,7 @@ def available_neurons(cfg: BranchPreprocessingConfig, members: pd.DataFrame) -> 
 
 
 def load_metadata(cfg: BranchPreprocessingConfig) -> Dict[str, Any]:
-    return load_metadata_tables(Path(cfg.metadata_root))
+    return load_metadata_tables(Path(cfg.metadata_root), cfg.compartment_table)
 
 
 def as_float_array(value: Any) -> Optional[np.ndarray]:

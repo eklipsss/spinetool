@@ -59,3 +59,20 @@ def test_limb_features_and_direction_labels(tmp_path):
     assert set(lab2["compartment_dir"]) == {"uncertain"} and "two limbs" in n2["reason"].iloc[0]
     lab3, n3 = classify_by_direction(limbs, up, applicable={"n1": False})
     assert set(lab3["compartment_dir"]) == {"not_applicable"}
+
+
+def test_alternative_compartment_table_replaces_the_default(tmp_path):
+    from src.neuron_model.metadata import load_metadata_tables
+
+    table = pd.DataFrame({"dataset": "minnie65", "neuron": ["n1", "n1", "n1", "n2"], "limb_id": [0, 1, 2, 0],
+                          "limb": ["n1_limb_000", "n1_limb_001", "n1_limb_002", "n2_limb_000"],
+                          "compartment": ["apical", "axon_like", "basal", "not_applicable"]})
+    path = tmp_path / "limb_compartments_direction.parquet"
+    table.to_parquet(path)
+    meta = load_metadata_tables(tmp_path, path)
+    comps = meta["compartments"]["minnie65"]
+    assert comps == {("n1", 0): "apical", ("n1", 1): "axon_like", ("n1", 2): "basal"}  # not_applicable = unknown
+    assert meta["compartments"]["minnie"] is comps
+    h01 = table.assign(dataset="h01", neuron="neuron_5", limb=lambda t: "neuron_5_limb_00" + t["limb_id"].astype(str))
+    h01.to_parquet(path)
+    assert ("neuron_5", 0) in load_metadata_tables(tmp_path, path)["compartments"]["h01"]
