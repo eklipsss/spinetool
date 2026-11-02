@@ -58,6 +58,15 @@ def test_mark_correlation_sees_local_similarity_not_the_branch_level():
     assert smooth["nn_corr_log_volume"] > 0.5
 
 
+def test_mark_correlation_is_not_biased_on_branches_with_few_spines():
+    # 3-4 spines per branch, independent marks: centring by the branch mean alone gives about -1/(n-1)
+    rng = np.random.default_rng(4)
+    few = group_spatial_stats(*_spines(rng, n_branches=1500, length=4000.0))
+    assert abs(few["nn_corr_log_volume"]) < 0.05 and abs(few["nn_corr_length"]) < 0.05
+    raw = group_spatial_stats(*_spines(np.random.default_rng(4), n_branches=1500, length=4000.0), n_null=0)
+    assert raw["nn_corr_log_volume"] < -0.15  # the bias the permutation removes
+
+
 def test_group_table_rows_and_eligibility():
     rng = np.random.default_rng(3)
     sp, lengths = _spines(rng, n_branches=40)

@@ -135,7 +135,7 @@ def main() -> None:
     summary = {"dataset": args.dataset, "n_neurons": int(len(neurons)), "n_limbs": int(len(labelled)), "pia_axis": pia.tolist(), "pia_r2": r2,
                "confident_share": float(neurons["confident"].mean()),
                "confident_by_type": neurons.groupby("cell_type", dropna=False)["confident"].mean().round(3).to_dict(),
-               "reasons": neurons["reason"].value_counts().to_dict()}
+               "reasons": neurons["reason"].str.replace(r" \((best )?cos .*\)$", "", regex=True).value_counts().to_dict()}  # without the cos values
     print(f"[apical] confident {summary['confident_share']:.1%} of the neurons; reasons {summary['reasons']}")
     if "compartment_length" in labelled.columns:
         lt = labelled[labelled["compartment_length"].notna()]

@@ -18,7 +18,10 @@ the stage-8 morphometrics table of the S preprocessing. Output: one row per GROU
     * median distance to the nearest neighbour along the branch (nm);
 - marks (morphometrics of the spines): correlation between a spine and its nearest neighbour of log Volume and of
   Length, both centred by the branch mean (only the LOCAL similarity counts, not that a thick branch carries big
-  spines); Spearman correlation of log Volume with the position u (proximal -> distal gradient).
+  spines), reported as the EXCESS over the same statistic with the marks permuted within each branch (``n_null``
+  permutations): centring by the mean of n spines alone gives about -1/(n-1) for independent marks, so the raw value
+  is negative on branches with few spines (inhibitory neurons) without any neighbour effect; 0 = no local similarity.
+  Spearman correlation of log Volume with the position u (proximal -> distal gradient).
 
 Groups with fewer than ``min_branches`` branches get NaN for the branch medians; spatial / mark statistics need at
 least ``min_pairs`` pairs. Units: nm (density per um). ``"diff": "abs"`` in METRIC_INFO: the report shows the absolute difference (shares, g(r),
@@ -55,8 +58,8 @@ METRIC_INFO: Dict[str, Dict[str, Any]] = {
     "pcf_2000_4000": {"diff": "abs", "name": "g(r), 2–4 мкм", "unit": "", "factor": 1.0, "about": "парная корреляция положений вдоль ветви", "module": "P"},
     "gap_cv": {"diff": "abs", "name": "Вариация интервалов (CV)", "unit": "", "factor": 1.0, "about": "1 — случайно, < 1 — регулярнее случайного", "module": "P"},
     "nn_along_nm": {"name": "До соседа вдоль ветви", "unit": "мкм", "factor": 1e-3, "about": "медиана по шипикам группы", "module": "P"},
-    "nn_corr_log_volume": {"diff": "abs", "name": "Корреляция объёма соседей", "unit": "", "factor": 1.0, "about": "соседние шипики похожи по объёму (за вычетом среднего по ветви)", "module": "P"},
-    "nn_corr_length": {"diff": "abs", "name": "Корреляция длины соседей", "unit": "", "factor": 1.0, "about": "соседние шипики похожи по длине (за вычетом среднего по ветви)", "module": "P"},
+    "nn_corr_log_volume": {"diff": "abs", "name": "Корреляция объёма соседей", "unit": "", "factor": 1.0, "about": "соседние шипики похожи по объёму (за вычетом среднего по ветви; превышение над перестановкой объёмов внутри ветви, 0 — нет сходства)", "module": "P"},
+    "nn_corr_length": {"diff": "abs", "name": "Корреляция длины соседей", "unit": "", "factor": 1.0, "about": "соседние шипики похожи по длине (за вычетом среднего по ветви; превышение над перестановкой длин внутри ветви, 0 — нет сходства)", "module": "P"},
     "volume_vs_u": {"diff": "abs", "name": "Объём и положение u", "unit": "", "factor": 1.0, "about": "корреляция Спирмена log объёма с u (проксимально → дистально)", "module": "P"},
 }
 
@@ -79,7 +82,8 @@ def _corr(x: np.ndarray, y: np.ndarray, min_pairs: int) -> float:
     return float(np.corrcoef(x[ok], y[ok])[0, 1])
 
 
-def group_spatial_stats(spines: pd.DataFrame, lengths: Dict[Any, float], *, min_pairs: int = 30) -> Dict[str, float]:
+def group_spatial_stats(spines: pd.DataFrame, lengths: Dict[Any, float], *, min_pairs: int = 30, n_null: int = 20,
+                        seed: int = 0) -> Dict[str, float]:
     """Pooled spatial / mark statistics of one group. ``spines``: positioned spines with ``branch`` (key into
     ``lengths``, nm), ``s`` (nm), ``u`` and optional marks ``log_volume``, ``length``."""
     out = {m: float("nan") for m in SPATIAL_METRICS + MARK_METRICS}
@@ -89,6 +93,9 @@ def group_spatial_stats(spines: pd.DataFrame, lengths: Dict[Any, float], *, min_
     gaps, nn = [], []
     pair_a = {"log_volume": [], "length": []}
     pair_b = {"log_volume": [], "length": []}
+    null_a = {"log_volume": [], "length": []}
+    null_b = {"log_volume": [], "length": []}
+    rng = np.random.default_rng(seed)
     lens, cnts = [], []
     for key, g in spines.groupby("branch", sort=False):
         s = np.sort(g["s"].to_numpy(float))
@@ -113,6 +120,10 @@ def group_spatial_stats(spines: pd.DataFrame, lengths: Dict[Any, float], *, min_
                     v = v - np.nanmean(v)  # centred by the branch: local similarity only
                     pair_a[mark].extend(v.tolist())
                     pair_b[mark].extend(v[j].tolist())
+                    for _ in range(n_null):  # the same pairs with the marks shuffled along the branch
+                        w = v[rng.permutation(n)]
+                        null_a[mark].extend(w.tolist())
+                        null_b[mark].extend(w[j].tolist())
     lens, cnts = np.asarray(lens, float), np.asarray(cnts, float)
     good = np.isfinite(lens)
     total_pairs = float((cnts * (cnts - 1)).sum())
@@ -125,8 +136,10 @@ def group_spatial_stats(spines: pd.DataFrame, lengths: Dict[Any, float], *, min_
         out["gap_cv"] = float(gaps.std() / gaps.mean()) if gaps.mean() > 0 else float("nan")
     if len(nn) >= min_pairs:
         out["nn_along_nm"] = float(np.median(nn))
-    out["nn_corr_log_volume"] = _corr(np.asarray(pair_a["log_volume"]), np.asarray(pair_b["log_volume"]), min_pairs)
-    out["nn_corr_length"] = _corr(np.asarray(pair_a["length"]), np.asarray(pair_b["length"]), min_pairs)
+    for mark, key in (("log_volume", "nn_corr_log_volume"), ("length", "nn_corr_length")):
+        observed = _corr(np.asarray(pair_a[mark]), np.asarray(pair_b[mark]), min_pairs)
+        null = _corr(np.asarray(null_a[mark]), np.asarray(null_b[mark]), min_pairs) if n_null else 0.0
+        out[key] = observed - null
     if "log_volume" in spines.columns:
         from scipy.stats import spearmanr
 
