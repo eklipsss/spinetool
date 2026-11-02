@@ -73,16 +73,29 @@ def labid_group(neuron_id: str) -> Optional[str]:
 PREFIX_RE = re.compile(r"^(?P<neuron>.+)_limb_(?P<limb>\d+)_branch_(?P<branch>\d+)$")
 
 
-H01_MERGED_DIRS = ("h01/merged_branches", "H01/merged_branches", "H01/H01_Seg/merged_branches")
+# the segmentation H01_Seg (used since 2026-11-01) first: on the NAS an older H01/merged_branches exists next to it
+H01_MERGED_DIRS = ("H01/H01_Seg/merged_branches", "h01/H01_Seg/merged_branches", "h01/merged_branches", "H01/merged_branches")
 
 
-def h01_merged_branches_dir(metadata_root: Path) -> Path:
-    """First existing ``merged_branches`` folder of H01 (the segmentation ``H01_Seg`` lies one level deeper)."""
+def h01_merged_branches_dir(metadata_root: Path, require: Optional[str] = None) -> Path:
+    """First ``merged_branches`` folder of H01 that exists (with ``require``: that CONTAINS this file)."""
     root = Path(metadata_root)
     for rel in H01_MERGED_DIRS:
-        if (root / rel).exists():
+        if (root / rel).exists() and (require is None or (root / rel / require).exists()):
             return root / rel
     return root / H01_MERGED_DIRS[0]
+
+
+def h01_metadata_file(metadata_root: Path, name: str) -> Optional[Path]:
+    """``h01_celltype.csv`` / ``h01_layer.csv``: in the folder above the first ``merged_branches`` candidate that has it
+    (before 2026-11-03 only next to the first EXISTING merged_branches folder - on the NAS the older H01/merged_branches,
+    so the tables of H01/H01_Seg were not found)."""
+    root = Path(metadata_root)
+    for rel in H01_MERGED_DIRS:
+        path = (root / rel).parent / name
+        if path.exists():
+            return path
+    return None
 
 
 def load_metadata_tables(metadata_root: Path, compartment_table: Optional[Path] = None) -> Dict[str, Any]:
@@ -115,7 +128,7 @@ def load_metadata_tables(metadata_root: Path, compartment_table: Optional[Path] 
     mapping_paths = {
         "minnie65": minnie_root / "merged_branches" / "single_child_merge_mapping.parquet",
         "minnie": minnie_root / "merged_branches" / "single_child_merge_mapping.parquet",
-        "h01": h01_merged_branches_dir(metadata_root) / "h01_single_child_merge_mapping.parquet",
+        "h01": h01_merged_branches_dir(metadata_root, "h01_single_child_merge_mapping.parquet") / "h01_single_child_merge_mapping.parquet",
     }
     metadata["merge_lookup"] = {}
     for dataset, path in mapping_paths.items():
@@ -129,10 +142,9 @@ def load_metadata_tables(metadata_root: Path, compartment_table: Optional[Path] 
 
     # H01: h01_celltype.csv / h01_layer.csv next to the merged_branches folder of the segmentation (neuron_id without the
     # "neuron_" prefix of the folders, which is added here so the keys match the S / branch tables)
-    h01_dir = h01_merged_branches_dir(metadata_root).parent
     for name, key, column in (("h01_celltype.csv", "cell_types", "cell_type"), ("h01_layer.csv", "layers", "layer")):
-        path = h01_dir / name
-        if path.exists():
+        path = h01_metadata_file(metadata_root, name)
+        if path is not None:
             table = pd.read_csv(path)
             metadata.setdefault(key, {})["h01"] = {
                 f"neuron_{int(row.neuron_id)}": str(getattr(row, column))

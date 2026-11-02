@@ -116,6 +116,10 @@ def main() -> None:
     else:
         ids = [n for n in centers if lay.get(n) is not None and centers[n] is not None]
         if len(ids) < 10 or len({lay[n] for n in ids}) < 3:
+            if args.dataset == "h01":
+                from src.neuron_model.metadata import h01_metadata_file
+
+                print(f"[apical] h01_layer.csv: {h01_metadata_file(args.metadata_root, 'h01_layer.csv')}, layers loaded {len(layers)}", flush=True)
             raise SystemExit(f"[apical] only {len(ids)} neurons with a layer ({len({lay[n] for n in ids})} distinct layers): cannot estimate the pia "
                              "axis, give --pia-axis x,y,z")
         xyz = np.array([centers[n] for n in ids])

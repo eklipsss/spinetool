@@ -76,3 +76,20 @@ def test_alternative_compartment_table_replaces_the_default(tmp_path):
     h01 = table.assign(dataset="h01", neuron="neuron_5", limb=lambda t: "neuron_5_limb_00" + t["limb_id"].astype(str))
     h01.to_parquet(path)
     assert ("neuron_5", 0) in load_metadata_tables(tmp_path, path)["compartments"]["h01"]
+
+
+def test_h01_tables_are_found_next_to_h01_seg_when_an_older_merged_branches_exists(tmp_path):
+    from src.neuron_model.metadata import h01_merged_branches_dir, load_metadata_tables
+
+    (tmp_path / "H01" / "merged_branches").mkdir(parents=True)  # the older layout on the NAS, without the tables
+    seg = tmp_path / "H01" / "H01_Seg"
+    (seg / "merged_branches").mkdir(parents=True)
+    pd.DataFrame({"neuron_id": [5, 7], "layer": ["Layer 2", "Layer 5"]}).to_csv(seg / "h01_layer.csv", index=False)
+    pd.DataFrame({"neuron_id": [5, 7], "cell_type": ["PYRAMIDAL", "INTERNEURON"]}).to_csv(seg / "h01_celltype.csv", index=False)
+    meta = load_metadata_tables(tmp_path)
+    assert meta["layers"]["h01"] == {"neuron_5": "Layer 2", "neuron_7": "Layer 5"}
+    assert meta["cell_types"]["h01"]["neuron_7"] == "INTERNEURON"
+    (tmp_path / "H01" / "merged_branches" / "h01_single_child_merge_mapping.parquet").write_bytes(b"")
+    found = h01_merged_branches_dir(tmp_path, "h01_single_child_merge_mapping.parquet")  # case-insensitive file systems: h01 = H01
+    assert str(found).lower() == str(tmp_path / "H01" / "merged_branches").lower()
+    assert h01_merged_branches_dir(tmp_path) == seg / "merged_branches"

@@ -31,7 +31,7 @@ def _mapping_paths(cfg: BranchPreprocessingConfig):
     if kind == "h01":
         from ..metadata import h01_merged_branches_dir
 
-        base = h01_merged_branches_dir(Path(cfg.metadata_root))
+        base = h01_merged_branches_dir(Path(cfg.metadata_root), mapping_name)
     return base / mapping_name, (base / summary_name) if summary_name else None
 
 
