@@ -41,20 +41,29 @@ from src.neuron_model.metadata import cell_type_binary, load_metadata_tables  # 
 NO_APICAL_TYPES = {"INTERNEURON", "BC", "BPC", "MC", "NGC", "Unsure I", "OLIGO"}
 
 
-def axon_like_from_branches(branches_root: Path, density_max: float = 0.10, diameter_max_um: float = 0.35, min_branches: int = 3):
-    """{(neuron_id, limb_id)} matching the caliber / density rule of the Minnie65 table, from branches.parquet."""
+def limb_branch_stats(branches_root: Path) -> pd.DataFrame:
+    """Per (neuron_id, limb_id) from branches.parquet (status ok): number of branches, summed length, median radius,
+    spine density - to see what a limb is (an axon: thin or myelinated-thick, almost no spines)."""
     b = pd.read_parquet(branches_root / "branches.parquet", columns=["neuron_id", "limb_id", "status", "length_nm", "radius_median_nm", "n_spines"])
     b = b[b["status"].astype(str) == "ok"]
-    g = b.groupby(["neuron_id", "limb_id"]).agg(n=("n_spines", "size"), spines=("n_spines", "sum"), length=("length_nm", "sum"), radius=("radius_median_nm", "median"))
-    g = g[g["n"] >= min_branches]
-    density = g["spines"] / (g["length"] / 1000.0)
-    mask = (density < density_max) & (2.0 * g["radius"] / 1000.0 < diameter_max_um)
-    return {(str(n), int(l)) for n, l in g.index[mask]}
+    g = b.groupby(["neuron_id", "limb_id"]).agg(limb_n_branches=("n_spines", "size"), limb_spines=("n_spines", "sum"), limb_length_nm=("length_nm", "sum"),
+                                                limb_radius_nm=("radius_median_nm", "median")).reset_index()
+    g["limb_density_per_um"] = g["limb_spines"] / (g["limb_length_nm"] / 1000.0)
+    g["neuron_id"] = g["neuron_id"].astype(str)
+    g["limb_id"] = g["limb_id"].astype(int)
+    return g
+
+
+def axon_like_from_branches(stats: pd.DataFrame, density_max: float = 0.10, diameter_max_um: float = 0.35, min_branches: int = 3):
+    """{(neuron_id, limb_id)} matching the caliber / density rule of the Minnie65 table (``limb_branch_stats``)."""
+    g = stats[stats["limb_n_branches"] >= min_branches]
+    mask = (g["limb_density_per_um"] < density_max) & (2.0 * g["limb_radius_nm"] / 1000.0 < diameter_max_um)
+    return {(str(n), int(l)) for n, l in zip(g.loc[mask, "neuron_id"], g.loc[mask, "limb_id"])}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dataset-root", type=Path, required=True, help="folder with the neuron folders")
+    parser.add_argument("--dataset-root", type=Path, help="folder with the neuron folders (not needed with --reuse)")
     parser.add_argument("--dataset", choices=("minnie65", "h01"), required=True)
     parser.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
     parser.add_argument("--branches-root", type=Path, help="branch preprocessing output (axon-like rule from the branches)")
@@ -63,6 +72,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--min-cos", type=float, default=0.6)
     parser.add_argument("--threads", type=int, default=16)
+    parser.add_argument("--reuse", type=Path, help="folder of an earlier run: take the soma centres and limb directions from its "
+                        "limb_features.parquet (no NAS reading, seconds) - to try another --pia-axis / --min-cos")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
@@ -71,15 +82,28 @@ def main() -> None:
     types = meta.get("cell_types", {}).get(args.dataset, {})
     layers = meta.get("layers", {}).get(args.dataset, {})
     pattern = "neuron_*" if args.dataset == "h01" else "[0-9]*"
-    dirs = [d for d in sorted(args.dataset_root.glob(pattern)) if d.is_dir() and (d / "soma" / "soma_mesh.off").exists()]
-    if args.neurons:
-        dirs = [d for d in dirs if d.name in set(args.neurons)]
-    if args.limit:
-        dirs = dirs[: args.limit]
-    print(f"[apical] {len(dirs)} neurons with a soma mesh under {args.dataset_root}", flush=True)
+    if not args.reuse and args.dataset_root is None:
+        parser.error("--dataset-root is required without --reuse")
+    dirs = []
+    if not args.reuse:
+        dirs = [d for d in sorted(args.dataset_root.glob(pattern)) if d.is_dir() and (d / "soma" / "soma_mesh.off").exists()]
+        if args.neurons:
+            dirs = [d for d in dirs if d.name in set(args.neurons)]
+        if args.limit:
+            dirs = dirs[: args.limit]
+        print(f"[apical] {len(dirs)} neurons with a soma mesh under {args.dataset_root}", flush=True)
 
-    with ThreadPoolExecutor(args.threads) as pool:
-        centers = dict(zip([d.name for d in dirs], pool.map(soma_center, dirs)))
+    cached = None
+    if args.reuse:
+        cached = pd.read_parquet(args.reuse / "limb_features.parquet")
+        cached["neuron_id"] = cached["neuron_id"].astype(str)
+        for col in ("root", "dir_init", "dir_limb", "soma_center"):
+            cached[col] = [None if v is None else np.asarray(v, float).tolist() for v in cached[col]]
+        centers = {n: np.asarray(g["soma_center"].iloc[0], float) for n, g in cached.groupby("neuron_id")}
+        print(f"[apical] reusing {len(cached)} limbs of {len(centers)} neurons from {args.reuse}", flush=True)
+    else:
+        with ThreadPoolExecutor(args.threads) as pool:
+            centers = dict(zip([d.name for d in dirs], pool.map(soma_center, dirs)))
     # pia axis: layers (H01 table, or the Minnie65 type name) regressed on the soma position
     lay = {n: layer_value(layers.get(n)) if args.dataset == "h01" else layer_value(types.get(n)) for n in centers}
     if args.pia_axis:
@@ -103,8 +127,14 @@ def main() -> None:
             r["neuron_id"] = d.name
         return rows
 
-    with ThreadPoolExecutor(args.threads) as pool:
-        limbs = pd.DataFrame([r for rows in pool.map(features, dirs) for r in rows])
+    if cached is not None:
+        limbs = cached.drop(columns=["soma_center"])
+    else:
+        with ThreadPoolExecutor(args.threads) as pool:
+            limbs = pd.DataFrame([r for rows in pool.map(features, dirs) for r in rows])
+        limbs["soma_center"] = [None if centers.get(n) is None else np.asarray(centers[n]).tolist() for n in limbs["neuron_id"]]
+        features_table = limbs.copy()
+        limbs = limbs.drop(columns=["soma_center"])
     print(f"[apical] {len(limbs)} limbs ({time.time() - t0:.0f} s)", flush=True)
 
     # axon-like limbs
@@ -116,7 +146,11 @@ def main() -> None:
             table = pd.read_parquet(path)[["limb", "compartment", "axon_like", "classification_confident"]].rename(
                 columns={"compartment": "compartment_length", "axon_like": "axon_like_table", "classification_confident": "confident_length"})
             limbs = limbs.merge(table, on="limb", how="left")
-    branch_axon = axon_like_from_branches(args.branches_root) if args.branches_root else None
+    branch_axon = None
+    if args.branches_root:
+        stats = limb_branch_stats(args.branches_root)
+        limbs = limbs.merge(stats, on=["neuron_id", "limb_id"], how="left")
+        branch_axon = axon_like_from_branches(stats)
     if branch_axon is not None:
         limbs["axon_like_branches"] = [(n, int(l)) in branch_axon for n, l in zip(limbs["neuron_id"], limbs["limb_id"])]
     if "axon_like_table" in limbs.columns and limbs["axon_like_table"].notna().any():
@@ -164,6 +198,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     keep = [c for c in labelled.columns if c not in ("root", "dir_init", "dir_limb")]
     labelled[keep].to_csv(out / "limbs.csv", index=False)
+    if cached is None:
+        features_table.to_parquet(out / "limb_features.parquet", index=False)  # for --reuse
     neurons.to_csv(out / "neurons.csv", index=False)
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     conf = labelled.merge(neurons[["neuron_id", "confident"]], on="neuron_id", how="left")
