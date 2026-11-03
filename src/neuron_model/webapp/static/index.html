@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Генератор ветвей дендрита</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+  <script type="importmap">
+    {"imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }}
+  </script>
+</head>
+<body>
+  <header class="page-head">
+    <div class="brand-strip"></div>
+    <div class="head-row">
+      <div>
+        <h1>Генератор ветвей дендрита с шипиками</h1>
+        <p class="subtitle">Выберите условия — модель построит ствол ветви, расставит шипики и соберёт одну замкнутую поверхность. Все числа посчитаны по полным сеткам.</p>
+      </div>
+      <div class="head-meta" id="bundle-meta">загрузка набора моделей…</div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <form id="request-form" class="card" autocomplete="off">
+        <h2>Условия</h2>
+        <label>Вид <select name="species"></select></label>
+        <label>Тип клетки <select name="cell_type_binary"></select></label>
+        <label>Компартмент <select name="compartment"></select></label>
+        <label>Подробный тип клетки для шипиков <select name="spine_cell_type"></select></label>
+        <label>Длина ветви, мкм <input type="number" name="length_um" step="0.5"></label>
+        <label>Расстояние от сомы до начала ветви, мкм
+          <input type="number" name="soma_um" step="1">
+        </label>
+        <label class="check"><input type="checkbox" name="soma_unknown"> расстояние до сомы неизвестно</label>
+        <label class="check"><input type="checkbox" name="is_terminal"> концевая ветвь</label>
+        <label>Зерно генератора
+          <span class="seed-row"><input type="number" name="seed" min="0" step="1"><button type="button" id="random-seed" class="ghost" title="Случайное зерно">⟳</button></span>
+        </label>
+        <p class="hint" id="limits-hint"></p>
+        <div id="form-warnings" class="notice warn hidden"></div>
+        <div id="form-errors" class="notice bad hidden"></div>
+        <button type="submit" id="generate-btn" class="primary">Сгенерировать</button>
+        <p class="hint">Одинаковые условия и зерно всегда дают одну и ту же ветвь.</p>
+      </form>
+    </aside>
+
+    <main>
+      <section id="empty-state" class="card intro">
+        <h2>Как пользоваться</h2>
+        <p>Слева задайте вид, тип клетки и компартмент ветви, её длину, расстояние от сомы и признак концевой ветви. <b>Ствол</b> строит статистическая модель T0, <b>число и положения шипиков</b> — модель P0, а сами <b>шипики</b> берутся из заранее сгенерированной библиотеки для выбранного типа клетки и подбираются по радиусу ствола в точке крепления.</p>
+        <p>После генерации справа появится трёхмерная сетка ветви. Щелчок по строке в таблице шипиков выделяет шипик на ветви и открывает его отдельно в его собственной системе координат. Все сетки и таблицы можно скачать одним архивом; в архив входит файл запроса, по которому ветвь воспроизводится точно.</p>
+      </section>
+
+      <section id="result" class="hidden">
+        <div class="tiles" id="tiles"></div>
+        <div id="result-warnings" class="notice warn hidden"></div>
+
+        <div class="viewers">
+          <div class="card viewer-card">
+            <div class="card-head">
+              <h3>Ветвь</h3>
+              <div class="controls">
+                <label class="check small"><input type="checkbox" id="show-anchors" checked> точки крепления</label>
+                <button type="button" class="ghost small" id="reset-view">исходный вид</button>
+              </div>
+            </div>
+            <div id="branch-viewer" class="viewer"></div>
+            <p class="caption">Колесо — масштаб, левая кнопка — вращение, правая — сдвиг. Координаты показаны в микрометрах относительно центра ветви.</p>
+          </div>
+          <div class="card viewer-card">
+            <div class="card-head">
+              <h3 id="spine-title">Шипик</h3>
+              <div class="controls" id="spine-downloads"></div>
+            </div>
+            <div id="spine-viewer" class="viewer small-viewer"><p class="placeholder">Выберите шипик в таблице «Шипики»</p></div>
+            <p class="caption">Локальная система шипика: начало — центр основания, вверх (+y) — от ствола в тело шипика.</p>
+          </div>
+        </div>
+
+        <nav class="tabs" role="tablist">
+          <button class="tab active" data-tab="trunk">Ствол</button>
+          <button class="tab" data-tab="placement">Расстановка шипиков</button>
+          <button class="tab" data-tab="spines">Шипики</button>
+          <button class="tab" data-tab="compare">Сравнение с данными</button>
+          <button class="tab" data-tab="download">Скачать</button>
+        </nav>
+
+        <section class="card tab-panel" data-panel="trunk">
+          <p class="lead">Геометрия центральной линии и радиуса ствола, сгенерированных моделью T0.</p>
+          <div id="trunk-table"></div>
+          <details class="howto"><summary>Как читать метрики ствола</summary>
+            <p>Извилистость — отношение длины ветви к расстоянию между её концами: у прямой ветви она равна единице, у реальных дендритов обычно от 1,02 до 1,15. Сужение — отношение среднего радиуса на первых 10 % длины к среднему радиусу на последних 10 %: значение больше единицы означает, что ветвь утончается к дистальному концу.</p>
+            <p>Среднеквадратичный изгиб описывает, насколько резко поворачивает центральная линия; автокорреляция изгиба на 1 мкм показывает, сохраняется ли направление поворота на этом расстоянии. Число попыток генерации ствола больше единицы означает, что первые варианты не прошли геометрические проверки (например, трубка касалась сама себя) и были отброшены.</p>
+          </details>
+        </section>
+
+        <section class="card tab-panel hidden" data-panel="placement">
+          <p class="lead">Сколько шипиков выбрала модель P0, сколько удалось поставить и как они расположены вдоль ветви.</p>
+          <div id="placement-table"></div>
+          <div id="failure-table"></div>
+          <details class="howto"><summary>Как читать метрики расстановки</summary>
+            <p>Модель P0 сначала выбирает число шипиков, затем их положения вдоль ветви и углы вокруг неё. При сборке шипик может не встать: основание шире тонкого ствола, тело входит в ствол или пересекается с соседним шипиком. Тогда пробуется другой шипик библиотеки, и только после нескольких неудач положение остаётся пустым; причины перечислены в отдельной таблице.</p>
+            <p><b>Парная корреляция g(r), вариация интервалов и корреляции соседей посчитаны по одной ветви</b>, то есть по нескольким десяткам шипиков, поэтому они шумные. Значение g(r) около единицы соответствует случайным положениям, меньше единицы — отталкиванию шипиков на этом расстоянии. Вариация интервалов около единицы — как у случайных положений, меньше — регулярнее.</p>
+          </details>
+        </section>
+
+        <section class="card tab-panel hidden" data-panel="spines">
+          <p class="lead">Каждое положение шипика: где он стоит, какой шипик библиотеки поставлен и его морфометрики. Щёлкните строку, чтобы выделить шипик.</p>
+          <div class="table-scroll"><table id="spine-table" class="data spines"></table></div>
+          <details class="howto"><summary>Как читать таблицу шипиков</summary>
+            <p>Положение s отсчитывается вдоль центральной линии от проксимального конца ветви, u = s / L — та же величина в долях длины, угол θ — направление вокруг ствола. Погружение основания — на сколько шипик утоплен в ствол, чтобы его основание оказалось внутри трубки. Морфометрики (длина, объём, площадь, площадь основания и другие) посчитаны заранее для каждого шипика библиотеки тем же кодом, что и для реальных шипиков; у строк со статусом «не поставлен» сетки и морфометрик нет.</p>
+          </details>
+        </section>
+
+        <section class="card tab-panel hidden" data-panel="compare">
+          <p class="lead" id="compare-lead">Сгенерированные значения на фоне реальных ветвей тех же условий.</p>
+          <div id="compare-plots" class="plots"></div>
+          <details class="howto"><summary>Как читать сравнение</summary>
+            <p>Серый ящик показывает реальные ветви той же группы условий: края ящика — 25-й и 75-й процентили, линия внутри — медиана, усы — 5-й и 95-й процентили. Розовый ромб — значение сгенерированной ветви. <b>Одна ветвь может законно попасть в хвост распределения</b>; о качестве модели говорит доля ветвей за пределами усов при многих генерациях, а не одна ветвь.</p>
+          </details>
+        </section>
+
+        <section class="card tab-panel hidden" data-panel="download">
+          <p class="lead">Сетки в формате OFF (координаты в нанометрах) и таблицы характеристик.</p>
+          <div class="downloads" id="downloads"></div>
+          <p class="hint">Архив содержит ветвь, ствол, все шипики в локальной системе и на ветви, метрики, таблицу шипиков, центральную линию и файл запроса для точного воспроизведения.</p>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <footer class="page-foot" id="footer">
+    Модели: ствол — статистическая модель T0, число и положения шипиков — P0, шипики — библиотека заранее сгенерированных сеток.
+    Данные хранятся в нанометрах, на странице показаны в микрометрах.
+  </footer>
+  <div id="busy" class="busy hidden"><div class="spinner"></div><span>Генерация ветви…</span></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

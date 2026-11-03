@@ -159,6 +159,8 @@ data/processed/*
 /trash/
 /runs/
 /models/checkpoints/
+# web app model bundles (T0 + P0 + spine library, built on Windows; *.json is ignored anyway, so only whole folders make sense)
+/models/webapp/
 /spinetool_staging/
 
 /cache/

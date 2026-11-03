@@ -7,3 +7,6 @@ icosphere
 pymeshlab
 # Boolean union of trunk + spine meshes (branch assembly, src/neuron_model/branch_assembly)
 manifold3d
+# Web application of the branch generator (src/neuron_model/webapp/server.py, scripts/neuron_model/run_webapp.py)
+fastapi
+uvicorn
