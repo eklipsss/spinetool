@@ -31,10 +31,10 @@ def _raw(units, rng, n_spines=25, limbs=True):
 
 def _build(seed=0):
     rng = np.random.default_rng(seed)
-    meta = {"cell_types": {}, "compartments": {}}
-    # Minnie65: 50 excitatory + 20 inhibitory; effect of cell type on M_cell, apical vs basal on M_comp
+    meta = {"cell_types": {}, "compartments": {}, "layers": {}}
+    # Minnie65: 30 L2/3 + 20 L5 pyramidal + 20 inhibitory; effect of cell type on M_cell, apical vs basal on M_comp
     ids = [f"m{i}" for i in range(70)]
-    types = {i: ("23P" if k < 50 else "BC") for k, i in enumerate(ids)}
+    types = {i: ("23P" if k < 30 else "5P-IT" if k < 50 else "BC") for k, i in enumerate(ids)}
     meta["cell_types"]["minnie65"] = types
     meta["compartments"]["minnie65"] = {(i, 0): "apical" for i in ids} | {(i, 1): "basal" for i in ids}
     raw = _raw(ids, rng)
@@ -45,6 +45,7 @@ def _build(seed=0):
     ids = [f"neuron_{i}" for i in range(42)]
     types = {i: ("PYRAMIDAL" if k < 30 else "INTERNEURON") for k, i in enumerate(ids)}
     meta["cell_types"]["h01"] = types
+    meta["layers"]["h01"] = {i: ("Layer 2" if (k % 2 == 0) else "Layer 5") for k, i in enumerate(ids)}   # balanced across the types
     raw = _raw(ids, rng)
     raw.loc[raw["neuron_id"].map(types) == "INTERNEURON", "M_cell"] *= 1.5
     raw["M_species"] *= 1.6
@@ -101,7 +102,8 @@ def test_engine_finds_only_built_in_effects():
     # within-dataset contrasts: nothing outside the built-in effects (detailed cell types / strata repeat the same effects)
     within = sig[sig["causal"]]
     allowed_metric = {"cell_type_binary": "M_cell", "cell_type_binary | compartment": "M_cell", "cell_type": "M_cell",
-                      "compartment": "M_comp", "health | treatment": "M_path", "treatment | health": None}
+                      "compartment": "M_comp", "health | treatment": "M_path", "treatment | health": None,
+                      "cell_class": "M_cell", "layer": None, "layer_native": None}
     for _, r in within.iterrows():
         assert r["metric"] == allowed_metric[r["factor"]], (r["dataset"], r["factor"], r["metric"])
     null = res[(res["metric"] == "M_null") & res["causal"]]
@@ -173,3 +175,25 @@ def test_min_spines_per_dataset():
     assert not (res["results"]["dataset"] == "labid").any() if len(res["results"]) else True
     res = run_comparisons(frame, ["M_path"], min_neurons=10, min_spines={"default": 5, "labid": 5}, n_permutations=300, n_boot=20, log=lambda *_: None)
     assert (res["results"]["dataset"] == "labid").any()
+
+
+def test_harmonised_factors_cell_class_and_layer():
+    from src.neuron_model.global_report.datasets import cell_class, layer_labels
+
+    assert [cell_class(t) for t in ("23P", "WM-P", "BC", "NGC", "PYRAMIDAL", "SPINY_ATYPICAL", "INTERNEURON", "Unsure E", "OLIGO")] == [
+        "pyramidal", "pyramidal", "interneuron", "interneuron", "pyramidal", "other_excitatory", "interneuron", None, None]
+    assert layer_labels("5P-PT", "minnie65") == ("L5", None) and layer_labels("Layer 3", "h01") == ("L2/3", "L3")
+    frame = _build()
+    comps = valid_comparisons(frame, min_neurons=10, min_spines=5)
+    cc = [c for c in comps if c["factor"] == "cell_class" and c["dataset"] == "minnie65" and c["valid"]]
+    assert cc and {cc[0]["a"], cc[0]["b"]} == {"interneuron", "pyramidal"}
+    assert any(c["valid"] for c in comps if c["factor"] == "layer_native" and c["dataset"] == "h01")
+    assert not any(c["valid"] for c in comps if c["factor"] == "layer_native" and c["dataset"] == "minnie65")
+    sp = [c for c in comps if c["factor"] == "species | layer" and c["valid"]]
+    assert {c["stratum"] for c in sp} == {"L2/3", "L5"} and not any(c["causal"] for c in sp)
+    assert any(c["valid"] and c["stratum"] == "pyramidal" for c in comps if c["factor"] == "species | cell_class")
+    res = _run(frame)["results"]
+    r = res[(res["factor"] == "species | cell_class") & (res["stratum"] == "pyramidal") & (res["metric"] == "M_species")].iloc[0]
+    assert r["significant"] and not r["causal"]
+    mat = availability_matrix(frame, min_neurons=10, min_spines=5)
+    assert {"cell_class", "layer", "layer_native", "species | layer"} <= set(mat.index)

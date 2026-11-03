@@ -4,6 +4,7 @@ rem conditional generation (statistical tests need more than 200 samples: power 
 rem noise floor of the generated-vs-real test). Guidance 1.25 is the working value between 1 and 1.5 (chains C, E:
 rem w = 1 reproduces 0.3-1.1 of the real difference inhibitory / excitatory, w = 1.5 exaggerates up to 1.9x), w = 1 as a
 rem second point of the dose-response, and the UNCONDITIONAL set (zero condition vector) as the baseline.
+rem G4 adds the DETAILED types 4P, 6P-CT (excitatory) and BPC, MC (inhibitory) at w = 1.25 (400 samples) to test whether the within-class differences are reproduced.
 rem Sets: <run>\meshes\cond_cell_type_binary-<value>_g<w>_seed_1 and <run>\meshes\seed_1 (unconditional).
 rem Log: scripts\neuron_model\overnight\2026-11-04_G_condgen-500.bat > logs_G.txt 2>&1
 
@@ -24,6 +25,11 @@ for %%c in (excitatory inhibitory) do (
 echo ===== [G3/3] guidance 1 ===== %date% %time%
 for %%c in (excitatory inhibitory) do (
   python scripts\neuron_model\generate_mogen.py --run %V3% --checkpoint latest --condition cell_type_binary=%%c --guidance 1 --n-samples %N% --seed 1 --tag cond_cell_type_binary-%%c_g1_seed_1_n500
+)
+
+echo ===== [G4/4] detailed cell types, guidance 1.25, 400 samples each ===== %date% %time%
+for %%t in (4P 6P-CT BPC MC) do (
+  python scripts\neuron_model\generate_mogen.py --run %V3% --checkpoint latest --condition cell_type=%%t --guidance 1.25 --n-samples 400 --seed 1 --tag cond_cell_type-%%t_g1.25_seed_1_n400
 )
 
 echo ===== G done ===== %date% %time%

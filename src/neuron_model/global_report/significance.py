@@ -176,29 +176,30 @@ def _omnibus(frame, metrics, comps, min_spines, n_permutations, seed, level) -> 
     rows = []
     done = set()
     for comp in comps:
-        if not comp["valid"] or comp["mode"] != "between" or comp["factor"] != "cell_type":
+        if not comp["valid"] or comp["mode"] != "between" or not comp.get("omnibus"):
             continue
-        key = (comp["dataset"], comp["factor"])
+        key = (comp["dataset"], comp["factor"], comp["stratum"])
         if key in done:
             continue
         done.add(key)
-        levels = sorted({c[k] for c in comps if (c["dataset"], c["factor"]) == key and c["valid"] for k in ("a", "b")})
+        levels = sorted({c[k] for c in comps if (c["dataset"], c["factor"], c["stratum"]) == key and c["valid"] for k in ("a", "b")})
         if len(levels) < 3:
             continue
         sub = frame[frame["dataset"] == comp["dataset"]]
-        unit = neuron_medians(sub, metrics, ["neuron_id"], resolve_min_rows(min_spines, comp["dataset"])).merge(sub.groupby("neuron_id")[["cell_type"]].first(), on="neuron_id")
-        unit = unit[unit["cell_type"].isin(levels)]
+        col = comp["column"]
+        unit = neuron_medians(sub, metrics, ["neuron_id"], resolve_min_rows(min_spines, comp["dataset"])).merge(sub.groupby("neuron_id")[[col]].first(), on="neuron_id")
+        unit = unit[unit[col].isin(levels)]
         rng = np.random.default_rng(seed + 1)
         for m in metrics:
             x = unit[m].to_numpy(float)
             ok = np.isfinite(x)
             if ok.sum() >= 10:
-                rows.append({"dataset": comp["dataset"], "factor": "cell_type", "level": level, "metric": m, "n_types": len(levels),
-                             "n_neurons": int(ok.sum()), "p": _perm_omnibus(x[ok], unit["cell_type"].to_numpy()[ok], n_permutations, rng)})
+                rows.append({"dataset": comp["dataset"], "factor": comp["factor"], "level": level, "metric": m, "n_types": len(levels),
+                             "n_neurons": int(ok.sum()), "p": _perm_omnibus(x[ok], unit[col].to_numpy()[ok], n_permutations, rng)})
     out = pd.DataFrame(rows)
     if len(out):
         out["q_bh"] = np.nan
-        for _, idx in out.groupby("dataset").groups.items():
+        for _, idx in out.groupby(["dataset", "factor"]).groups.items():
             out.loc[idx, "q_bh"] = bh_qvalues(out.loc[idx, "p"].to_numpy(float))
         out["significant"] = out["q_bh"] < 0.05
     return out

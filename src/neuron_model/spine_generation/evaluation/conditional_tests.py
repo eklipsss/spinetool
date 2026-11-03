@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 import re
+from itertools import combinations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -360,31 +361,33 @@ def _p_upper(obs: float, ref: np.ndarray) -> float:
 
 
 class SameTypeTester:
-    """Test B. ``pools``: {name: RealPool}. Reference distributions are cached per (pool, sample size).
+    """Test B. ``pools``: {name: RealPool}.
 
-    Null hypothesis: the generated samples are exchangeable with real spines of the pool. Statistic: W1/sd of each metric
-    (sd = spine-level sd of the real pool; W1 between two samples of the same size n) and the energy distance of the
-    standardised log vector (complete vectors). Reference: ``n_reference`` repetitions of the same statistic between a
-    sample of n spines of one real half and n spines of the other, the halves being DISJOINT random halves of the
-    neurons and each draw balanced over neurons (``weighting``) - the exchangeability of two independent real samples
-    with the neuron as the unit (noise floor). Observed: generated sample vs real samples of the same size drawn from
-    ALL neurons of the pool (mean over ``n_observed_draws`` draws). p = (1 + #{reference >= observed}) / (1 + n_reference),
-    BH-corrected over the metrics. The reference is slightly conservative: each reference sample carries the neuron
-    sampling noise of half of the neurons, the generated one carries none of the evaluated neurons.
+    **Inference (per metric, signed median difference).** d = log median(generated) - log median(real spines of the same
+    type), real spines drawn balanced over neurons (``weighting``). The generated sample can be drawn arbitrarily often, so
+    its sampling error is the only error on that side; the real side carries the sampling error of the NEURONS. A
+    cluster bootstrap reproduces both: in each of ``n_boot`` replicates the real neurons are resampled with replacement
+    (then ``n_real_draw`` spines are drawn balanced over the resampled neurons) and the generated sample is resampled
+    independently. Outputs: 95 % percentile interval of d, SE = sd of the replicates, two-sided bootstrap p by percentile
+    inversion (p = 2 min(share d* <= 0, share d* >= 0)), BH over the metrics (``q_boot``).
+    **Equivalence (TOST)**: p_TOST = Phi((|d| - delta) / SE), delta = ``margin_sd`` x sd of the log metric over the real
+    spines (default 0.2), BH over the metrics. ``min_margin_sd`` = (|d| + z_0.95 SE) / sd(log metric): the smallest margin
+    (in sd units) for which equivalence would be proven - read it instead of arguing about the 0.2. Verdict: ``differs``
+    (q_boot < 0.05), ``equivalent`` (not differs and q_TOST < 0.05), else ``indistinguishable_equivalence_not_shown``
+    (a statement about power).
 
-    Equivalence (TOST on the median, log scale): d = log median(generated) - log median(real); standard error = sd of
-    the reference differences (conservative); margin = ``margin_sd`` pooled sd of the log metric (default 0.2: a
-    pre-specified, interpretable "negligible" effect). Equivalent only if p_TOST (BH over metrics) < 0.05 AND the
-    distribution test does not reject. The 95th percentile of the |reference difference| (``delta_noise``) is NOT used as
-    a TOST margin (it is about two standard errors wide, a TOST with such a margin can hardly ever pass); it is reported
-    with the flag ``within_noise`` (|d| <= delta_noise: the median is as close to the real data as a second real
-    sample). With a few hundred generated samples and strong neuron styles the 0.2 sd margin may be unprovable
-    (``indistinguishable_equivalence_not_shown``): that is a statement about power, not about the generator.
+    **Descriptive noise floors (not tests of the median).** W1/sd per metric and the energy distance of the standardised
+    log vector (complete vectors), generated vs real samples of the same size, against the same statistic between two
+    real samples from DISJOINT random halves of the neurons (``n_reference`` repetitions). The halves carry neuron noise on
+    BOTH sides while generated-vs-real carries it only on the real side, so this reference is wider than the true null:
+    ``p_floor`` / ``q_floor`` are CONSERVATIVE, i.e. LENIENT to the generator (simulated type I error far below 5 %). They
+    show the scale of a real-vs-real difference (shape, correlations), they are no proof of sameness.
     """
 
     def __init__(self, pools: Dict[str, RealPool], metrics: Sequence[str], *, n_reference: int = 1000, n_observed_draws: int = 30,
-                 weighting: str = "equal", seed: int = 0, margin_sd: float = TOST_MARGIN_SD):
+                 weighting: str = "equal", seed: int = 0, margin_sd: float = TOST_MARGIN_SD, n_boot: int = 1000, n_real_draw: int = 5000):
         self.pools, self.metrics = pools, list(metrics)
+        self.n_boot, self.n_real_draw = n_boot, n_real_draw
         self.margin_sd = margin_sd
         self.n_reference, self.n_observed_draws, self.weighting, self.seed = n_reference, n_observed_draws, weighting, seed
         self._uni: Dict[Tuple[str, int], Dict[str, np.ndarray]] = {}
@@ -427,45 +430,67 @@ class SameTypeTester:
             self._mv[key] = {"ed": ed, "corr": cr}
         return self._mv[key]
 
-    def test(self, gen: pd.DataFrame, pool: str, *, keep_reference: bool = False) -> Dict[str, Any]:
+    def bootstrap_signed(self, pool: str, gens: Sequence[Optional[np.ndarray]], rng: np.random.Generator) -> np.ndarray:
+        """Replicates ``[n_boot, M]`` of d = log median(generated*) - log median(real*): neurons resampled, generated resampled."""
+        p = self.pools[pool]
+        out = np.full((self.n_boot, len(self.metrics)), np.nan)
+        for r in range(self.n_boot):
+            cand = rng.integers(0, p.n_neurons, p.n_neurons)
+            rows, _ = p.draw(self.n_real_draw, rng, cand, self.weighting)
+            lm = np.log(np.median(rows, axis=0))
+            for j, x in enumerate(gens):
+                if x is not None:
+                    out[r, j] = np.log(np.median(x[rng.integers(0, len(x), len(x))])) - lm[j]
+        return out
+
+    def test(self, gen: pd.DataFrame, pool: str, *, keep_reference: bool = False, descriptive: bool = True) -> Dict[str, Any]:
         p = self.pools[pool]
         rng = self._rng(pool, 0, 3)
-        rows, refs = [], {}
-        for j, m in enumerate(self.metrics):
+        xs_all = []
+        for m in self.metrics:
             x = gen[m].to_numpy(float)
             x = x[np.isfinite(x) & (x > 0)]
-            row = {"metric": m, "n_gen": int(len(x)), "base_independent": m in BASE_INDEPENDENT}
-            if len(x) >= 20:
-                ref = self.univariate_reference(pool, len(x))
-                xs = np.sort(x)
-                w1_obs, lm_real = [], []
-                for _ in range(self.n_observed_draws):
-                    r, _ = p.draw(len(x), rng, None, self.weighting)
-                    w1_obs.append(np.abs(xs - np.sort(r[:, j])).mean() / p.sd[j])
-                    lm_real.append(np.log(np.median(r[:, j])))
-                w1_obs, lm_real = float(np.mean(w1_obs)), float(np.mean(lm_real))
-                d = float(np.log(np.median(x)) - lm_real)
-                sd_d = float(np.std(ref["dmed"][:, j], ddof=1))
+            xs_all.append(x if len(x) >= 20 else None)
+        boots = self.bootstrap_signed(pool, xs_all, rng)
+        lm_real_all = np.mean([np.log(np.median(p.draw(self.n_real_draw, rng, None, self.weighting)[0], axis=0)) for _ in range(self.n_observed_draws)], axis=0)
+        rows, refs = [], {}
+        for j, m in enumerate(self.metrics):
+            x = xs_all[j]
+            row = {"metric": m, "n_gen": int(0 if x is None else len(x)), "base_independent": m in BASE_INDEPENDENT}
+            if x is not None:
+                d = float(np.log(np.median(x)) - lm_real_all[j])
+                bj = boots[:, j]
+                se = float(np.std(bj, ddof=1))
+                lo, hi = _ci(bj)
+                B = len(bj)
+                p_boot = min(1.0, 2 * min((1 + int((bj <= 0).sum())) / (1 + B), (1 + int((bj >= 0).sum())) / (1 + B)))
                 delta = self.margin_sd * float(p.log_sd[j])
-                delta_noise = float(np.percentile(np.abs(ref["dmed"][:, j]), 95))
-                row.update({"median_gen": float(np.median(x)), "median_real": float(np.exp(lm_real)), "log_ratio": d, "w1_sd": w1_obs,
-                            "ref_q50": float(np.percentile(ref["w1"][:, j], 50)), "ref_q95": float(np.percentile(ref["w1"][:, j], 95)),
-                            "p": _p_upper(w1_obs, ref["w1"][:, j]), "ref_sd_diff": sd_d, "delta": delta, "delta_noise": delta_noise,
-                            "p_tost": float(_norm_cdf((abs(d) - delta) / sd_d)) if sd_d > 0 else float("nan"), "within_noise": bool(abs(d) <= delta_noise)})
-                if keep_reference:
-                    refs[m] = ref["w1"][:, j]
+                row.update({"median_gen": float(np.median(x)), "median_real": float(np.exp(lm_real_all[j])), "log_ratio": d, "d_lo": lo, "d_hi": hi, "se": se,
+                            "p_boot": p_boot, "delta": delta, "p_tost": float(_norm_cdf((abs(d) - delta) / se)) if se > 0 else float("nan"),
+                            "min_margin_sd": float((abs(d) + 1.645 * se) / p.log_sd[j])})
+                if descriptive:
+                    ref = self.univariate_reference(pool, len(x))
+                    xs = np.sort(x)
+                    w1_obs = float(np.mean([np.abs(xs - np.sort(p.draw(len(x), rng, None, self.weighting)[0][:, j])).mean() / p.sd[j] for _ in range(self.n_observed_draws)]))
+                    dmed = ref["dmed"][:, j]
+                    delta_noise = float(np.percentile(np.abs(dmed), 95))
+                    row.update({"w1_sd": w1_obs, "ref_q50": float(np.percentile(ref["w1"][:, j], 50)), "ref_q95": float(np.percentile(ref["w1"][:, j], 95)),
+                                "p_floor": _p_upper(w1_obs, ref["w1"][:, j]), "delta_noise": delta_noise, "within_noise": bool(abs(d) <= delta_noise)})
+                    if keep_reference:
+                        refs[m] = ref["w1"][:, j]
             rows.append(row)
         table = pd.DataFrame(rows)
-        for col in ("p", "p_tost"):
+        for col in ("p_boot", "p_tost", "p_floor"):
             if col not in table.columns:
                 table[col] = np.nan
-        table["q_bh"] = bh_qvalues(table["p"].to_numpy(float))
+        table["q_boot"] = bh_qvalues(table["p_boot"].to_numpy(float))
         table["q_tost"] = bh_qvalues(table["p_tost"].to_numpy(float))
-        table["verdict"] = [_verdict_b(q, qt) for q, qt in zip(table["q_bh"], table["q_tost"])]
+        table["q_floor"] = bh_qvalues(table["p_floor"].to_numpy(float))
+        table["verdict"] = [_verdict_b(q, qt) for q, qt in zip(table["q_boot"], table["q_tost"])]
         mv: Dict[str, Any] = {"n_complete": 0}
         z = complete_rows(gen, self.metrics)
         mv["n_complete"] = int(len(z))
-        if len(z) >= 30:
+        if len(z) >= 30 and descriptive:
             zg = p.standardise(z)
             xx = _within(zg)
             ref = self.multivariate_reference(pool, len(z))
@@ -491,7 +516,7 @@ def _verdict_b(q: float, q_tost: float) -> str:
         return "no_data"
     equiv = np.isfinite(q_tost) and q_tost < 0.05
     if q < 0.05:
-        return "median_equivalent_distribution_differs" if equiv else "differs"
+        return "differs"
     return "equivalent" if equiv else "indistinguishable_equivalence_not_shown"
 
 
@@ -518,14 +543,15 @@ def _make_model(kind: str = "logistic", seed: int = 0):
 
 
 def _balanced_weights(y: np.ndarray, base: Optional[np.ndarray] = None) -> np.ndarray:
-    """Sample weights that give both classes the same total weight (sum = number of rows: the strength of the
+    """Sample weights that give every class the same total weight (sum = number of rows: the strength of the
     regularisation does not change); ``base`` = per-row weights before balancing (bootstrap multiplicities)."""
     base = np.ones(len(y)) if base is None else np.asarray(base, float)
     w = base.copy()
-    for c in (0, 1):
+    classes = np.unique(y)
+    for c in classes:
         total = base[y == c].sum()
         w[y == c] = base[y == c] / total if total > 0 else 0.0
-    return w * len(y) / 2.0
+    return w * len(y) / len(classes)
 
 
 def _fit(model, x: np.ndarray, y: np.ndarray, base: Optional[np.ndarray] = None):
@@ -618,6 +644,77 @@ def fit_condition_classifier(frame: pd.DataFrame, block: str, a: str, b: str, fe
     tpr, fpr = float(pred[y == 1].mean()), float(pred[y == 0].mean())
     return ConditionClassifier(final, tuple(features), a, b, float(roc_auc_score(y, scores)), _ci(np.array(aucs)), tpr, _ci(np.array(tprs)), fpr, _ci(np.array(fprs)),
                                np.array(tprs), np.array(fprs), (int(cls.size - cls.sum()), int(cls.sum())), (int((y == 0).sum()), int((y == 1).sum())))
+
+
+@dataclass
+class TypeClassifier:
+    """Multiclass classifier of detailed cell types trained on real spines (classes balanced by weights). ``confusion`` rows =
+    true type, columns = predicted type (row-normalised, out-of-fold, neuron-grouped); ``recall`` per type; intervals by a
+    bootstrap over neurons of the out-of-fold predictions (no refit)."""
+
+    model: Any
+    classes: List[str]
+    features: Tuple[str, ...]
+    balanced_accuracy: float
+    ba_ci: Tuple[float, float]
+    recall: np.ndarray
+    recall_ci: List[Tuple[float, float]]
+    confusion: np.ndarray
+    n_neurons: List[int]
+    n_spines: List[int]
+
+
+def fit_type_classifier(frame: pd.DataFrame, block: str, classes: Sequence[str], features: Sequence[str], *, kind: str = "logistic", n_splits: int = 5,
+                        max_spines_per_neuron: int = 200, n_boot: int = 200, seed: int = 0) -> TypeClassifier:
+    """H0: the metrics carry no information on the type (balanced accuracy = 1 / n classes). Neuron-grouped, class-stratified
+    cross-validation, at most ``max_spines_per_neuron`` spines per neuron, class-balanced weights."""
+    from sklearn.model_selection import StratifiedGroupKFold
+
+    rng = np.random.default_rng(seed)
+    classes = list(classes)
+    sub = frame[frame[block].isin(classes)]
+    x = sub[list(features)].to_numpy(float)
+    ok = np.isfinite(x).all(axis=1) & (x > 0).all(axis=1)
+    sub, x = sub[ok].reset_index(drop=True), x[ok]
+    keep = np.sort(np.concatenate([idx if len(idx) <= max_spines_per_neuron else rng.choice(idx, max_spines_per_neuron, replace=False)
+                                   for idx in sub.groupby("neuron_id").indices.values()]))
+    sub, x = sub.iloc[keep].reset_index(drop=True), x[keep]
+    y = sub[block].map({c: i for i, c in enumerate(classes)}).to_numpy()
+    nid, _ = pd.factorize(sub["neuron_id"])
+    xf = _log_features(x)
+    K = len(classes)
+    n_neur = [int(len(np.unique(nid[y == i]))) for i in range(K)]
+    splits = max(2, min(n_splits, min(n_neur)))
+    model = _make_model("logistic", seed)
+    pred = np.full(len(y), -1)
+    for tr, te in StratifiedGroupKFold(n_splits=splits, shuffle=True, random_state=seed).split(xf, y, nid):
+        pred[te] = _fit(model, xf[tr], y[tr]).predict(xf[te])
+
+    def stats(w):
+        conf = np.zeros((K, K))
+        for i in range(K):
+            m = y == i
+            if w[m].sum() > 0:
+                conf[i] = np.bincount(pred[m], weights=w[m], minlength=K) / w[m].sum()
+        return conf
+
+    conf = stats(np.ones(len(y)))
+    recall = np.diag(conf)
+    k = int(nid.max()) + 1
+    cls = np.zeros(k, dtype=int)
+    cls[nid] = y
+    members = [np.where(cls == c)[0] for c in range(K)]
+    rec_b, ba_b = [], []
+    for _ in range(n_boot):
+        counts = np.zeros(k)
+        for mem in members:
+            counts += np.bincount(rng.choice(mem, len(mem)), minlength=k)
+        r = np.diag(stats(counts[nid]))
+        rec_b.append(r)
+        ba_b.append(r.mean())
+    rec_b = np.array(rec_b)
+    return TypeClassifier(_fit(model, xf, y), classes, tuple(features), float(recall.mean()), _ci(np.array(ba_b)), recall,
+                          [_ci(rec_b[:, i]) for i in range(K)], conf, n_neur, [int((y == i).sum()) for i in range(K)])
 
 
 def apply_condition_classifier(clf: ConditionClassifier, gen: pd.DataFrame) -> np.ndarray:
@@ -760,6 +857,17 @@ def validity_table(gen_sets: Dict[Tuple[str, str], pd.DataFrame], metrics: Seque
 # ---------------------------------------------------------------------------
 
 
+def _joint_bh(tables: Sequence[pd.DataFrame]) -> None:
+    """Benjamini-Hochberg over the p-values of several tables together (all pairs x metrics); q_bh / significant updated in place."""
+    p = np.concatenate([t["p"].to_numpy(float) for t in tables])
+    q = bh_qvalues(p)
+    pos = 0
+    for t in tables:
+        t["q_bh"] = q[pos:pos + len(t)]
+        t["significant"] = t["q_bh"] < 0.05
+        pos += len(t)
+
+
 def pair_order(block: str, values: Sequence[str]) -> Optional[Tuple[str, str]]:
     """The pair (a, b) of condition values whose difference is tested: inhibitory first for the binary cell type."""
     values = sorted(set(values))
@@ -771,14 +879,14 @@ def pair_order(block: str, values: Sequence[str]) -> Optional[Tuple[str, str]]:
 def run_conditional_tests(real: pd.DataFrame, gen_sets: Dict[Tuple[str, str], pd.DataFrame], block: str, *, metrics: Optional[Sequence[str]] = None,
                           min_spines: int = 20, n_permutations: int = 10000, n_boot: int = 1000, n_reference: int = 1000, n_reference_classifier: int = 100,
                           weighting: str = "equal", only_valid: bool = False, classifiers: Sequence[str] = ("logistic",), seed: int = 0,
-                          tost_margin_sd: float = TOST_MARGIN_SD, log=print) -> Dict[str, Any]:
+                          tost_margin_sd: float = TOST_MARGIN_SD, n_real_draw: int = 5000, log=print) -> Dict[str, Any]:
     """All tests A-F for generated sets ``{(value, label): frame}`` (value ``unconditional`` for a set without a condition)
     against ``real`` (spines with ``neuron_id``, ``block`` column and the metrics). Returns a dict of tables / arrays."""
     metrics = list(metrics or [m for m in SCALAR_METRICS if m in real.columns])
     metrics = [m for m in metrics if all(m in g.columns and np.isfinite(g[m].to_numpy(float)).any() for g in gen_sets.values())]
     out: Dict[str, Any] = {"metrics": metrics, "block": block, "settings": {
         "min_spines": min_spines, "n_permutations": n_permutations, "n_boot": n_boot, "n_reference": n_reference, "n_reference_classifier": n_reference_classifier,
-        "weighting": weighting, "only_valid": only_valid, "seed": seed, "tost_margin_sd": tost_margin_sd}}
+        "weighting": weighting, "only_valid": only_valid, "seed": seed, "tost_margin_sd": tost_margin_sd, "n_real_draw": n_real_draw}}
     out["validity"] = validity_table(gen_sets, metrics)
     if only_valid:
         gen_sets = {k: (g[g["valid"].astype(bool)] if "valid" in g else g) for k, g in gen_sets.items()}
@@ -797,25 +905,47 @@ def run_conditional_tests(real: pd.DataFrame, gen_sets: Dict[Tuple[str, str], pd
     out["pools"] = {n: {"n_spines": p.n_spines, "n_neurons": p.n_neurons, "n_dropped": p.n_dropped} for n, p in pools.items()}
     keys = list(gen_sets)
 
-    # ---- A: difference between the two types
-    out["pair"] = list(pair) if pair else None
-    labels = sorted({lab for (v, lab) in keys if pair and v in pair and (pair[0], lab) in gen_sets and (pair[1], lab) in gen_sets})
+    # ---- A: difference between types (one pair for the binary block, all pairs of generated types for detailed types)
+    binary = block == "cell_type_binary"
+    pairs: List[Tuple[str, str]] = [pair] if (pair and binary) else list(combinations(sorted(v for v in values if v in pools), 2))
+    out["pair"] = list(pair) if (pair and binary) else None
+    out["pairs"] = [list(x) for x in pairs]
+    out["warnings"] = [f"{n}: {p.n_neurons} neurons - below 20, intervals are wide (underpowered)" for n, p in pools.items() if p.n_neurons < 20]
+    out["warnings"] += [f"{n}: pool skipped (fewer than 6 neurons with >= {min_spines} spines)" for n in pool_names if n not in pools]
+    out["pools"] = {n: {"n_spines": p.n_spines, "n_neurons": p.n_neurons, "n_dropped": p.n_dropped, "underpowered": p.n_neurons < 20} for n, p in pools.items()}
     effects: Dict[str, Any] = {}
-    if pair and labels:
-        a, b = pair
-        log(f"[cond-tests] A: real {a} / {b}: neuron-level permutation tests + neuron bootstrap")
-        real_tbl, rboots = type_effect_real(known, block, a, b, metrics, min_spines=min_spines, n_permutations=n_permutations, n_boot=n_boot, seed=seed)
+    labels_of = {pr: sorted({lab for (v, lab) in keys if v == pr[0] and (pr[1], lab) in gen_sets}) for pr in pairs}
+    real_tabs: Dict[Tuple[str, str], Tuple[pd.DataFrame, Dict[str, np.ndarray]]] = {}
+    for i, pr in enumerate(pairs):
+        if labels_of[pr]:
+            log(f"[cond-tests] A: real {pr[0]} / {pr[1]}: neuron-level permutation tests + neuron bootstrap")
+            real_tabs[pr] = type_effect_real(known, block, pr[0], pr[1], metrics, min_spines=min_spines, n_permutations=n_permutations, n_boot=n_boot, seed=seed + 11 * i)
+    if len(real_tabs) > 1:
+        _joint_bh([t for t, _ in real_tabs.values()])      # BH across all pairs x metrics of the real tests
+    out["real_effects"] = {f"{a}/{b}": t for (a, b), (t, _) in real_tabs.items()}
+    gen_tabs: Dict[Tuple[str, Tuple[str, str]], Tuple[pd.DataFrame, Dict[str, np.ndarray]]] = {}
+    for lab in sorted({l for ls in labels_of.values() for l in ls}):
+        prs = [pr for pr in pairs if lab in labels_of[pr]]
+        for i, pr in enumerate(prs):
+            log(f"[cond-tests] A: generated {pr[0]} / {pr[1]} @ {lab}")
+            gen_tabs[(lab, pr)] = type_effect_generated(gen_sets[(pr[0], lab)], gen_sets[(pr[1], lab)], metrics, n_permutations=n_permutations, n_boot=n_boot, seed=seed + 100 + i)
+        if len(prs) > 1:
+            _joint_bh([gen_tabs[(lab, pr)][0] for pr in prs])
+    for (lab, pr), (gtbl, gboots) in gen_tabs.items():
+        rtbl, rboots = real_tabs[pr]
+        conc = concordance(rtbl, rboots, gtbl, gboots)
+        key = lab if len(pairs) == 1 else f"{lab}: {pr[0]} / {pr[1]}"
+        effects[key] = {"pair": list(pr), "label": lab, "generated": gtbl, "concordance": conc, "n_concordant": int(conc["concordant"].sum()), "n_underpowered": int(conc["underpowered"].sum()),
+                        "n_discordant": int((~conc["concordant"] & ~conc["underpowered"]).sum()), "n_metrics": int(len(conc)), "n_real_significant": int(conc["real_sig"].sum()),
+                        "n_reproduced": int((conc["status"] == "reproduced").sum()), "n_neurons": [pools[pr[0]].n_neurons if pr[0] in pools else 0, pools[pr[1]].n_neurons if pr[1] in pools else 0]}
+    out["effects"] = effects
+    if len(pairs) == 1 and pairs[0] in real_tabs:
+        pr = pairs[0]
+        real_tbl, rboots = real_tabs[pr]
         out["real_effect"] = real_tbl
-        gen_effects: Dict[float, Tuple[pd.DataFrame, Dict[str, np.ndarray]]] = {}
-        for i, lab in enumerate(labels):
-            log(f"[cond-tests] A: generated {a} / {b} @ {lab}")
-            gtbl, gboots = type_effect_generated(gen_sets[(a, lab)], gen_sets[(b, lab)], metrics, n_permutations=n_permutations, n_boot=n_boot, seed=seed + 100 + i)
-            conc = concordance(real_tbl, rboots, gtbl, gboots)
-            effects[lab] = {"generated": gtbl, "concordance": conc, "n_concordant": int(conc["concordant"].sum()), "n_underpowered": int(conc["underpowered"].sum()),
-                            "n_discordant": int((~conc["concordant"] & ~conc["underpowered"]).sum()), "n_metrics": int(len(conc)),
-                            "n_real_significant": int(conc["real_sig"].sum()), "n_reproduced": int((conc["status"] == "reproduced").sum())}
-            gen_effects[parse_weight(lab)] = (gtbl, gboots)
-        out["effects"] = effects
+        a, b = pr
+        labels = labels_of[pr]
+        gen_effects = {parse_weight(lab): gen_tabs[(lab, pr)] for lab in labels}
 
         # ---- E: dose-response over the guidance weights (labels with a number)
         weights = [w for w in gen_effects if np.isfinite(w)]
@@ -839,7 +969,7 @@ def run_conditional_tests(real: pd.DataFrame, gen_sets: Dict[Tuple[str, str], pd
             out["real_ed"] = real_ed
 
     # ---- B: same type (+ control against the other pools)
-    tester = SameTypeTester(pools, metrics, n_reference=n_reference, weighting=weighting, seed=seed, margin_sd=tost_margin_sd)
+    tester = SameTypeTester(pools, metrics, n_reference=n_reference, weighting=weighting, seed=seed, margin_sd=tost_margin_sd, n_boot=n_boot, n_real_draw=n_real_draw)
     same: Dict[str, Any] = {}
     for (value, lab) in keys:
         own = value if value in pools else "mixture"
@@ -853,7 +983,8 @@ def run_conditional_tests(real: pd.DataFrame, gen_sets: Dict[Tuple[str, str], pd
 
     # ---- C: classifiers of the condition
     clf_out: Dict[str, Any] = {}
-    if pair and pair[0] in pools and pair[1] in pools:
+    labels = labels_of.get(pair, []) if (binary and pair) else []
+    if binary and pair and pair[0] in pools and pair[1] in pools:
         a, b = pair
         feature_sets = {"all": metrics, "base_independent": [m for m in BASE_INDEPENDENT if m in metrics]}
         for kind in classifiers:
@@ -891,6 +1022,35 @@ def run_conditional_tests(real: pd.DataFrame, gen_sets: Dict[Tuple[str, str], pd
         out["class_balance"] = {"neurons": {str(k): int(v) for k, v in known_n.items()},
                                 "spines": {str(k): int(v) for k, v in known[block].value_counts().items()}}
     out["classifier"] = clf_out
+
+    # ---- C (detailed types): multiclass classifier, does it recover the requested type?
+    if not binary and values:
+        counts_n = known.groupby("neuron_id")[block].first().value_counts()
+        classes = sorted(t for t, c in counts_n.items() if c >= 6 and not str(t).startswith("Unsure") and (c >= 10 or t in values))
+        classes = [c for c in classes if c in set(known[block])]
+        if len(classes) >= 3:
+            log(f"[cond-tests] C: multiclass type classifier over {len(classes)} types")
+            tc = fit_type_classifier(known, block, classes, metrics, n_boot=min(n_boot, 200), seed=seed)
+            tentry = {"classes": classes, "balanced_accuracy": tc.balanced_accuracy, "ba_ci": tc.ba_ci, "chance": 1.0 / len(classes), "confusion": tc.confusion,
+                      "recall": tc.recall, "recall_ci": [list(c) for c in tc.recall_ci], "n_neurons": tc.n_neurons, "n_spines": tc.n_spines, "sets": {},
+                      "underpowered": [c for c, n in zip(classes, tc.n_neurons) if n < 10]}
+            for (value, lab), g in gen_sets.items():
+                x = g[list(metrics)].to_numpy(float)
+                ok = np.isfinite(x).all(axis=1) & (x > 0).all(axis=1)
+                if not ok.any():
+                    continue
+                pr = tc.model.predict(_log_features(x[ok]))
+                share = np.bincount(pr, minlength=len(classes)) / len(pr)
+                row = {"value": value, "label": lab, "n": int(ok.sum()), "n_total": int(len(g)), "pred_share": {c: float(share[i]) for i, c in enumerate(classes)}}
+                if value in classes:
+                    i = classes.index(value)
+                    frac, lo, hi = wilson(int((pr == i).sum()), len(pr))
+                    row.update({"recovery": frac, "lo": lo, "hi": hi, "expected": float(tc.recall[i]), "expected_ci": list(tc.recall_ci[i]),
+                                "within_expected": bool(lo <= tc.recall_ci[i][1] and tc.recall_ci[i][0] <= hi), "underpowered": bool(tc.n_neurons[i] < 10)})
+                tentry["sets"][f"{value}@{lab}"] = row
+            out["type_classifier"] = tentry
+        else:
+            out["warnings"].append("multiclass classifier skipped: fewer than 3 types with >= 6 neurons")
 
     # ---- D: real-vs-generated discriminability
     disc: Dict[str, Any] = {}

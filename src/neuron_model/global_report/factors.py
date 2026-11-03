@@ -52,9 +52,22 @@ FACTORS: Tuple[Factor, ...] = (
     Factor("treatment | health", "treatment", "between", ("labid",), ("untreated", "9009"), stratify="health", causal=False,
            confounded_with=("z-rescaling pipeline (the 9009 groups are not rescaled by 0.7)",),
            warnings=("treatment is confounded with the imaging / z-correction series until the laboratory confirms",)),
+    Factor("cell_class", "cell_class", "between", ("minnie65", "h01"), None, omnibus=True,
+           warnings=("harmonised class: pyramidal / other_excitatory / interneuron, derived from the dataset's own cell-type names",)),
+    Factor("layer", "layer", "between", ("minnie65", "h01"), None, omnibus=True,
+           warnings=("Minnie65 layer is COARSE and derived from the cell-type NAME (excitatory cells only): it is a function of the type, "
+                     "not an independent measurement; H01 layers L2 and L3 are merged to L2/3",)),
+    Factor("layer_native", "layer_native", "between", ("h01",), None, omnibus=True,
+           warnings=("H01 layer from h01_layer.csv, one value per neuron",)),
     Factor("species", "species", "between", ("minnie65", "h01"), ("human", "mouse"), cross=True, causal=False,
            confounded_with=("dataset", "brain region and layer sampling", "segmentation pipeline", "age / donor"),
            warnings=("species is perfectly confounded with the dataset: descriptive contrast only, NOT a test of species",)),
+    Factor("species | cell_class", "species", "between", ("minnie65", "h01"), ("human", "mouse"), stratify="cell_class", cross=True, causal=False,
+           confounded_with=("dataset", "brain region and layer sampling", "segmentation pipeline", "age / donor"),
+           warnings=("same cell class (e.g. pyramidal) in mouse EM vs human EM: still species = dataset, descriptive only",)),
+    Factor("species | layer", "species", "between", ("minnie65", "h01"), ("human", "mouse"), stratify="layer", cross=True, causal=False,
+           confounded_with=("dataset", "brain region", "segmentation pipeline", "age / donor", "coarse Minnie65 layer from the type name"),
+           warnings=("same layer in mouse and human, Minnie65 layer is coarse (from the cell-type name): descriptive only",)),
     Factor("dataset", "dataset", "between", ("minnie65", "h01", "labid"), None, cross=True, causal=False,
            confounded_with=("species", "imaging modality (EM vs confocal)", "resolution and z-stretch", "segmentation"),
            warnings=("dataset contrast = species + modality + processing: descriptive only",)),
@@ -80,7 +93,7 @@ def _units_with_rows(frame: pd.DataFrame, column: str, min_rows: int) -> pd.Data
 def _record(factor: Factor, dataset: str, a, b, stratum, **kw) -> Dict[str, Any]:
     return {"dataset": dataset, "factor": factor.name, "column": factor.column, "mode": factor.mode, "a": a, "b": b,
             "stratum_column": factor.stratify, "stratum": stratum, "causal": factor.causal,
-            "confounded_with": list(factor.confounded_with), "warnings": list(factor.warnings),
+            "confounded_with": list(factor.confounded_with), "warnings": list(factor.warnings), "omnibus": factor.omnibus,
             "n_units_a": 0, "n_units_b": 0, "n_units_paired": None, "valid": False, "reason": None, **kw}
 
 
@@ -164,12 +177,21 @@ def valid_comparisons(frame: pd.DataFrame, *, factors: Sequence[Factor] = FACTOR
 
 def _cross(frame: pd.DataFrame, factor: Factor, present: Sequence[str], min_units: int, min_rows: int) -> List[Dict[str, Any]]:
     out = []
-    if factor.name == "species":
+    if factor.name.startswith("species"):
         # human vs mouse restricted to the EM datasets (same modality): H01 vs Minnie65
         sub = frame[frame["dataset"].isin(["h01", "minnie65"]) & (frame["modality"] == "EM")]
         if not {"h01", "minnie65"} <= set(sub["dataset"].unique()):
             return [_record(factor, "h01 vs minnie65", "human", "mouse", None, reason="needs both EM datasets")]
-        return _between(sub, factor, "h01 vs minnie65", None, min_units, resolve_min_rows(min_rows, ["h01", "minnie65"]))
+        rows = resolve_min_rows(min_rows, ["h01", "minnie65"])
+        if factor.stratify is None:
+            return _between(sub, factor, "h01 vs minnie65", None, min_units, rows)
+        if not sub[factor.stratify].notna().any():
+            return [_record(factor, "h01 vs minnie65", "human", "mouse", None, reason="stratifying metadata missing")]
+        sets = [set(sub.loc[sub["dataset"] == d, factor.stratify].dropna().astype(str)) for d in ("h01", "minnie65")]
+        out = []
+        for st in sorted(sets[0] & sets[1]):
+            out += _between(sub[sub[factor.stratify].astype(str) == st], factor, "h01 vs minnie65", st, min_units, rows)
+        return out or [_record(factor, "h01 vs minnie65", "human", "mouse", None, reason="no stratum present in both datasets")]
     pairs = [p for p in combinations(sorted(present), 2) if set(p) != {"h01", "minnie65"}]  # H01 vs Minnie is the 'species' row
     for a, b in pairs:
         sub = frame[frame["dataset"].isin([a, b])]

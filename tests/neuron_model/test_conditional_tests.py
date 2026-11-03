@@ -106,46 +106,53 @@ def _tester(real, n_reference=200, kinds=("inhibitory", "excitatory")):
 def test_same_type_accepts_faithful_and_rejects_shifted(real):
     tester = _tester(real)
     ok = tester.test(make_gen(5, 300, "excitatory"), "excitatory")
-    assert (ok["table"]["q_bh"] > 0.05).all() and ok["mv"]["p_ed"] > 0.05
+    assert (ok["table"]["q_boot"] > 0.05).all() and ok["mv"]["p_ed"] > 0.05
     # generated with the OTHER condition: the Volume / Length shift must be found (control of the test's sensitivity)
     bad = tester.test(make_gen(6, 300, "inhibitory"), "excitatory")
     t = bad["table"].set_index("metric")
-    assert t.loc["Volume", "q_bh"] < 0.05 and bad["mv"]["p_ed"] < 0.05
+    assert t.loc["Volume", "q_boot"] < 0.05 and t.loc["Volume", "d_hi"] < 0 and bad["mv"]["p_ed"] < 0.05
     assert t.loc["Area", "verdict"] != "differs"
 
 
-def test_equivalence_needs_proof_not_just_non_significance():
+def test_equivalence_needs_proof_and_min_margin_is_reported():
     big = make_real(seed=11, n_neurons=300, spines=30, inhibitory_share=0.0)
     pools = {"excitatory": ct.RealPool(big, METRICS)}
-    tester = ct.SameTypeTester(pools, METRICS, n_reference=200, n_observed_draws=10, seed=0, margin_sd=0.35)
+    tester = ct.SameTypeTester(pools, METRICS, n_reference=50, n_observed_draws=10, seed=0, margin_sd=0.35, n_boot=300)
     t = tester.test(make_gen(5, 500, "excitatory"), "excitatory")["table"].set_index("metric")
-    assert (t["verdict"] == "equivalent").sum() >= 3 and t["within_noise"].all()   # the generator is the population
-    # a median shift of 0.6 sd of Area is no equivalence at the margin 0.35 sd (and the strict default margin is not met either)
+    assert (t["verdict"] == "equivalent").sum() >= 3
+    # the margin-free statement: equivalence is proven exactly for the margins above min_margin_sd
+    assert ((t["min_margin_sd"] < 0.35) == (t["q_tost"] < 0.05)).sum() >= 4 and (t["min_margin_sd"] > 0).all()
     shifted = make_gen(5, 500, "excitatory")
     shifted["Area"] *= np.exp(0.6 * float(np.log(big["Area"]).std()))
     t2 = tester.test(shifted, "excitatory")["table"].set_index("metric")
-    assert t2.loc["Area", "verdict"] not in ("equivalent", "median_equivalent_distribution_differs") and not t2.loc["Area", "within_noise"]
-    strict = ct.SameTypeTester(pools, METRICS, n_reference=200, n_observed_draws=10, seed=0).test(make_gen(5, 500, "excitatory"), "excitatory")["table"]
+    assert t2.loc["Area", "verdict"] == "differs" and t2.loc["Area", "min_margin_sd"] > 0.6
+    strict = ct.SameTypeTester(pools, METRICS, n_reference=50, n_observed_draws=10, seed=0, n_boot=300).test(make_gen(5, 500, "excitatory"), "excitatory")["table"]
     assert (strict["verdict"] == "equivalent").sum() <= (t["verdict"] == "equivalent").sum()
 
 
-def test_type_one_error_of_same_type_test_and_neuron_awareness():
-    """Generated = fresh draws of the same population. The neuron-aware test must stay at (or below) its nominal level
-    while a naive spine-level KS test against the pooled real spines rejects, because the real sample carries the style of
-    only a few neurons."""
+def test_type_one_error_and_power_of_the_bootstrap_test_and_neuron_awareness():
+    """Generated = fresh draws of the true population (new neuron style per spine). The cluster-bootstrap test of the signed
+    median difference must hold ~5 % (>= 200 repeats of the real dataset), have power against a 0.3 sd shift, and the naive
+    spine-level KS against the pooled real spines must reject far more often (it ignores the neuron sampling error)."""
     from scipy.stats import ks_2samp
 
-    rej_aware, rej_naive, total = 0, 0, 0
-    for s in range(8):
-        real = make_real(seed=100 + s, n_neurons=24, spines=150, style_sd=0.45, inhibitory_share=0.0)
-        tester = ct.SameTypeTester({"excitatory": ct.RealPool(real, METRICS)}, METRICS, n_reference=200, n_observed_draws=10, seed=s)
-        gen = make_gen(900 + s, 400, "excitatory", style_sd=0.45)
-        res = tester.test(gen, "excitatory")["table"]
-        rej_aware += int((res["p"] < 0.05).sum())
-        rej_naive += sum(ks_2samp(gen[m], real[m]).pvalue < 0.05 for m in METRICS)
-        total += len(METRICS)
-    assert rej_aware / total <= 0.10
-    assert rej_naive / total >= rej_aware / total + 0.2
+    rej = tot = naive = 0
+    power = []
+    for s in range(200):
+        real = make_real(seed=1000 + s, n_neurons=50, spines=30, style_sd=0.3, inhibitory_share=0.0)
+        tester = ct.SameTypeTester({"excitatory": ct.RealPool(real, METRICS)}, METRICS, n_reference=10, n_observed_draws=5, seed=s, n_boot=150, n_real_draw=3000)
+        gen = make_gen(5000 + s, 300, "excitatory", style_sd=0.3)
+        tb = tester.test(gen, "excitatory", descriptive=False)["table"]
+        rej += int((tb["p_boot"] < 0.05).sum())
+        tot += len(tb)
+        naive += sum(ks_2samp(gen[m], real[m]).pvalue < 0.05 for m in METRICS)
+        if s < 60:
+            sh = gen.copy()
+            sh["Area"] *= np.exp(0.3 * float(np.log(real["Area"]).std()))
+            power.append(tester.test(sh, "excitatory", descriptive=False)["table"].set_index("metric").loc["Area", "p_boot"] < 0.05)
+    assert 0.02 <= rej / tot <= 0.08
+    assert np.mean(power) > 0.7
+    assert naive / tot > rej / tot + 0.1
 
 
 def test_correlation_structure_is_compared(real):
@@ -210,7 +217,7 @@ def test_validity_table_reports_rates():
 def test_orchestration_end_to_end(real):
     sets = {("inhibitory", "g1"): make_gen(1, 200, "inhibitory"), ("excitatory", "g1"): make_gen(2, 200, "excitatory"),
             ("unconditional", "default"): pd.concat([make_gen(3, 40, "inhibitory"), make_gen(4, 160, "excitatory")], ignore_index=True)}
-    res = ct.run_conditional_tests(real, sets, "cell_type_binary", metrics=METRICS, n_permutations=300, n_boot=100, n_reference=60, n_reference_classifier=10, log=lambda *_: None)
+    res = ct.run_conditional_tests(real, sets, "cell_type_binary", metrics=METRICS, n_permutations=300, n_boot=100, n_reference=60, n_reference_classifier=10, n_real_draw=600, log=lambda *_: None)
     assert res["effects"]["g1"]["n_concordant"] >= 4 and set(res["same_type"]) == {"inhibitory@g1", "excitatory@g1", "unconditional@default"}
     assert res["same_type"]["unconditional@default"]["own"] == "mixture"
     assert "logistic/all" in res["classifier"] and "unconditional@default" in res["discriminability"]
@@ -222,7 +229,7 @@ def test_orchestration_end_to_end(real):
 def _small_run(real):
     sets = {("inhibitory", "g1.25"): make_gen(1, 150, "inhibitory"), ("excitatory", "g1.25"): make_gen(2, 150, "excitatory"),
             ("unconditional", "default"): pd.concat([make_gen(3, 30, "inhibitory"), make_gen(4, 120, "excitatory")], ignore_index=True)}
-    return sets, ct.run_conditional_tests(real, sets, "cell_type_binary", metrics=METRICS, n_permutations=200, n_boot=60, n_reference=40, n_reference_classifier=8, log=lambda *_: None)
+    return sets, ct.run_conditional_tests(real, sets, "cell_type_binary", metrics=METRICS, n_permutations=200, n_boot=60, n_reference=40, n_reference_classifier=8, n_real_draw=600, log=lambda *_: None)
 
 
 def test_report_builds_and_embeds_valid_payload(real, tmp_path):
@@ -251,3 +258,80 @@ def test_cli_loads_a_set_from_a_combined_parquet(real, tmp_path):
     pd.concat([f.assign(value=v, label=lab, folder=str(tmp_path / v)) for (v, lab), f in sets.items()], ignore_index=True).to_parquet(tmp_path / "generated_metrics.parquet")
     frame, info = cgr.load_set("inhibitory", "g1.25", tmp_path, "postprocessed")
     assert len(frame) == 150 and info["source"] == str(tmp_path)
+
+
+TYPE_SHIFT = {"4P": np.zeros(5), "6P": np.array([0, 0.25, 0, 0, 0]), "BC": np.array([-0.4, -0.2, 0, 0, 0]), "MC": np.array([0, 0, 0.3, 0, 0.2])}
+
+
+def _typed_spines(rng, n, t, style, amp=1.0):
+    z = rng.normal(size=(n, 1))
+    return np.exp(MU + style + LOAD * z + rng.normal(size=(n, 5)) * NOISE + amp * TYPE_SHIFT[t])
+
+
+def make_typed_real(seed=0, neurons_per_type=40, spines=40, style_sd=0.2):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for t in TYPE_SHIFT:
+        for i in range(neurons_per_type):
+            f = pd.DataFrame(_typed_spines(rng, spines, t, rng.normal(0, style_sd, 5)[None, :]), columns=METRICS)
+            f["neuron_id"], f["cell_type"] = f"{t}_{i}", t
+            rows.append(f)
+    return pd.concat(rows, ignore_index=True)
+
+
+def make_typed_gen(seed, n, t, shift_type=None, style_sd=0.2):
+    rng = np.random.default_rng(seed)
+    f = pd.DataFrame(_typed_spines(rng, n, shift_type or t, rng.normal(0, style_sd, (n, 5))), columns=METRICS)
+    f["mesh_present"], f["attachment_found"], f["valid"] = True, True, True
+    return f
+
+
+def test_detailed_cell_types_end_to_end():
+    real = make_typed_real()
+    sets = {(t, "g1"): make_typed_gen(10 + i, 300, t) for i, t in enumerate(TYPE_SHIFT)}
+    sets[("BC", "blind")] = make_typed_gen(40, 300, "BC", shift_type="4P")     # asked for BC, generated like 4P
+    sets[("4P", "blind")] = make_typed_gen(41, 300, "4P")
+    res = ct.run_conditional_tests(real, sets, "cell_type", metrics=METRICS, n_permutations=500, n_boot=250, n_reference=40, n_reference_classifier=5, n_real_draw=600, log=lambda *_: None)
+    # A: all 6 pairs of types, BH across pairs
+    eff = {k: v for k, v in res["effects"].items() if k.startswith("g1")}
+    assert len(eff) == 6 and res["pair"] is None and len(res["real_effects"]) == 6
+    pair = next(v for v in eff.values() if set(v["pair"]) == {"4P", "6P"})["concordance"].set_index("metric")
+    assert pair.loc["Length", "real_sig"] and pair.loc["Length", "status"] == "reproduced" and pair.loc["Volume", "status"] == "consistent"
+    assert all(v["n_concordant"] >= 4 for v in eff.values())
+    # blind pair (BC vs 4P generated alike): the Volume / Length difference must not be reproduced
+    blind = next(v for k, v in res["effects"].items() if k.startswith("blind") and set(v["pair"]) == {"4P", "BC"})["concordance"].set_index("metric")
+    assert blind.loc["Volume", "status"] != "reproduced"
+    # B: every type has its own pool
+    assert {k.split("@")[0] for k in res["same_type"]} == set(TYPE_SHIFT)
+    t = res["same_type"]["MC@g1"]["by_pool"]["MC"]["table"].set_index("metric")
+    assert (t["q_boot"] > 0.05).all()
+    wrong = res["same_type"]["MC@g1"]["by_pool"]["4P"]["table"].set_index("metric")
+    assert wrong.loc["Area", "q_boot"] < 0.05
+    # C: multiclass classifier recovers the requested type as often as real spines of that type are recovered
+    tc = res["type_classifier"]
+    assert tc["balanced_accuracy"] > tc["chance"] + 0.1 and len(tc["classes"]) == 4
+    assert np.allclose(np.array(tc["confusion"]).sum(1), 1.0)
+    ok = [tc["sets"][f"{t}@g1"]["within_expected"] for t in TYPE_SHIFT]
+    assert sum(ok) >= 3 and not tc["sets"]["BC@blind"]["within_expected"]
+
+
+def test_detailed_types_with_few_neurons_are_flagged():
+    real = make_typed_real()
+    rare = make_typed_real(seed=5, neurons_per_type=7)
+    rare = rare[rare.cell_type == "MC"].assign(cell_type="RARE", neuron_id=lambda d: "r" + d.neuron_id)
+    real = pd.concat([real, rare], ignore_index=True)
+    sets = {("RARE", "g1"): make_typed_gen(1, 200, "MC"), ("4P", "g1"): make_typed_gen(2, 200, "4P")}
+    res = ct.run_conditional_tests(real, sets, "cell_type", metrics=METRICS, n_permutations=200, n_boot=50, n_reference=20, n_reference_classifier=3, n_real_draw=600, log=lambda *_: None)
+    assert res["pools"]["RARE"]["underpowered"] and any("RARE" in w for w in res["warnings"])
+    assert "RARE@g1" in res["type_classifier"]["sets"] and res["type_classifier"]["sets"]["RARE@g1"]["underpowered"]
+
+
+def test_gbm_classifier_option_runs(real):
+    from threadpoolctl import threadpool_limits
+
+    sets = {("inhibitory", "g1"): make_gen(1, 150, "inhibitory"), ("excitatory", "g1"): make_gen(2, 150, "excitatory")}
+    with threadpool_limits(limits=1):       # OpenMP oversubscription makes HistGradientBoosting 100x slower on small data
+        res = ct.run_conditional_tests(real, sets, "cell_type_binary", metrics=METRICS, n_permutations=100, n_boot=30, n_reference=20, n_reference_classifier=3,
+                                       classifiers=("logistic", "gbm"), n_real_draw=600, log=lambda *_: None)
+    assert "gbm/all" in res["classifier"] and 0.5 < res["classifier"]["gbm/all"]["auc"] <= 1.0
+    assert "gbm" in res["discriminability"]["inhibitory@g1"]

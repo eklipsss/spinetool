@@ -51,7 +51,7 @@ python scripts\neuron_model\eval_training_curves.py --run %VAE% --weights ema --
 
 echo ===== [F3/4] MoGen A re-run with snapshots ===== %date% %time%
 python scripts\neuron_model\train_mogen.py --config %OLD_A%\config.yaml name=mogen-ft-dev-curves ^
-  train.max_steps=16000 train.validate_every=2000 train.keep_every=1000 train.checkpoint_every=1000
+  train.max_steps=16000 train.validate_every=100000 train.keep_every=1000 train.checkpoint_every=1000
 
 for /f "delims=" %%d in ('dir /b /ad /o-d runs\training\neuron-model\*_mogen-ft-dev-curves') do (set A=runs\training\neuron-model\%%d& goto :afound)
 :afound

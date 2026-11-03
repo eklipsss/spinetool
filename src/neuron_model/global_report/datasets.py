@@ -16,13 +16,46 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from ..compartments import layer_value
 from ..metadata import LABID_GROUPS, cell_type_binary, dataset_kind, labid_group, load_metadata_tables, species
 
 MODALITY = {"minnie65": "EM", "h01": "EM", "labid": "confocal"}
 UNIT_NAME = {"minnie65": "neuron", "h01": "neuron", "labid": "branch folder"}
 SPINE_KEYS = ["dataset", "neuron_id", "limb_id", "branch_id", "spine_id"]
+MINNIE_INTERNEURONS = {"BC", "BPC", "MC", "NGC"}
+H01_CELL_CLASS = {"PYRAMIDAL": "pyramidal", "SPINY_ATYPICAL": "other_excitatory", "INTERNEURON": "interneuron"}
+
+
+def cell_class(cell_type: Any) -> Optional[str]:
+    """HARMONISED cell class usable in Minnie65 and H01: pyramidal (Minnie ...P types incl. WM-P; H01 PYRAMIDAL),
+    other_excitatory (H01 SPINY_ATYPICAL), interneuron (Minnie BC BPC MC NGC; H01 INTERNEURON). Unsure / OLIGO -> None."""
+    if not isinstance(cell_type, str):
+        return None
+    if cell_type in H01_CELL_CLASS:
+        return H01_CELL_CLASS[cell_type]
+    if cell_type in MINNIE_INTERNEURONS:
+        return "interneuron"
+    if cell_type.endswith("P") or "P-" in cell_type:
+        return "pyramidal"
+    return None
+
+
+def layer_labels(text: Any, kind: str):
+    """(layer, layer_native). ``layer`` is harmonised (L1, L2/3, L4, L5, L6, WM): Minnie65 only COARSE, derived from the
+    cell-type NAME (LAYER_OF_MINNIE_TYPE; excitatory cells only), H01 from h01_layer.csv with L2 and L3 merged.
+    ``layer_native`` = H01 layer without merging (L1..L6, WM), None for Minnie65."""
+    v = layer_value(text)
+    if v is None:
+        return None, None
+    harmonised = "L2/3" if v in (2.0, 2.5, 3.0) else ("WM" if v == 7.0 else f"L{int(v)}")
+    native = None
+    if kind == "h01":
+        native = "WM" if v == 7.0 else f"L{int(v)}"
+    return harmonised, native
+
+
 META_COLUMNS = ["dataset", "unit_id", "neuron_id", "species", "modality", "health", "treatment", "group", "cell_type",
-                "cell_type_binary", "compartment"]
+                "cell_type_binary", "cell_class", "layer", "layer_native", "compartment"]
 
 
 def _limb_number(values: pd.Series) -> pd.Series:
@@ -45,6 +78,9 @@ def _unit_metadata(raw_ids: pd.Series, kind: str, meta: Dict[str, Any]) -> pd.Da
         out["treatment"] = grp.map(lambda g: (LABID_GROUPS[g][1] or "untreated") if g in LABID_GROUPS else None)
         out["cell_type"] = None
         out["cell_type_binary"] = None
+        out["cell_class"] = None
+        out["layer"] = None
+        out["layer_native"] = None
     else:
         out["group"] = None
         out["health"] = "healthy"
@@ -52,6 +88,11 @@ def _unit_metadata(raw_ids: pd.Series, kind: str, meta: Dict[str, Any]) -> pd.Da
         types = meta.get("cell_types", {}).get(kind, {})
         out["cell_type"] = ids.map(types)
         out["cell_type_binary"] = out["cell_type"].map(lambda t: cell_type_binary(t) if isinstance(t, str) else None)
+        out["cell_class"] = out["cell_type"].map(cell_class)
+        layer_src = ids.map(meta.get("layers", {}).get(kind, {})) if kind == "h01" else out["cell_type"]
+        labels = layer_src.map(lambda t: layer_labels(t, kind))
+        out["layer"] = labels.map(lambda x: x[0])
+        out["layer_native"] = labels.map(lambda x: x[1])
     return out
 
 
@@ -180,7 +221,7 @@ def dataset_inventory(spines: pd.DataFrame, branches: Optional[pd.DataFrame] = N
                      "n_branches": int(len(br)) if g["branch_id"].notna().any() else None, "n_spines": int(len(g)),
                      "spines_per_unit_median": float(g.groupby("unit_id").size().median())})
     out["by_dataset"] = pd.DataFrame(rows)
-    for col in ("cell_type_binary", "cell_type", "compartment", "health", "treatment", "group"):
+    for col in ("cell_type_binary", "cell_type", "cell_class", "layer", "compartment", "health", "treatment", "group"):
         out[f"by_dataset_{col}"] = _counts(spines, ["dataset", col])
     miss = []
     for ds, g in spines.groupby("dataset"):
