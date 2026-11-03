@@ -145,6 +145,7 @@ def run_training(
             metrics.update(sample_metrics)
         if metrics:
             last_metrics = metrics
-        if step % loop.checkpoint_every == 0 or step == loop.max_steps or metrics:
+        # keep_every snapshots (step_<N>.pt) must not depend on checkpoint_every dividing keep_every
+        if step % loop.checkpoint_every == 0 or step == loop.max_steps or metrics or (loop.keep_every and step % loop.keep_every == 0):
             save(metrics)
     return {"step": step, "metrics": last_metrics}

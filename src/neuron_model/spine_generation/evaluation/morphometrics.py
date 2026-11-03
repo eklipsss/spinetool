@@ -24,7 +24,7 @@ import pandas as pd
 
 from ...spine_morphometrics import ALL_METRICS, JUNCTION_METRICS, AttachmentRegion, compute_chord_distribution, compute_scalar_metrics
 from ..data.index import SpineIndex
-from .inputs import threaded_map
+from .inputs import load_generated_set, threaded_map
 
 AttachmentFinder = Callable[[Any], Optional[AttachmentRegion]]
 
@@ -104,6 +104,18 @@ def generated_morphometrics(
             row["OldChordDistribution"] = compute_chord_distribution(mesh, region) if compute_chords else None
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def generated_set_metrics(folder: Path, mesh_kind: str = "postprocessed", *, attachment_finder: Optional[AttachmentFinder] = None) -> pd.DataFrame:
+    """Metrics of every sample of one generated set (folder of ``sample_*``): ``generated_morphometrics`` with the base found by
+    ``DownFacingCapFinder`` (as in evaluate_generators.py) + ``valid`` (the mesh validation report). Samples without a mesh stay
+    in the table (``mesh_present`` False)."""
+    from .attachment import DownFacingCapFinder
+
+    meshes, reports, ids = load_generated_set(Path(folder), mesh_kind)
+    table = generated_morphometrics(meshes, attachment_finder=attachment_finder or DownFacingCapFinder(), compute_chords=False, sample_ids=ids)
+    table["valid"] = [bool(r.get("is_valid")) for r in reports]
+    return table
 
 
 def finder_bias(

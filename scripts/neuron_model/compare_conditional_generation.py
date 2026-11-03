@@ -112,8 +112,7 @@ def main() -> None:
     import importlib.util
 
     from src.neuron_model.spine_generation.evaluation.attachment import DownFacingCapFinder
-    from src.neuron_model.spine_generation.evaluation.inputs import load_generated_set
-    from src.neuron_model.spine_generation.evaluation.morphometrics import generated_morphometrics
+    from src.neuron_model.spine_generation.evaluation.morphometrics import generated_set_metrics
 
     t0 = time.time()
     spec = importlib.util.spec_from_file_location("morphology_by_condition", REPO_ROOT / "scripts/neuron_model/morphology_by_condition.py")
@@ -128,9 +127,7 @@ def main() -> None:
     for item in args.gen:
         key, folder = item.split("=", 1)
         value, _, label = key.partition("@")
-        meshes, reports, ids = load_generated_set(Path(folder), args.mesh_kind)
-        g = generated_morphometrics(meshes, attachment_finder=finder, compute_chords=False, sample_ids=ids)
-        g["valid"] = [bool(r.get("is_valid")) for r in reports]
+        g = generated_set_metrics(Path(folder), args.mesh_kind, attachment_finder=finder)
         generated[(value, label or "default")] = g
         gen_frames.append(g.assign(value=value, label=label or "default", folder=folder))
         print(f"[cond-gen] {value}@{label or 'default'}: {len(g)} samples, {int(g['mesh_present'].sum())} meshes, "
