@@ -5,7 +5,6 @@ const M = D.metrics;
 const MI = Object.fromEntries(M.map(m => [m.id, m]));
 const VR = D.value_ru;
 const PINK = P.series_1, GREEN = P.series_2, GREY = P.reference;
-const pair = R.pair || ['a', 'b'];
 const esc = s => String(s === null || s === undefined ? '' : s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
 const pctOf = lr => (lr === null || lr === undefined) ? null : 100 * (Math.exp(lr) - 1);
 const fp = v => (v === null || v === undefined) ? '—' : (v >= 0 ? '+' : '') + fmt(v, 1) + ' %';
@@ -51,7 +50,7 @@ function drawA(label) {
   };
   Plotly.newPlot('plot-forest', [mk('real', GREY, -0.17, 'реальные (нейрон — единица)'), mk('gen', PINK, 0.17, 'сгенерированные')],
     layout({yaxis: {tickvals: idx, ticktext: rows.map(r => mname(r.metric)), autorange: 'reversed', showgrid: true, zeroline: false},
-      xaxis: {title: axisTitle('изменение медианы: ' + (VR[pair[0]] || pair[0]) + ' относительно ' + (VR[pair[1]] || pair[1]) + ', %'), zeroline: true, zerolinecolor: P.ink_muted, zerolinewidth: 1.5},
+      xaxis: {title: axisTitle('изменение медианы: ' + (VR[e.pair[0]] || e.pair[0]) + ' относительно ' + (VR[e.pair[1]] || e.pair[1]) + ', %'), zeroline: true, zerolinecolor: P.ink_muted, zerolinewidth: 1.5},
       legend: {orientation: 'h', y: 1.06}, margin: {l: 150}}), PLOT_CONFIG);
   table('table-a', [
     {h: 'Метрика', f: r => esc(mname(r.metric))},
@@ -69,13 +68,15 @@ function drawA(label) {
 let setB = null, metricB = null;
 const own = key => R.same_type[key].by_pool[R.same_type[key].own];
 function drawBBars() {
-  const res = own(setB), rows = res.table.filter(r => r.w1_sd !== undefined && r.w1_sd !== null);
-  const ratio = rows.map(r => r.w1_sd / r.ref_q95);
-  Plotly.newPlot('plot-b-bars', [{type: 'bar', orientation: 'h', y: rows.map(r => mname(r.metric)), x: ratio,
-    marker: {color: rows.map(r => r.q_bh < 0.05 ? PINK : GREEN)},
-    textposition: 'none', hovertext: rows.map((r, i) => '<b>' + mname(r.metric) + '</b><br>W₁/σ = ' + fmt(r.w1_sd, 3) + '<br>шум: медиана ' + fmt(r.ref_q50, 3) + ', 95 % ' + fmt(r.ref_q95, 3) + '<br>p = ' + qtxt(r.p) + ', q = ' + qtxt(r.q_bh) + '<br>' + D.verdict_ru[r.verdict]), hoverinfo: 'text'}],
-    layout({shapes: [{type: 'line', xref: 'x', yref: 'paper', x0: 1, x1: 1, y0: 0, y1: 1, line: {color: P.ink_secondary, width: 1.5, dash: 'dash'}}], yaxis: {autorange: 'reversed'}, margin: {l: 150},
-      xaxis: {title: axisTitle('W₁/σ ÷ 95-й процентиль шума реальных половин')}, showlegend: false}), PLOT_CONFIG);
+  const res = own(setB), rows = res.table.filter(r => r.log_ratio !== undefined && r.log_ratio !== null);
+  const idx = rows.map((_, i) => i), x = rows.map(r => pctOf(r.log_ratio));
+  const shapes = rows.map((r, i) => ({type: 'rect', xref: 'x', yref: 'y', x0: pctOf(-r.delta), x1: pctOf(r.delta), y0: i - 0.42, y1: i + 0.42, fillcolor: P.brand_green, opacity: 0.22, line: {width: 0}}));
+  Plotly.newPlot('plot-b-bars', [{type: 'scatter', mode: 'markers', x: x, y: idx, marker: {size: 10, color: rows.map(r => r.q_boot < 0.05 ? PINK : GREEN)},
+    error_x: {type: 'data', symmetric: false, array: rows.map((r, i) => pctOf(r.d_hi) - x[i]), arrayminus: rows.map((r, i) => x[i] - pctOf(r.d_lo)), color: P.ink_secondary, thickness: 1.6, width: 4},
+    hovertext: rows.map((r, i) => '<b>' + mname(r.metric) + '</b><br>разность медиан: ' + fp(x[i]) + ' [' + fp(pctOf(r.d_lo)) + '; ' + fp(pctOf(r.d_hi)) + ']<br>p = ' + qtxt(r.p_boot) + ', q = ' + qtxt(r.q_boot) +
+      '<br>наименьшая граница, для которой доказана эквивалентность: ' + fmt(r.min_margin_sd, 2) + 'σ<br>' + D.verdict_ru[r.verdict]), hoverinfo: 'text'}],
+    layout({shapes: shapes, yaxis: {tickvals: idx, ticktext: rows.map(r => mname(r.metric)), autorange: 'reversed'}, margin: {l: 150}, showlegend: false,
+      xaxis: {title: axisTitle('разность медиан (набор − реальные), %; зелёная полоса — граница эквивалентности'), zeroline: true, zerolinecolor: P.ink_muted, zerolinewidth: 1.5}}), PLOT_CONFIG);
 }
 function drawBRef() {
   const res = own(setB), ref = res.reference[metricB], row = res.table.find(r => r.metric === metricB);
@@ -83,7 +84,7 @@ function drawBRef() {
   Plotly.newPlot('plot-b-ref', [{type: 'histogram', x: ref, marker: {color: GREY}, nbinsx: 40, hovertemplate: '%{x:.3f}<extra>реальные половины</extra>'}],
     layout({shapes: [lineShape(row.w1_sd, PINK), lineShape(row.ref_q95, P.ink_secondary, 'dash')], showlegend: false,
       xaxis: {title: axisTitle('W₁/σ: «' + mname(metricB) + '», реальная половина против другой половины')}, yaxis: {title: axisTitle('повторений')},
-      annotations: [{x: row.w1_sd, y: 1, yref: 'paper', text: 'набор, p = ' + qtxt(row.p), showarrow: false, xanchor: 'left', font: {color: PINK, size: 12}}]}), PLOT_CONFIG);
+      annotations: [{x: row.w1_sd, y: 1, yref: 'paper', text: 'набор, p = ' + qtxt(row.p_floor), showarrow: false, xanchor: 'left', font: {color: PINK, size: 12}}]}), PLOT_CONFIG);
 }
 function drawBMv() {
   const res = own(setB), mv = res.mv;
@@ -102,14 +103,14 @@ function tableB() {
     {h: 'Метрика', f: r => esc(mname(r.metric)) + (r.base_independent ? ' <span class="muted" title="не зависит от поиска основания">●</span>' : '')},
     {h: 'n ген.', f: r => r.n_gen},
     {h: 'Медиана (ген. / реал.)', f: r => r.median_gen === undefined ? '—' : fmt(r.median_gen * MI[r.metric].factor) + ' / ' + fmt(r.median_real * MI[r.metric].factor) + (MI[r.metric].unit ? ' ' + MI[r.metric].unit : '')},
-    {h: 'Δ медианы, %', f: r => r.log_ratio === undefined ? '—' : fp(pctOf(r.log_ratio))},
-    {h: 'W₁/σ', f: r => r.w1_sd === undefined ? '—' : fmt(r.w1_sd, 3)},
-    {h: 'Шум: 50 % / 95 %', f: r => r.ref_q50 === undefined ? '—' : fmt(r.ref_q50, 3) + ' / ' + fmt(r.ref_q95, 3)},
-    {h: 'p', f: r => qtxt(r.p)}, {h: 'q', f: r => qtxt(r.q_bh)},
+    {h: 'Разность медиан, % [95 % ИИ]', f: r => r.log_ratio === undefined ? '—' : fp(pctOf(r.log_ratio)) + ' <span class="muted">[' + fp(pctOf(r.d_lo)) + '; ' + fp(pctOf(r.d_hi)) + ']</span>'},
+    {h: 'p (бутстрэп нейронов)', f: r => qtxt(r.p_boot)}, {h: 'q', f: r => qtxt(r.q_boot)},
     {h: 'Граница ±, % (0,2σ)', f: r => r.delta === undefined ? '—' : fmt(100 * (Math.exp(r.delta) - 1), 1)},
     {h: 'q TOST', f: r => qtxt(r.q_tost)},
-    {h: 'в шуме реальных', f: r => r.within_noise === undefined ? '—' : (r.within_noise ? 'да' : 'нет')},
+    {h: 'Наименьшая граница, σ', f: r => r.min_margin_sd === undefined ? '—' : fmt(r.min_margin_sd, 2)},
     {h: 'Вердикт', f: r => pill(r.verdict === 'equivalent' ? 'good' : (r.verdict === 'differs' ? 'bad' : 'warn'), D.verdict_ru[r.verdict])},
+    {h: 'W₁/σ (описательно)', f: r => r.w1_sd === undefined ? '—' : fmt(r.w1_sd, 3) + ' <span class="muted">(шум ' + fmt(r.ref_q50, 3) + ' / ' + fmt(r.ref_q95, 3) + ')</span>'},
+    {h: 'в шуме реальных', f: r => r.within_noise === undefined ? '—' : (r.within_noise ? 'да' : 'нет')},
   ], res.table);
 }
 function drawBCross() {
@@ -199,7 +200,7 @@ function drawD(key) {
 
 // ----------------------------------------------------------------------------------------------- E
 function drawE(metric) {
-  const labels = Object.keys(R.effects || {}).filter(l => isFinite(D.weights[l]) && D.weights[l] !== null).sort((a, b) => D.weights[a] - D.weights[b]);
+  const labels = Object.keys(R.effects || {}).filter(l => D.weights[l] !== undefined && D.weights[l] !== null && isFinite(D.weights[l])).sort((a, b) => D.weights[a] - D.weights[b]);
   if (!labels.length) { noData('plot-e-metric'); return; }
   const ws = labels.map(l => D.weights[l]);
   const rows = labels.map(l => R.effects[l].generated.find(r => r.metric === metric));
@@ -257,7 +258,7 @@ function tableG() {
 }
 
 // ----------------------------------------------------------------------------------------------- wiring
-fillSelect('sel-a', Object.keys(R.effects || {}).map(l => ({value: l, text: l === 'default' ? 'один набор' : 'метка ' + l})), drawA);
+fillSelect('sel-a', Object.keys(R.effects || {}).map(l => ({value: l, text: l === 'default' ? 'один набор' : (R.effects[l].pair.length && (R.pairs || []).length > 1 ? l : 'метка ' + l)})), drawA);
 if (!Object.keys(R.effects || {}).length) { ['plot-forest'].forEach(id => noData(id, 'Нужны наборы обоих типов с одной меткой')); }
 fillSelect('sel-b-set', D.sets.map(s => ({value: s.key, text: s.title + ' → реальные: ' + (VR[s.own] || s.own)})), v => { setB = v; if (metricB) drawB(); });
 fillSelect('sel-b-metric', M.map(m => ({value: m.id, text: m.name})), v => { metricB = v; if (setB) drawB(); });
@@ -269,3 +270,29 @@ fillSelect('sel-d', D.sets.map(s => ({value: s.key, text: s.title})), drawD);
 if ($('sel-e')) { fillSelect('sel-e', M.map(m => ({value: m.id, text: m.name})), drawE); drawEAux(); }
 tableF();
 tableG();
+
+// ----------------------------------------------------------------------------------------------- C (detailed types)
+function drawCMulti() {
+  const t = R.type_classifier;
+  if (!t || !$('plot-c-conf')) return;
+  const cls = t.classes;
+  Plotly.newPlot('plot-c-conf', [{type: 'heatmap', x: cls, y: cls.map((c, i) => c + ' (' + t.n_neurons[i] + ')'), z: t.confusion.map(r => r.map(v => 100 * v)), text: t.confusion.map(r => r.map(v => fmt(100 * v, 0))),
+    texttemplate: '%{text}', hovertemplate: 'истинный %{y} → предсказан %{x}: %{z:.1f} %<extra></extra>', colorscale: THEME.sequential, zmin: 0, zmax: 100, xgap: 2, ygap: 2, colorbar: {title: {text: '%', side: 'top'}, thickness: 12, len: 0.8}}],
+    layout({margin: {l: 130, b: 70, t: 20}, xaxis: {title: axisTitle('предсказанный тип'), tickangle: -30, showgrid: false}, yaxis: {autorange: 'reversed', showgrid: false}}), PLOT_CONFIG);
+  const rows = Object.values(t.sets).filter(r => r.recovery !== undefined);
+  const x = rows.map(r => setTitle(r.value, r.label));
+  Plotly.newPlot('plot-c-recover', [
+    {type: 'bar', name: 'набор', x: x, y: rows.map(r => 100 * r.recovery), marker: {color: PINK},
+      error_y: {type: 'data', symmetric: false, array: rows.map(r => 100 * (r.hi - r.recovery)), arrayminus: rows.map(r => 100 * (r.recovery - r.lo)), color: P.ink_secondary, thickness: 1.5}, hovertemplate: '%{y:.1f} %<extra>%{x}</extra>'},
+    {type: 'scatter', mode: 'markers', name: 'ожидание: доля верно названных у реальных', x: x, y: rows.map(r => 100 * r.expected), marker: {symbol: 'diamond', size: 13, color: '#ffffff', line: {color: P.ink, width: 2}},
+      error_y: {type: 'data', symmetric: false, array: rows.map(r => 100 * (r.expected_ci[1] - r.expected)), arrayminus: rows.map(r => 100 * (r.expected - r.expected_ci[0])), color: P.ink, thickness: 1.5}}],
+    layout({yaxis: {title: axisTitle('названо запрошенным типом, %'), range: [0, 100]}, legend: {orientation: 'h', y: 1.1}, xaxis: {tickangle: -20}, margin: {b: 90}}), PLOT_CONFIG);
+  table('table-c-multi', [
+    {h: 'Набор', f: r => esc(setTitle(r.value, r.label))}, {h: 'n', f: r => r.n},
+    {h: 'Верно названо, %', f: r => r.recovery === undefined ? '—' : fmt(100 * r.recovery, 1) + ' <span class="muted">[' + fmt(100 * r.lo, 1) + '; ' + fmt(100 * r.hi, 1) + ']</span>'},
+    {h: 'Ожидание по реальным, %', f: r => r.expected === undefined ? '—' : fmt(100 * r.expected, 1) + ' <span class="muted">[' + fmt(100 * r.expected_ci[0], 1) + '; ' + fmt(100 * r.expected_ci[1], 1) + ']</span>'},
+    {h: 'Итог', f: r => r.within_expected === undefined ? '—' : pill(r.underpowered ? 'warn' : (r.within_expected ? 'good' : 'bad'), r.underpowered ? 'мало нейронов реального типа' : (r.within_expected ? 'как у реальных' : 'расходится'))},
+    {h: 'Чаще всего названо', f: r => { const e = Object.entries(r.pred_share).sort((a, b) => b[1] - a[1])[0]; return esc(e[0]) + ' ' + fmt(100 * e[1], 0) + ' %'; }},
+  ], Object.values(t.sets));
+}
+drawCMulti();

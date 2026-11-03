@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -66,7 +67,7 @@ def load_set(value: str, label: str, source: Path, mesh_kind: str) -> tuple:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gen", action="append", required=True, metavar="VALUE[@LABEL]=SOURCE", help="a generated set (repeatable)")
-    parser.add_argument("--block", default="cell_type_binary", choices=("cell_type_binary", "cell_type"))
+    parser.add_argument("--block", default="cell_type_binary", choices=("cell_type_binary", "cell_type"), help="condition block: binary cell type or detailed cell types (sets <type>@<label>)")
     parser.add_argument("--morphometrics-table", type=Path, required=True)
     parser.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
     parser.add_argument("--splits", type=Path, help="real spines only of the neurons of --split (default: all neurons)")
@@ -80,7 +81,8 @@ def main() -> None:
     parser.add_argument("--neuron-weighting", default="equal", choices=("equal", "spines"),
                         help="real draws: every neuron equally likely (balanced per-neuron draws) or proportional to its spines")
     parser.add_argument("--tost-margin-sd", type=float, default=ct.TOST_MARGIN_SD, help="equivalence margin of the median, in pooled sd of the log metric")
-    parser.add_argument("--classifiers", default="logistic", help="comma list: logistic, gbm (non-linear, slower)")
+    parser.add_argument("--classifiers", default="logistic", help="comma list: logistic, gbm (non-linear, slower) for the real-vs-generated test D and the binary condition classifier")
+    parser.add_argument("--n-real-draw", type=int, default=5000, help="real spines drawn (balanced over neurons) per bootstrap replicate of test B")
     parser.add_argument("--only-valid", action="store_true", help="statistics on valid meshes only (the validity rate is reported either way)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path)
@@ -108,20 +110,23 @@ def main() -> None:
         real, gen_sets, args.block, metrics=[m for m in SCALAR_METRICS if m in real.columns], min_spines=args.min_spines, n_permutations=args.n_permutations,
         n_boot=args.n_boot, n_reference=args.n_reference, n_reference_classifier=args.n_reference_classifier, weighting=args.neuron_weighting,
         only_valid=args.only_valid, classifiers=[c.strip() for c in args.classifiers.split(",") if c.strip()], seed=args.seed,
-        tost_margin_sd=args.tost_margin_sd, log=lambda s: print(s, flush=True))
+        tost_margin_sd=args.tost_margin_sd, n_real_draw=args.n_real_draw, log=lambda s: print(s, flush=True))
 
     out = args.out or REPO_ROOT / "runs/analysis/neuron-model" / f"{time.strftime('%Y-%m-%d_%H%M%S')}_conditional-report"
     out.mkdir(parents=True, exist_ok=True)
     pd.concat([f.assign(value=v, label=lab) for (v, lab), f in gen_sets.items()], ignore_index=True).to_parquet(out / "generated_metrics.parquet", index=False)
+    safe = lambda text: re.sub(r"[^0-9A-Za-z._@+-]+", "_", str(text))  # noqa: E731  (file names on Windows)
+    for name, table in results.get("real_effects", {}).items():
+        table.to_csv(out / f"real_effect_{safe(name)}.csv", index=False)
     for name in ("validity", "real_effect", "dose"):
         if name in results and len(results[name]):
             results[name].to_csv(out / f"{name}.csv", index=False)
     for lab, e in results.get("effects", {}).items():
-        e["concordance"].to_csv(out / f"concordance_{lab}.csv", index=False)
-        e["generated"].to_csv(out / f"generated_effect_{lab}.csv", index=False)
+        e["concordance"].to_csv(out / f"concordance_{safe(lab)}.csv", index=False)
+        e["generated"].to_csv(out / f"generated_effect_{safe(lab)}.csv", index=False)
     for key, s in results["same_type"].items():
         for pool, r in s["by_pool"].items():
-            r["table"].to_csv(out / f"same_type_{key}_vs_{pool}.csv", index=False)
+            r["table"].to_csv(out / f"same_type_{safe(key)}_vs_{safe(pool)}.csv", index=False)
     info = {"created": time.strftime("%Y-%m-%d %H:%M"), "block": args.block, "morphometrics_table": str(args.morphometrics_table), "splits": str(args.splits) if args.splits else None,
             "split": args.split, "mesh_kind": args.mesh_kind, "gen": args.gen, "sets": infos, "n_real_spines": int(len(known)), "n_real_neurons": int(known["neuron_id"].nunique()),
             "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items() if k not in ("gen",)}}
@@ -137,7 +142,7 @@ def main() -> None:
               f"underpowered {e['n_underpowered']}, discordant {e['n_discordant']}")
     for key, s in results["same_type"].items():
         t = s["by_pool"][s["own"]]["table"]
-        print(f"[cond-report] B {key} vs real {s['own']}: equivalent {int((t['verdict'] == 'equivalent').sum())}, differs {int(t['verdict'].isin(['differs', 'median_equivalent_distribution_differs']).sum())} of {len(t)}")
+        print(f"[cond-report] B {key} vs real {s['own']}: equivalent {int((t['verdict'] == 'equivalent').sum())}, differs {int((t['verdict'] == 'differs').sum())} of {len(t)}")
     print(f"-> {out}  ({time.time() - t0:.0f} s)")
 
 
