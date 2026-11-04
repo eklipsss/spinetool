@@ -24,7 +24,7 @@ for /f "delims=" %%d in ('dir /b /ad /o-d runs\training\neuron-model\*_mogen-scr
 echo MoGen B curves run: %B%
 
 echo ===== [F2-2/2] MoGen B curves ===== %date% %time%
-python scripts\neuron_model\eval_training_curves.py --run %B% --weights ema --n-spines 1000 --n-draws 3
+python scripts\neuron_model\eval_training_curves.py --run %B% --weights ema --n-spines 1000 --n-draws 3 --include-init
 
 echo Open: %B%\training_curves\curves.html ; record the run folder in docs\neuron-model\runs-and-outputs-registry.md
 :end

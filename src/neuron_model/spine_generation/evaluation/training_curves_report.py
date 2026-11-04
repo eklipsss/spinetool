@@ -68,6 +68,9 @@ def write_png(path: Path, kind: str, curves: pd.DataFrame, logs: Mapping[str, pd
             best = summary.get("ema") or next((v for k, v in summary.items() if isinstance(v, dict)), None)
             if best and name == main:
                 ax.axvline(best["best_step"], color=p["series_2"], linestyle=":", linewidth=1.2)
+        if (curves["step"] == 0).any():
+            ax.axvline(0, color=p["ink_muted"], linestyle="--", linewidth=0.8)
+            ax.annotate("init", (0, 1), xycoords=("data", "axes fraction"), fontsize=7, color=p["ink_muted"], va="top")
         ax.set_title(TITLES.get(name, "Разрыв val − train (±2 SE)") if name != "gap" else "Разрыв val − train (±2 SE)", fontsize=10, color=p["ink"])
         ax.set_xlabel("шаг", fontsize=9)
         ax.grid(color=p["grid"])
@@ -112,10 +115,11 @@ function draw(which) {
       if (D.val_inloop && D.val_inloop[m]) traces.push({x: D.val_inloop.step, y: D.val_inloop[m], mode: 'markers', name: 'validation в цикле (in-loop)', marker: {color: P.reference, symbol: 'diamond', size: 7}});
     }
     const shapes = [];
+    if (steps.length && steps[0] === 0) shapes.push({type: 'line', x0: 0, x1: 0, yref: 'paper', y0: 0, y1: 1, line: {color: P.ink_muted, dash: 'dash', width: 1}});
     if (m === D.main && D.best[which]) shapes.push({type: 'line', x0: D.best[which].best_step, x1: D.best[which].best_step, yref: 'paper', y0: 0, y1: 1, line: {color: P.series_2, dash: 'dot', width: 1.5}});
     if (m === 'gap') shapes.push({type: 'line', xref: 'paper', x0: 0, x1: 1, y0: 0, y1: 0, line: {color: P.border, width: 1}});
     Plotly.react('plot_' + m, traces, layout({xaxis: {title: axisTitle('шаг')}, yaxis: {title: axisTitle(D.titles[m]), type: D.log[m] ? 'log' : 'linear'}, shapes: shapes,
-      legend: {orientation: 'h', y: -0.22}, hovermode: 'x unified'}), PLOT_CONFIG);
+      legend: {orientation: 'h', y: -0.22}, hovermode: 'x unified', annotations: steps.length && steps[0] === 0 ? [{x: 0, y: 1, yref: 'paper', text: 'init', showarrow: false, xanchor: 'left', font: {size: 11, color: P.ink_muted}}] : []}), PLOT_CONFIG);
   }
 }
 const sel = $('weights');

@@ -98,6 +98,25 @@ def build_model(kind: str, run_root: Path):
     return PointInfinity(PointInfinityConfig(**cfg_json))
 
 
+def build_initial_model(kind: str, cfg: Mapping[str, Any], run_root: Path):
+    """The model the run STARTED from, built as ``train_vae.py`` / ``train_mogen.py`` build it: seed, then the run's own
+    model config (MoGen: ``build_model`` = pretrained / run weights, ``expand_cond_dim``, or random init; VAE: random
+    init). Nothing draws torch random numbers between ``seed_everything`` and the model construction in the trainers
+    (index loading, split, bbox are RNG-free), so a random init is the same network as the run's step 0."""
+    from ..experiment.seed import seed_everything
+
+    seed_everything(int(cfg["seed"]))
+    if kind == "vae":
+        from ..models.spine_vae.model import SpineVAE, SpineVAEConfig
+
+        if cfg.get("model"):
+            return SpineVAE(SpineVAEConfig.from_mapping(cfg["model"]))
+        return build_model(kind, run_root)
+    from ..models.spine_mogen.train import build_model as build_mogen
+
+    return build_mogen(cfg["model"])
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 # fixed evaluation inputs
 # ----------------------------------------------------------------------------------------------------------------------
@@ -412,7 +431,8 @@ def summary_of(kind: str, curves: pd.DataFrame) -> Dict[str, Any]:
         if f"gap_{main}" in frame:
             info["gap_last"] = float(frame[f"gap_{main}"].iloc[-1])
             info["gap_last_se"] = float(frame[f"gap_{main}_se"].iloc[-1])
-            info["gap_trend"] = gap_trend(frame["step"].to_numpy(), frame[f"gap_{main}"].to_numpy(), frame[f"gap_{main}_se"].to_numpy())
+            trained = frame[frame["step"] > 0]  # the step-0 (init) row is not part of the trend
+            info["gap_trend"] = gap_trend(trained["step"].to_numpy(), trained[f"gap_{main}"].to_numpy(), trained[f"gap_{main}_se"].to_numpy())
         out[which] = info
     return out
 
@@ -424,7 +444,7 @@ def summary_of(kind: str, curves: pd.DataFrame) -> Dict[str, Any]:
 
 def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spines: int = 1000, batch_size: Optional[int] = None, n_draws: int = 3,
                seed: int = 12345, device: Any = None, num_workers: int = 0, final_step: Optional[int] = None, steps: Optional[Sequence[int]] = None,
-               reuse: bool = True, manifests: Optional[Sequence[Path]] = None, splits: Optional[Path] = None, path_mode: Optional[str] = None,
+               reuse: bool = True, include_init: bool = False, manifests: Optional[Sequence[Path]] = None, splits: Optional[Path] = None, path_mode: Optional[str] = None,
                out_dir: Optional[Path] = None, log=print) -> Dict[str, Any]:
     """Evaluate all periodic checkpoints of ``run_root``; writes ``training_curves/curves.{csv,json}`` and returns the result."""
     import time
@@ -467,7 +487,23 @@ def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spi
         log("[curves] the run was trained without EMA (train.ema_decay is not set): 'ema' -> 'raw' weights")
         weights_kinds = tuple(dict.fromkeys("raw" if w == "ema" else w for w in weights_kinds))
     rows: List[Dict[str, Any]] = []
+    if include_init:
+        todo = [w for w in weights_kinds if (0, w) not in done]
+        if todo:
+            init_model = build_initial_model(kind, cfg, run.root).to(device)
+            t1 = time.perf_counter()
+            row0 = evaluate_checkpoint(kind, init_model, inputs, cfg, step=0, final_step=final_step, device=device, n_draws=n_draws, seed=seed)
+            del init_model
+            log(f"[curves] step 0 (init, {'pretrained / run weights' if kind == 'mogen' and cfg['model'].get('init', 'random') != 'random' else 'random init, seed ' + str(cfg['seed'])}) ({time.perf_counter() - t1:.1f} s)")
+        for which in weights_kinds:  # at initialisation EMA and raw weights are the same network
+            if (0, which) in done:
+                rows.append(done[(0, which)])
+            else:
+                rows.append({**row0, "weights": which, "checkpoint": "init", "init": True})
+        _write_partial(out_dir, settings, rows)
     for step, path in checkpoints:
+        if step == 0:
+            continue
         payload = None
         for which in weights_kinds:
             if (step, which) in done:
@@ -489,9 +525,9 @@ def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spi
         del payload
         _write_partial(out_dir, settings, rows)
 
-    curves = pd.DataFrame(rows)
+    curves = pd.DataFrame(rows).sort_values(["weights", "step"]).reset_index(drop=True)
     for col in curves.columns:  # rows reused from curves.json carry None for NaN
-        if col not in ("weights", "checkpoint"):
+        if col not in ("weights", "checkpoint", "init"):
             curves[col] = pd.to_numeric(curves[col], errors="coerce")
     logs = read_logs(run.root, kind, cfg, final_step)
     result = {"settings": settings, "rows": rows, "summary": summary_of(kind, curves), "run": run.experiment_id}

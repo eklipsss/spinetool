@@ -17,6 +17,9 @@ Windows (GPU), after training with train.keep_every=1000 train.checkpoint_every=
     python scripts/neuron_model/eval_training_curves.py --run runs/training/neuron-model/<run> [--weights ema|raw|both] \
         [--n-spines 1000] [--n-draws 3] [--batch-size 16]
 
+``--include-init`` adds the step-0 row (the model the run started from: MoGen A = pretrained mouse_mixed, MoGen B / VAE = random
+init of the run's seed); best checkpoint and gap trend ignore it unless it is the best.
+
 Writes ``<run>/training_curves/{curves.csv, curves.json, curves.png, curves.html, train_log.csv, val_inloop.csv}``;
 an interrupted evaluation continues from curves.json (same settings), ``--no-reuse`` recomputes everything.
 ``--manifest/--splits/--path-mode`` override the run's data (e.g. on a copy of the cache).
@@ -55,6 +58,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, nargs="*", help="only these checkpoint steps")
     parser.add_argument("--device", default=None)
     parser.add_argument("--no-reuse", action="store_true")
+    parser.add_argument("--include-init", action="store_true", help="also evaluate the INITIAL model of the run at step 0 (pretrained weights / random init "
+                        "of the run's seed) with the same estimator; on an already evaluated run only step 0 is computed")
     parser.add_argument("--manifest", type=Path, nargs="*")
     parser.add_argument("--splits", type=Path)
     parser.add_argument("--path-mode", default=None)
@@ -64,7 +69,7 @@ def main() -> None:
     out = run_curves(
         args.run, weights_kinds=("ema", "raw") if args.weights == "both" else (args.weights,), n_spines=args.n_spines, batch_size=args.batch_size,
         n_draws=args.n_draws, seed=args.seed, device=args.device, num_workers=args.num_workers, final_step=args.final_step, steps=args.steps,
-        reuse=not args.no_reuse, manifests=args.manifest, splits=args.splits, path_mode=args.path_mode, out_dir=args.out,
+        reuse=not args.no_reuse, include_init=args.include_init, manifests=args.manifest, splits=args.splits, path_mode=args.path_mode, out_dir=args.out,
     )
     out_dir = out["out_dir"]
     result = out["result"]

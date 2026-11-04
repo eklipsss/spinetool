@@ -165,3 +165,34 @@ def test_mogen_curves_draws_null_condition_and_determinism(fake_dataset, tmp_pat
     write_html(out["out_dir"] / "curves.html", "mogen", curves, out["logs"], out["result"]["summary"], out["cfg"], "mogen_curves", out["result"]["settings"])
     write_png(out["out_dir"] / "curves.png", "mogen", curves, out["logs"], out["result"]["summary"])
     assert out["result"]["summary"]["ema"]["best_step"] in (1, 2, 3)
+
+
+def test_include_init_row_equals_direct_evaluation_and_resume_computes_only_step0(fake_dataset, tmp_path, monkeypatch):
+    from src.neuron_model.spine_generation.evaluation import training_curves as tc
+
+    for kind, make in (("vae", _train_vae), ("mogen", _train_mogen)):
+        sub = tmp_path / kind
+        sub.mkdir()
+        run = make(fake_dataset, sub, steps=3, keep_every=1)
+        kwargs = dict(weights_kinds=("ema",), n_spines=8, batch_size=2, seed=3, n_draws=2, device="cpu", log=lambda *_: None)
+        base = run_curves(run.root, reuse=False, **kwargs)["curves"]
+        calls = []
+        original = tc.evaluate_checkpoint
+        monkeypatch.setattr(tc, "evaluate_checkpoint", lambda *a, **k: (calls.append(k["step"]), original(*a, **k))[1])
+        out = run_curves(run.root, reuse=True, include_init=True, **kwargs)
+        assert calls == [0]  # the evaluated checkpoints are reused, only the init row is computed
+        curves = out["curves"]
+        assert curves["step"].tolist() == [0, 1, 2, 3] and bool(curves.loc[0, "init"]) and curves.loc[0, "checkpoint"] == "init"
+        pd.testing.assert_frame_equal(curves.drop(columns="init").iloc[1:].reset_index(drop=True), base.reset_index(drop=True), check_dtype=False)
+        # direct evaluation of a freshly built model with the same estimator
+        cfg = run.load_config()
+        inputs = tc.build_inputs(kind, cfg, run.root, n_spines=8, batch_size=2, seed=3)
+        direct = tc.evaluate_checkpoint(kind, tc.build_initial_model(kind, cfg, run.root), inputs, cfg, step=0, final_step=3, device=torch.device("cpu"), n_draws=2, seed=3)
+        main = "total_final" if kind == "vae" else "loss"
+        assert curves.loc[0, f"val_{main}"] == direct[f"val_{main}"] and curves.loc[0, f"train_{main}"] == direct[f"train_{main}"]
+        # repeated call identical; trend and best ignore / include step 0 correctly
+        again = run_curves(run.root, reuse=False, include_init=True, **kwargs)["curves"]
+        pd.testing.assert_frame_equal(curves, again, check_exact=True)
+        summary = out["result"]["summary"]["ema"]
+        assert summary["gap_trend"]["n_points"] <= 2  # steps 1..3, second half
+        monkeypatch.setattr(tc, "evaluate_checkpoint", original)
