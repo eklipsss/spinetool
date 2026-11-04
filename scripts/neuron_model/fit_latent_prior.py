@@ -50,11 +50,12 @@ from src.neuron_model.spine_generation.models.spine_vae.latent_prior import (  #
 
 def get_codes(model, cfg, args, split, n, device, out_dir, checkpoint_id, variants):
     path = out_dir / f"codes_{split}.npz"
+    cached = args.codes_path / f"codes_{split}.npz"
     tag = f"{checkpoint_id}|{split}|{n}|{args.seed}|{variants}"
-    if path.exists() and not args.re_encode:
-        data = np.load(path, allow_pickle=False)
+    if cached.exists() and not args.re_encode:
+        data = np.load(cached, allow_pickle=False)
         if str(data["tag"]) == tag:
-            print(f"[prior] reuse {path.name} ({data['mu'].shape[0]} spines)", flush=True)
+            print(f"[prior] reuse {cached} ({data['mu'].shape[0]} spines)", flush=True)
             return data["mu"], data["logvar"]
     index = load_split_index(cfg, split, n, args.seed, manifests=args.manifest, splits=args.splits, path_mode=args.path_mode)
     codes = encode_spines(model, index, cfg["data"], variants=variants, device=device, batch_size=args.batch_size, progress=True)
@@ -78,15 +79,19 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--re-encode", action="store_true")
+    parser.add_argument("--device", help="cpu: keep the GPU free (the flow is fitted on the CPU anyway; cached codes are reused)")
+    parser.add_argument("--out-name", default="latent_prior", help="output folder inside the run (a different name keeps the existing flow_prior.pt)")
+    parser.add_argument("--codes-dir", help="folder of the run with cached codes_*.npz (default: the output folder)")
     parser.add_argument("--manifest", type=Path, nargs="+")
     parser.add_argument("--splits", type=Path)
     parser.add_argument("--path-mode", choices=("relative", "absolute"))
     args = parser.parse_args()
 
-    model, run, cfg, checkpoint_id, device = load_vae_run(args.run, args.checkpoint)
+    model, run, cfg, checkpoint_id, device = load_vae_run(args.run, args.checkpoint, device=args.device)
     variants = args.variants or [int(v) for v in cfg["data"].get("variants", (1, 2, 3, 4))]
-    out_dir = run.root / "latent_prior"
+    out_dir = run.root / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    args.codes_path = run.root / (args.codes_dir or args.out_name)
     mu_tr, lv_tr = get_codes(model, cfg, args, "train", args.n_train, device, out_dir, checkpoint_id, variants)
     mu_va, _ = get_codes(model, cfg, args, "val", args.n_val, device, out_dir, checkpoint_id, variants)
 
@@ -130,6 +135,10 @@ def main() -> None:
                           noise_std=args.flow_noise, seed=args.seed)
     score("flow", flow, flow.sample(m, seed=args.seed))
     report["flow"] = {k: v for k, v in info.items() if k != "history"}
+    from src.neuron_model.spine_generation.models.spine_vae.flow_curves import write_flow_curves
+
+    write_flow_curves(out_dir, info)
+    print(f"[flow] best epoch {info['best_epoch']}, stopped at {info['stopped_epoch']}; curves -> {out_dir / 'flow_curves.png'}", flush=True)
     report["flow"]["config"] = {"layers": args.flow_layers, "hidden": args.flow_hidden, "noise": args.flow_noise}
     for t in (0.7, 0.85):
         report["priors"][f"flow_T{t}"] = {"hole_ratio": hole_ratio(flow.sample(m, temperature=t, seed=args.seed), val)}

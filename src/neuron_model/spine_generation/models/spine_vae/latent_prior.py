@@ -386,6 +386,23 @@ def fit_flow(train: np.ndarray, val: Optional[np.ndarray] = None, *, n_layers: i
     history: List[Dict[str, float]] = []
     best = (math.inf, None, -1)
     gen = torch.Generator().manual_seed(seed)
+
+    # Curves with ONE estimator: eval mode, no noise, a fixed subset of the training codes of the size of the validation set,
+    # the mean NLL per dimension and its standard error over codes. ``train_nll_per_dim`` (epoch mean in training mode with
+    # noise and changing weights) is kept in the log only.
+    n_eval = len(x_val) if x_val is not None else min(len(x_train), 1500)
+    x_train_eval = x_train[torch.as_tensor(np.sort(np.random.default_rng(seed + 7).permutation(len(x_train))[:n_eval]))]
+
+    def _nll_stats(x: torch.Tensor) -> Tuple[float, float]:
+        with torch.no_grad():
+            per_code = -flow.log_prob(x).double() / dim
+        n = len(per_code)
+        return float(per_code.mean()), float(per_code.std(unbiased=True) / math.sqrt(n)) if n > 1 else float("nan")
+
+    flow.eval()
+    init = {"train_eval_nll_per_dim": _nll_stats(x_train_eval)[0]}
+    if x_val is not None:
+        init["val_nll_per_dim"] = _nll_stats(x_val)[0]  # epoch "0": the flow is the fitted Gaussian
     for epoch in range(epochs):
         flow.train()
         perm = torch.randperm(len(x_train), generator=gen)
@@ -403,9 +420,10 @@ def fit_flow(train: np.ndarray, val: Optional[np.ndarray] = None, *, n_layers: i
         sched.step()
         row = {"epoch": epoch, "train_nll_per_dim": total / len(x_train) / dim}
         flow.eval()
+        row["train_eval_nll_per_dim"], row["train_eval_se"] = _nll_stats(x_train_eval)
+        row["lr"] = float(opt.param_groups[0]["lr"])
         if x_val is not None:
-            with torch.no_grad():
-                row["val_nll_per_dim"] = float(-flow.log_prob(x_val).mean()) / dim
+            row["val_nll_per_dim"], row["val_se"] = _nll_stats(x_val)
             score = row["val_nll_per_dim"]
         else:
             score = row["train_nll_per_dim"]
@@ -419,7 +437,8 @@ def fit_flow(train: np.ndarray, val: Optional[np.ndarray] = None, *, n_layers: i
                 log(f"[flow] early stop at epoch {epoch} (best {best[2]})")
             break
     flow.load_state_dict(best[1])
-    return FlowPrior(flow), {"best_epoch": best[2], "best_score_per_dim": best[0], "history": history}
+    return FlowPrior(flow), {"best_epoch": best[2], "best_score_per_dim": best[0], "history": history, "init": init,
+                             "stopped_epoch": len(history) - 1, "patience": patience, "n_eval_codes": int(n_eval)}
 
 
 def nll_per_dim(prior, codes: np.ndarray) -> float:

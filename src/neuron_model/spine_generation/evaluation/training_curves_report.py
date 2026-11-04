@@ -40,7 +40,8 @@ def _all_panels(kind: str, curves: pd.DataFrame) -> List[str]:
     return names[:1] + deltas + names[1:] + ["gap"]
 
 
-def write_png(path: Path, kind: str, curves: pd.DataFrame, logs: Mapping[str, pd.DataFrame], summary: Mapping[str, Any]) -> None:
+def write_png(path: Path, kind: str, curves: pd.DataFrame, logs: Mapping[str, pd.DataFrame], summary: Mapping[str, Any], *,
+              show_train_log: bool = False) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -51,6 +52,7 @@ def write_png(path: Path, kind: str, curves: pd.DataFrame, logs: Mapping[str, pd
     panels = _all_panels(kind, curves)
     ncols = 3 if len(panels) > 4 else 2
     nrows = int(np.ceil(len(panels) / ncols))
+    several_weights = curves["weights"].nunique() > 1  # the suffix names the weights only when two kinds are drawn
     fig, axes = plt.subplots(nrows, ncols, figsize=(5.4 * ncols, 3.6 * nrows), squeeze=False)
     for ax, name in zip(axes.ravel(), panels):
         for which, frame in curves.groupby("weights"):
@@ -60,7 +62,7 @@ def write_png(path: Path, kind: str, curves: pd.DataFrame, logs: Mapping[str, pd
                 main = "total_final" if kind == "vae" else "loss"
                 for split, color, label in (("train", p["series_1"], "train"), ("val", p["series_2"], "validation")):
                     y, se = frame[f"{split}_{main}_{name}"].to_numpy(), frame[f"{split}_{main}_{name}_se"].to_numpy()
-                    ax.plot(frame["step"], y, style, color=color, marker="o", markersize=3, label=f"{label} ({which})")
+                    ax.plot(frame["step"], y, style, color=color, marker="o", markersize=3, label=f"{label} ({which})" if several_weights else label)
                     ax.fill_between(frame["step"], y - BAND * se, y + BAND * se, color=color, alpha=0.18, linewidth=0)
                 ax.axhline(0, color=p["border"], linewidth=1)
                 continue
@@ -71,15 +73,15 @@ def write_png(path: Path, kind: str, curves: pd.DataFrame, logs: Mapping[str, pd
                 ax.fill_between(frame["step"], y - BAND * se, y + BAND * se, color=p["series_3"], alpha=0.18, linewidth=0)
                 ax.axhline(0, color=p["border"], linewidth=1)
                 continue
-            for split, color, label in (("train", p["series_1"], "train, фиксированная выборка"), ("val", p["series_2"], "validation")):
+            for split, color, label in (("train", p["series_1"], "train"), ("val", p["series_2"], "validation")):
                 if f"{split}_{name}" not in frame:
                     continue
                 y, se = frame[f"{split}_{name}"].to_numpy(), frame[f"{split}_{name}_se"].to_numpy()
-                ax.plot(frame["step"], y, style, color=color, marker="o", markersize=3, label=f"{label} ({which})")
+                ax.plot(frame["step"], y, style, color=color, marker="o", markersize=3, label=f"{label} ({which})" if several_weights else label)
                 ax.fill_between(frame["step"], y - BAND * se, y + BAND * se, color=color, alpha=0.18, linewidth=0)
         if name != "gap" and name not in DELTA_TITLES:
             log = logs.get("train_log")
-            if log is not None and name in log:
+            if show_train_log and log is not None and name in log:
                 ax.plot(log["step"], _smooth(log[name].to_numpy(), 5), color=p["series_1"], alpha=0.35, linewidth=1, label="train, бегущее среднее лога (train-режим)")
             inloop = logs.get("val_inloop")
             if inloop is not None and name in inloop:
@@ -131,10 +133,10 @@ function draw(which) {
     } else {
       if (D.train_log && D.train_log[m]) {
         const w = 5, y = D.train_log[m], sm = y.map((v, i) => { let s = 0, n = 0; for (let j = Math.max(0, i - 2); j <= Math.min(y.length - 1, i + 2); j++) if (y[j] !== null) { s += y[j]; n++; } return n ? s / n : null; });
-        traces.push({x: D.train_log.step, y: sm, mode: 'lines', name: 'train: бегущее среднее лога (train-режим)', line: {color: P.series_1 + '66', width: 1.5}, hovertemplate: '%{x}: %{y:.5g}<extra>log</extra>'});
+        traces.push({x: D.train_log.step, y: sm, mode: 'lines', visible: 'legendonly', name: 'train: бегущее среднее лога (train-режим)', line: {color: P.series_1 + '66', width: 1.5}, hovertemplate: '%{x}: %{y:.5g}<extra>log</extra>'});
       }
-      if (rows.length && rows[0]['train_' + m] !== undefined) traces.push(...band(steps, col('train_' + m), col('train_' + m + '_se'), P.series_1, 'train: фиксированная выборка'));
-      if (rows.length && rows[0]['val_' + m] !== undefined) traces.push(...band(steps, col('val_' + m), col('val_' + m + '_se'), P.series_2, 'validation: фиксированная выборка'));
+      if (rows.length && rows[0]['train_' + m] !== undefined) traces.push(...band(steps, col('train_' + m), col('train_' + m + '_se'), P.series_1, 'train'));
+      if (rows.length && rows[0]['val_' + m] !== undefined) traces.push(...band(steps, col('val_' + m), col('val_' + m + '_se'), P.series_2, 'validation'));
       if (D.val_inloop && D.val_inloop[m]) traces.push({x: D.val_inloop.step, y: D.val_inloop[m], mode: 'markers', name: 'validation в цикле (in-loop)', marker: {color: P.reference, symbol: 'diamond', size: 7}});
     }
     const shapes = [];
