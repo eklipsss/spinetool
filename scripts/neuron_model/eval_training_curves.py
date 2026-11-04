@@ -20,6 +20,10 @@ Windows (GPU), after training with train.keep_every=1000 train.checkpoint_every=
 ``--include-init`` adds the step-0 row (the model the run started from: MoGen A = pretrained mouse_mixed, MoGen B / VAE = random
 init of the run's seed); best checkpoint and gap trend ignore it unless it is the best.
 
+Per-batch losses of every checkpoint go to batch_losses.npz; every checkpoint gets PAIRED differences (same batches and draws) to the
+step-0 row (``..._delta_init``) and to the previous checkpoint (``..._delta_prev``) with paired standard errors. A curves.json of the
+first version has no per-batch arrays: its rows are recomputed (``--no-reuse`` / ``--recompute-batches`` forces it).
+
 Writes ``<run>/training_curves/{curves.csv, curves.json, curves.png, curves.html, train_log.csv, val_inloop.csv}``;
 an interrupted evaluation continues from curves.json (same settings), ``--no-reuse`` recomputes everything.
 ``--manifest/--splits/--path-mode`` override the run's data (e.g. on a copy of the cache).
@@ -57,7 +61,9 @@ def main() -> None:
     parser.add_argument("--final-step", type=int, default=None, help="step of the 'final' loss weights (default train.max_steps)")
     parser.add_argument("--steps", type=int, nargs="*", help="only these checkpoint steps")
     parser.add_argument("--device", default=None)
-    parser.add_argument("--no-reuse", action="store_true")
+    parser.add_argument("--no-reuse", "--recompute-batches", action="store_true", dest="no_reuse",
+                        help="recompute every row. Needed for a run evaluated by the first version: it stored no per-batch arrays "
+                        "(batch_losses.npz), which the paired differences delta_init / delta_prev need (rows without arrays are also recomputed automatically)")
     parser.add_argument("--include-init", action="store_true", help="also evaluate the INITIAL model of the run at step 0 (pretrained weights / random init "
                         "of the run's seed) with the same estimator; on an already evaluated run only step 0 is computed")
     parser.add_argument("--manifest", type=Path, nargs="*")

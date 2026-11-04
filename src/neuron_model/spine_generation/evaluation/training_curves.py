@@ -326,8 +326,11 @@ def metric_names(kind: str, rows: Sequence[Mapping[str, Any]]) -> List[str]:
     return [m for m in names if any(f"val_{m}" in r for r in rows)]
 
 
-def evaluate_checkpoint(kind: str, model, inputs: EvalInputs, cfg: Mapping[str, Any], *, step: int, final_step: int, device, n_draws: int, seed: int) -> Dict[str, Any]:
-    """One curves row: val and train-subset estimates of the same function for the loaded model."""
+def evaluate_checkpoint(kind: str, model, inputs: EvalInputs, cfg: Mapping[str, Any], *, step: int, final_step: int, device, n_draws: int, seed: int,
+                        return_arrays: bool = False):
+    """One curves row: val and train-subset estimates of the same function for the loaded model. ``return_arrays``: also
+    the per-batch arrays ``{split: {metric: [n_draws, n_batches], '__sizes': [n_batches]}}`` (for paired differences)."""
+    arrays: Dict[str, Dict[str, np.ndarray]] = {}
     row: Dict[str, Any] = {"step": int(step), "n_val": len(inputs.val_keys), "n_train": len(inputs.train_keys)}
     for split, batches in (("val", inputs.val_batches), ("train", inputs.train_batches)):
         if kind == "vae":
@@ -337,6 +340,7 @@ def evaluate_checkpoint(kind: str, model, inputs: EvalInputs, cfg: Mapping[str, 
             row.update({"kl_weight": result.extra["kl_weight"], "kl_weight_final": result.extra["kl_weight_final"]})
         else:
             result = evaluate_mogen(model, batches, cfg["flow"], device=device, seed=seed, n_draws=n_draws)
+        arrays[split] = {**{n: np.asarray(v) for n, v in result.values.items()}, "__sizes": np.asarray(result.sizes)}
         for name, values in result.values.items():
             s = summarize(values, result.sizes)
             row[f"{split}_{name}"] = s["mean"]
@@ -346,7 +350,65 @@ def evaluate_checkpoint(kind: str, model, inputs: EvalInputs, cfg: Mapping[str, 
         if f"train_{name}" in row:
             row[f"gap_{name}"] = row[f"val_{name}"] - row[f"train_{name}"]
             row[f"gap_{name}_se"] = math.sqrt(row[f"val_{name}_se"] ** 2 + row[f"train_{name}_se"] ** 2)
-    return row
+    return (row, arrays) if return_arrays else row
+
+
+def paired_difference(a: np.ndarray, b: np.ndarray, sizes: np.ndarray) -> Dict[str, float]:
+    """``a - b`` evaluated on the SAME batches (and the same (t, noise) draws): mean and standard error of the batch-wise
+    differences. The batch-to-batch spread of the absolute level cancels, so this is far more precise than
+    ``sqrt(se_a^2 + se_b^2)`` whenever the batch effects are shared. A checkpoint against itself gives exactly 0 +- 0."""
+    return summarize(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64), sizes)
+
+
+PAIRED_KEYS = ("delta_init", "delta_prev")
+
+
+def add_paired_columns(rows: List[Dict[str, Any]], arrays: Mapping[Tuple[str, int], Mapping[str, Mapping[str, np.ndarray]]]) -> None:
+    """Per weights kind, ordered by step: ``{split}_{metric}_delta_init`` (checkpoint minus the step-0 row; NaN without it)
+    and ``..._delta_prev`` (minus the previous checkpoint) with ``_se`` (paired), for train and validation separately, and
+    ``gap_{metric}_delta_init / _delta_prev`` = change of the val - train gap (val and train are different spines, so the gap
+    itself cannot be paired; its change between checkpoints is the difference of two paired changes, errors added in quadrature)."""
+    by_weights: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_weights.setdefault(row["weights"], []).append(row)
+    for which, group in by_weights.items():
+        group.sort(key=lambda r: r["step"])
+        for i, row in enumerate(group):
+            cur = arrays.get((which, int(row["step"])))
+            refs = {"delta_init": arrays.get((which, 0)) if int(row["step"]) > 0 else None, "delta_prev": arrays.get((which, int(group[i - 1]["step"]))) if i > 0 else None}
+            for key, ref in refs.items():
+                for split in ("val", "train"):
+                    names = [n for n in (cur or {}).get(split, {}) if n != "__sizes"]
+                    for name in names:
+                        if ref is None or name not in ref.get(split, {}):
+                            d = {"mean": float("nan"), "se": float("nan")}
+                        else:
+                            d = paired_difference(cur[split][name], ref[split][name], cur[split]["__sizes"])
+                        row[f"{split}_{name}_{key}"] = d["mean"]
+                        row[f"{split}_{name}_{key}_se"] = d["se"]
+                for name in [n[len("val_"):-len("_" + key)] for n in list(row) if n.startswith("val_") and n.endswith("_" + key)]:
+                    if f"train_{name}_{key}" in row:
+                        row[f"gap_{name}_{key}"] = row[f"val_{name}_{key}"] - row[f"train_{name}_{key}"]
+                        row[f"gap_{name}_{key}_se"] = math.sqrt(row[f"val_{name}_{key}_se"] ** 2 + row[f"train_{name}_{key}_se"] ** 2)
+
+
+def save_arrays(path: Path, arrays: Mapping[Tuple[str, int], Mapping[str, Mapping[str, np.ndarray]]]) -> None:
+    """``batch_losses.npz``: key ``<weights>|<step>|<split>|<metric>`` -> ``[n_draws, n_batches]`` (``__sizes``: spines per batch)."""
+    flat = {f"{w}|{step}|{split}|{name}": np.asarray(v) for (w, step), per in arrays.items() for split, d in per.items() for name, v in d.items()}
+    tmp = Path(path).with_name(Path(path).name + ".tmp.npz")
+    np.savez_compressed(tmp, **flat)
+    tmp.replace(path)
+
+
+def load_arrays(path: Path) -> Dict[Tuple[str, int], Dict[str, Dict[str, np.ndarray]]]:
+    out: Dict[Tuple[str, int], Dict[str, Dict[str, np.ndarray]]] = {}
+    if not Path(path).exists():
+        return out
+    with np.load(path) as data:
+        for key in data.files:
+            w, step, split, name = key.split("|", 3)
+            out.setdefault((w, int(step)), {}).setdefault(split, {})[name] = data[key]
+    return out
 
 
 def total_from_components(frame: pd.DataFrame, weights, kl_w: Optional[float]) -> pd.Series:
@@ -419,7 +481,7 @@ def gap_trend(steps: np.ndarray, gap: np.ndarray, gap_se: np.ndarray) -> Dict[st
     return {"slope_per_1000": slope, "slope_se": se, "growing": bool(slope > 2 * se), "n_points": int(len(steps))}
 
 
-def summary_of(kind: str, curves: pd.DataFrame) -> Dict[str, Any]:
+def summary_of(kind: str, curves: pd.DataFrame, arrays: Optional[Mapping[Tuple[str, int], Mapping[str, Mapping[str, np.ndarray]]]] = None) -> Dict[str, Any]:
     """Best validation checkpoint and the overfitting indicator per weight kind."""
     main = "total_final" if kind == "vae" else "loss"
     out: Dict[str, Any] = {"main_metric": main}
@@ -433,6 +495,10 @@ def summary_of(kind: str, curves: pd.DataFrame) -> Dict[str, Any]:
             info["gap_last_se"] = float(frame[f"gap_{main}_se"].iloc[-1])
             trained = frame[frame["step"] > 0]  # the step-0 (init) row is not part of the trend
             info["gap_trend"] = gap_trend(trained["step"].to_numpy(), trained[f"gap_{main}"].to_numpy(), trained[f"gap_{main}_se"].to_numpy())
+        if arrays and (which, info["best_step"]) in arrays and (which, info["last_step"]) in arrays and info["best_step"] != info["last_step"]:
+            a, b = arrays[(which, info["best_step"])], arrays[(which, info["last_step"])]
+            d = {split: paired_difference(a[split][main], b[split][main], a[split]["__sizes"]) for split in ("val", "train") if main in a.get(split, {})}
+            info["best_minus_last"] = {split: {"mean": v["mean"], "se": v["se"]} for split, v in d.items()}
         out[which] = info
     return out
 
@@ -475,12 +541,18 @@ def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spi
 
     settings = {"kind": kind, "n_spines": len(inputs.val_keys), "batch_size": batch_size, "n_draws": n_draws, "seed": seed, "final_step": final_step, "fingerprint": inputs.fingerprint}
     json_path = out_dir / "curves.json"
+    npz_path = out_dir / "batch_losses.npz"
     done: Dict[Tuple[int, str], Dict[str, Any]] = {}
+    arrays: Dict[Tuple[str, int], Dict[str, Dict[str, np.ndarray]]] = {}
     if reuse and json_path.exists():
         previous = json.loads(json_path.read_text(encoding="utf-8"))
+        stored = load_arrays(npz_path)
         if previous.get("settings") == settings:
-            done = {(int(r["step"]), r["weights"]): r for r in previous["rows"]}
-            log(f"[curves] reusing {len(done)} rows of the previous evaluation (same settings)")
+            # a row is reusable only together with its per-batch arrays (curves.json of the first version has none: recomputed)
+            done = {(int(r["step"]), r["weights"]): r for r in previous["rows"] if (r["weights"], int(r["step"])) in stored}
+            arrays = {k: v for k, v in stored.items() if (k[1], k[0]) in done}
+            skipped = len(previous["rows"]) - len(done)
+            log(f"[curves] reusing {len(done)} rows of the previous evaluation (same settings)" + (f"; {skipped} rows without stored per-batch arrays are recomputed" if skipped else ""))
 
     model = build_model(kind, run.root)
     if not cfg["train"].get("ema_decay") and "ema" in weights_kinds:
@@ -492,7 +564,7 @@ def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spi
         if todo:
             init_model = build_initial_model(kind, cfg, run.root).to(device)
             t1 = time.perf_counter()
-            row0 = evaluate_checkpoint(kind, init_model, inputs, cfg, step=0, final_step=final_step, device=device, n_draws=n_draws, seed=seed)
+            row0, arrays0 = evaluate_checkpoint(kind, init_model, inputs, cfg, step=0, final_step=final_step, device=device, n_draws=n_draws, seed=seed, return_arrays=True)
             del init_model
             log(f"[curves] step 0 (init, {'pretrained / run weights' if kind == 'mogen' and cfg['model'].get('init', 'random') != 'random' else 'random init, seed ' + str(cfg['seed'])}) ({time.perf_counter() - t1:.1f} s)")
         for which in weights_kinds:  # at initialisation EMA and raw weights are the same network
@@ -500,7 +572,9 @@ def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spi
                 rows.append(done[(0, which)])
             else:
                 rows.append({**row0, "weights": which, "checkpoint": "init", "init": True})
+                arrays[(which, 0)] = arrays0
         _write_partial(out_dir, settings, rows)
+        save_arrays(npz_path, arrays)
     for step, path in checkpoints:
         if step == 0:
             continue
@@ -516,7 +590,7 @@ def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spi
                 continue
             model.to(device)
             t1 = time.perf_counter()
-            row = evaluate_checkpoint(kind, model, inputs, cfg, step=step, final_step=final_step, device=device, n_draws=n_draws, seed=seed)
+            row, arrays[(which, step)] = evaluate_checkpoint(kind, model, inputs, cfg, step=step, final_step=final_step, device=device, n_draws=n_draws, seed=seed, return_arrays=True)
             row["weights"] = which
             row["checkpoint"] = path.name
             rows.append(row)
@@ -524,13 +598,16 @@ def run_curves(run_root: Path, *, weights_kinds: Sequence[str] = ("ema",), n_spi
             log(f"[curves] step {step:>7} {which:<3} val {row[f'val_{main}']:.5g} +- {row[f'val_{main}_se']:.2g}  train {row[f'train_{main}']:.5g} +- {row[f'train_{main}_se']:.2g}  ({time.perf_counter() - t1:.1f} s)")
         del payload
         _write_partial(out_dir, settings, rows)
+        save_arrays(npz_path, arrays)
+
+    add_paired_columns(rows, arrays)
 
     curves = pd.DataFrame(rows).sort_values(["weights", "step"]).reset_index(drop=True)
     for col in curves.columns:  # rows reused from curves.json carry None for NaN
         if col not in ("weights", "checkpoint", "init"):
             curves[col] = pd.to_numeric(curves[col], errors="coerce")
     logs = read_logs(run.root, kind, cfg, final_step)
-    result = {"settings": settings, "rows": rows, "summary": summary_of(kind, curves), "run": run.experiment_id}
+    result = {"settings": settings, "rows": rows, "summary": summary_of(kind, curves, arrays), "run": run.experiment_id}
     curves.to_csv(out_dir / "curves.csv", index=False)
     for name, frame in logs.items():
         frame.to_csv(out_dir / f"{name}.csv", index=False)

@@ -183,7 +183,8 @@ def test_include_init_row_equals_direct_evaluation_and_resume_computes_only_step
         assert calls == [0]  # the evaluated checkpoints are reused, only the init row is computed
         curves = out["curves"]
         assert curves["step"].tolist() == [0, 1, 2, 3] and bool(curves.loc[0, "init"]) and curves.loc[0, "checkpoint"] == "init"
-        pd.testing.assert_frame_equal(curves.drop(columns="init").iloc[1:].reset_index(drop=True), base.reset_index(drop=True), check_dtype=False)
+        no_delta = lambda f: f.drop(columns=[c for c in f.columns if "delta" in c or c == "init"])  # deltas to init exist only with the init row
+        pd.testing.assert_frame_equal(no_delta(curves).iloc[1:].reset_index(drop=True), no_delta(base).reset_index(drop=True), check_dtype=False)
         # direct evaluation of a freshly built model with the same estimator
         cfg = run.load_config()
         inputs = tc.build_inputs(kind, cfg, run.root, n_spines=8, batch_size=2, seed=3)
@@ -196,3 +197,62 @@ def test_include_init_row_equals_direct_evaluation_and_resume_computes_only_step
         summary = out["result"]["summary"]["ema"]
         assert summary["gap_trend"]["n_points"] <= 2  # steps 1..3, second half
         monkeypatch.setattr(tc, "evaluate_checkpoint", original)
+
+
+def test_paired_difference_properties():
+    from src.neuron_model.spine_generation.evaluation.training_curves import paired_difference
+
+    rng = np.random.default_rng(0)
+    sizes = np.full(40, 8)
+    shared = rng.normal(0, 1.0, size=(2, 40))            # batch effects shared by both checkpoints
+    a = 1.0 + shared + rng.normal(0, 0.02, size=(2, 40))
+    b = 1.1 + shared + rng.normal(0, 0.02, size=(2, 40))
+    d = paired_difference(a, b, sizes)
+    assert d["mean"] == pytest.approx(-0.1, abs=0.02)
+    unpaired = float(np.hypot(summarize(a, sizes)["se"], summarize(b, sizes)["se"]))
+    assert d["se"] < unpaired / 10                       # the shared batch effect cancels
+    same = paired_difference(a, a, sizes)
+    assert same["mean"] == 0.0 and same["se"] == 0.0
+
+
+def test_paired_columns_arrays_and_old_json_recompute(fake_dataset, tmp_path):
+    from src.neuron_model.spine_generation.evaluation import training_curves as tc
+
+    for kind, make in (("vae", _train_vae), ("mogen", _train_mogen)):
+        sub = tmp_path / kind
+        sub.mkdir()
+        run = make(fake_dataset, sub, steps=3, keep_every=1)
+        kwargs = dict(weights_kinds=("ema",), n_spines=8, batch_size=2, seed=3, n_draws=2, device="cpu", log=lambda *_: None, include_init=True)
+        out = run_curves(run.root, reuse=False, **kwargs)
+        curves, main = out["curves"].sort_values("step").reset_index(drop=True), "total_final" if kind == "vae" else "loss"
+        npz = out["out_dir"] / "batch_losses.npz"
+        stored = tc.load_arrays(npz)
+        assert sorted(s for (_, s) in stored) == [0, 1, 2, 3]
+        assert stored[("ema", 3)]["val"]["__sizes"].sum() == curves["n_val"].iloc[0]
+        for key in ("delta_init", "delta_prev"):
+            for split in ("val", "train"):
+                assert f"{split}_{main}_{key}" in curves and f"{split}_{main}_{key}_se" in curves
+        assert np.isnan(curves.loc[0, f"val_{main}_delta_init"]) and np.isnan(curves.loc[0, f"val_{main}_delta_prev"])
+        # delta to the init row equals the difference of the absolute means (the mean of paired differences is the difference of means)
+        assert curves.loc[2, f"val_{main}_delta_init"] == pytest.approx(curves.loc[2, f"val_{main}"] - curves.loc[0, f"val_{main}"], abs=1e-9)
+        assert curves.loc[2, f"val_{main}_delta_prev"] == pytest.approx(curves.loc[2, f"val_{main}"] - curves.loc[1, f"val_{main}"], abs=1e-9)
+        # a model equal to the init gives delta 0 +- 0
+        w = "ema"
+        a0 = stored[(w, 0)]
+        assert tc.paired_difference(a0["val"][main], a0["val"][main], a0["val"]["__sizes"])["se"] == 0.0
+        # first-version curves.json (no npz): rows are recomputed, not reused
+        npz.unlink()
+        calls = []
+        original = tc.evaluate_checkpoint
+        tc.evaluate_checkpoint = lambda *a, **k: (calls.append(k["step"]), original(*a, **k))[1]
+        try:
+            again = run_curves(run.root, reuse=True, **kwargs)["curves"].sort_values("step").reset_index(drop=True)
+        finally:
+            tc.evaluate_checkpoint = original
+        assert sorted(calls) == [0, 1, 2, 3]
+        pd.testing.assert_frame_equal(curves, again, check_exact=True)
+        assert "best_minus_last" in out["result"]["summary"][w] or out["result"]["summary"][w]["best_step"] == out["result"]["summary"][w]["last_step"]
+        # report panels exist
+        write_html(out["out_dir"] / "curves.html", kind, curves, out["logs"], out["result"]["summary"], out["cfg"], "x", out["result"]["settings"])
+        assert "plot_delta_init" in (out["out_dir"] / "curves.html").read_text(encoding="utf-8")
+        write_png(out["out_dir"] / "curves.png", kind, curves, out["logs"], out["result"]["summary"])
