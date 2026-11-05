@@ -49,11 +49,36 @@ def cached_codes(model, cfg, args, split, n, device, checkpoint_id, variants, ou
             if str(data["tag"]) == tag:
                 print(f"[tune] reuse {path} ({data['mu'].shape[0]} spines)", flush=True)
                 return data["mu"], data["logvar"]
-    index = load_split_index(cfg, split, n, args.seed, manifests=args.manifest, splits=args.splits, path_mode=args.path_mode)
+    if split == "test" and args.test_splits:
+        index = untouched_test_index(cfg, args, n)
+    else:
+        index = load_split_index(cfg, split, n, args.seed, manifests=args.manifest, splits=args.splits, path_mode=args.path_mode)
     print(f"[tune] encoding {len(index)} {split} spines", flush=True)
     codes = encode_spines(model, index, cfg["data"], variants=variants, device=device, batch_size=args.batch_size, progress=True)
     np.savez(out_dir / f"codes_{split}.npz", mu=codes["mu"], logvar=codes["logvar"], keys=np.array(codes["keys"]), tag=np.array(tag))
     return codes["mu"], codes["logvar"]
+
+
+def untouched_test_index(cfg, args, n):
+    """Test spines of ``--test-splits`` (e.g. splits_v1) whose neurons are NOT in ``--splits`` (the split the VAE and every earlier
+    comparison used): neurons that no model, selection or evaluation has touched."""
+    from src.neuron_model.spine_generation.data.index import load_spine_index
+    from src.neuron_model.spine_generation.data.splits import load_splits
+    from src.neuron_model.spine_generation.experiment.config import resolve_path
+
+    data = cfg["data"]
+    manifests = args.manifest or [resolve_path(p) for p in data["manifests"]]
+    index = load_spine_index(manifests, path_mode=args.path_mode or data.get("path_mode", "relative"), check_files=())
+    dev = load_splits(args.splits or resolve_path(data["splits"]))
+    dev_groups = set(dev["group_id"])
+    index = index.with_split(load_splits(args.test_splits), "test", drop_unassigned=True)
+    frame = index.frame[~index.frame["group_id"].isin(dev_groups)]
+    if len(frame) == 0:
+        raise SystemExit("no untouched test spines (every test neuron is in the VAE split)")
+    print(f"[tune] untouched test: {len(frame)} spines of {frame['group_id'].nunique()} neurons "
+          f"(test of {Path(args.test_splits).name} minus the {len(dev_groups)} neurons of the VAE split)", flush=True)
+    order = np.random.default_rng(args.seed).permutation(len(frame))[:n]
+    return index.subset(frame["spine_key"].iloc[order])
 
 
 def nll_stats(prior, codes):
@@ -84,7 +109,8 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--manifest", type=Path, nargs="+")
-    ap.add_argument("--splits", type=Path)
+    ap.add_argument("--splits", type=Path, help="the split of the VAE run (default: from its config)")
+    ap.add_argument("--test-splits", type=Path, help="split file whose TEST neurons (minus the neurons of --splits) are the untouched test set, e.g. splits_v1.parquet")
     ap.add_argument("--path-mode", choices=("relative", "absolute"))
     args = ap.parse_args()
 
