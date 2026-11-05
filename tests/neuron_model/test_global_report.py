@@ -233,3 +233,23 @@ def test_consistency_between_minnie65_and_h01():
     s = out["summary"].set_index("factor").loc["cell_type_binary"]
     assert s["n_metrics"] == len(METRICS) and s["n_consistent"] == 1 and s["n_h01_only"] == 1
     assert -1 <= s["spearman_ci_low"] <= s["spearman"] <= s["spearman_ci_high"] <= 1
+
+
+def test_attached_only_filter(tmp_path):
+    from src.neuron_model.global_report.datasets import attached_spine_flags, keep_attached_spines
+
+    frame = _build()
+    h = frame[frame["dataset"] == "h01"].copy()
+    raw_ids = h["neuron_id"].str.replace("h01:", "", regex=False)
+    bs = pd.DataFrame({"neuron_id": raw_ids, "limb_id": [f"limb_{int(l):03d}" for l in h["limb_id"]], "original_branch_id": h["branch_id"].astype(int),
+                       "spine_id": h["spine_id"], "dist_perp_minus_radius": 50.0, "radius_at_s": 300.0,
+                       "position_outlier": h["cell_type_binary"].eq("inhibitory") & (h["spine_id"].str[1:].astype(int) % 2 == 0),
+                       "projects_to_end": False})
+    bs.loc[bs.index[:3], "projects_to_end"] = True
+    bs.to_parquet(tmp_path / "branch_spines.parquet")
+    flags = attached_spine_flags(tmp_path, "h01")
+    kept, summary = keep_attached_spines(h, flags)
+    s = summary.set_index("cell_type_binary")
+    assert abs(s.loc["inhibitory", "share_kept"] - 0.48) < 0.03       # every second inhibitory spine is an outlier
+    assert s.loc["excitatory", "share_kept"] > 0.99 and len(kept) == int(summary["share_kept"].mul(summary["n_spines"]).round().sum())
+    assert s.loc["excitatory", "share_undecided"] > 0                     # the 3 spines projected beyond the end

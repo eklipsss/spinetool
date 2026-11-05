@@ -11,7 +11,7 @@ unit of inference: a neuron in Minnie65 / H01, a branch FOLDER in LabID, where n
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -219,6 +219,45 @@ def load_branch_groups(kind: str, branches_root: Path, metadata_root: Path, *, c
     meta = load_metadata_tables(Path(metadata_root), compartment_table)
     return tidy_branch_groups(branches, spines, kind, meta, min_branches=min_branches if min_branches is not None else (1 if kind == "labid" else 10),
                               min_pairs=min_pairs)
+
+
+def attached_spine_flags(branches_root: Path, kind: str) -> pd.DataFrame:
+    """Per spine of the branch preprocessing: is its attachment centre ON the trunk surface?
+
+    ``position_outlier`` of ``branch_spines.parquet``: the centre lies further than max(2 r, 400 nm) outside the trunk or deeper
+    than 0.5 r inside. In H01 ~21 % of the spines are outliers, many because only the HEAD is segmented and the neck stays in
+    the trunk mesh (CLAUDE.md, H01 section): their attachment metrics then describe the head-neck junction. Keys as in the
+    tidy spine frame (``neuron_id`` = ``<dataset>:<raw id>``, numeric limb / branch, string spine id)."""
+    import pyarrow.parquet as pq
+
+    kind = dataset_kind(kind)
+    path = Path(branches_root) / "branch_spines.parquet"
+    names = set(pq.read_schema(path).names)
+    cols = [c for c in ("neuron_id", "limb_id", "original_branch_id", "spine_id", "position_outlier", "projects_to_end",
+                        "dist_perp_minus_radius", "radius_at_s") if c in names]
+    b = pq.read_table(path, columns=cols).to_pandas()
+    out = pd.DataFrame({"neuron_id": kind + ":" + b["neuron_id"].astype(str), "limb_id": _limb_number(b["limb_id"]),
+                        "branch_id": pd.to_numeric(b["original_branch_id"], errors="coerce"), "spine_id": b["spine_id"].astype(str)})
+    measured = b["dist_perp_minus_radius"].notna() if "dist_perp_minus_radius" in b.columns else pd.Series(True, index=b.index)
+    out["attached"] = (measured & ~b["position_outlier"].fillna(False).astype(bool)).astype(object)
+    if "projects_to_end" in b.columns:     # beyond the end of the centre line: offset not measurable, not evidence of a lost neck
+        out.loc[b["projects_to_end"].fillna(False).astype(bool).to_numpy(), "attached"] = None
+    return out.drop_duplicates(["neuron_id", "limb_id", "branch_id", "spine_id"], keep="last")
+
+
+def keep_attached_spines(spines: pd.DataFrame, flags: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Spines whose attachment centre is on the trunk surface (``attached`` True); spines without a decision (no branch row,
+    end of the centre line) are dropped too. Returns (kept spines, per dataset x cell type: share kept)."""
+    keys = ["neuron_id", "limb_id", "branch_id", "spine_id"]
+    f = spines.copy()
+    f["spine_id"] = f["spine_id"].astype(str)
+    f = f.merge(flags[keys + ["attached"]], on=keys, how="left")
+    summary = (f.assign(cell_type_binary=f["cell_type_binary"].fillna("unknown"), kept=f["attached"].eq(True),
+                        undecided=f["attached"].isna())
+               .groupby(["dataset", "cell_type_binary"]).agg(n_spines=("kept", "size"), share_kept=("kept", "mean"),
+                                                            share_undecided=("undecided", "mean")).reset_index())
+    kept = f[f["attached"].eq(True)].drop(columns=["attached"]).reset_index(drop=True)
+    return kept, summary
 
 
 def _counts(frame: pd.DataFrame, by: Sequence[str], unit_col: str = "unit_id") -> pd.DataFrame:

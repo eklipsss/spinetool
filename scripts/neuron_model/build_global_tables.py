@@ -30,11 +30,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.neuron_model.branch_statistics import ALL_METRICS, METRIC_INFO  # noqa: E402
-from src.neuron_model.global_report.datasets import dataset_inventory, load_branch_groups, load_spine_frame  # noqa: E402
+from src.neuron_model.global_report.datasets import (attached_spine_flags, dataset_inventory, keep_attached_spines,  # noqa: E402
+                                                     load_branch_groups, load_spine_frame)
 from src.neuron_model.global_report.consistency import consistency  # noqa: E402
 from src.neuron_model.global_report.descriptive import summarize_metrics  # noqa: E402
 from src.neuron_model.global_report.factors import availability_matrix  # noqa: E402
 from src.neuron_model.global_report.significance import run_comparisons, save_tables  # noqa: E402
+from src.neuron_model.metadata import dataset_kind  # noqa: E402
 from src.neuron_model.spine_morphometrics import SCALAR_METRICS  # noqa: E402
 
 
@@ -53,6 +55,10 @@ def main() -> None:
     ap.add_argument("--compartment-table", nargs="*", help="<dataset>=<limb compartments parquet> instead of the default")
     ap.add_argument("--from-run", type=Path, help="earlier global-tables folder: take --spines / --branches / --compartment-table from its "
                     "run_info.json (arguments given explicitly win)")
+    ap.add_argument("--attached-only", action="store_true",
+                    help="SENSITIVITY: spine level only with spines whose attachment centre lies on the trunk surface (not "
+                         "position_outlier in branch_spines.parquet of --branches), for every dataset that has branch tables; "
+                         "H01 head-only spines (neck left in the trunk) are removed. Output folder suffix _attached-only")
     ap.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
     ap.add_argument("--min-neurons", type=int, default=10)
     ap.add_argument("--min-spines", type=int, default=20)
@@ -70,13 +76,21 @@ def main() -> None:
         print(f"from {args.from_run}: spines {args.spines}, branches {args.branches}, compartments {args.compartment_table}", flush=True)
     t0 = time.time()
     comp = _pairs(args.compartment_table)
-    out = args.out or REPO_ROOT / "runs/analysis/neuron-model" / f"{time.strftime('%Y-%m-%d_%H%M%S')}_global-tables"
+    out = args.out or REPO_ROOT / "runs/analysis/neuron-model" / (f"{time.strftime('%Y-%m-%d_%H%M%S')}_global-tables" + ("_attached-only" if args.attached_only else ""))
     spines = pd.concat([load_spine_frame(k, p, args.metadata_root, compartment_table=comp.get(k), metrics=list(SCALAR_METRICS))
                         for k, p in _pairs(args.spines).items()], ignore_index=True) if args.spines else None
     spine_tables = _pairs(args.spines)
     groups = pd.concat([load_branch_groups(k, p, args.metadata_root, compartment_table=comp.get(k), morphometrics_table=spine_tables.get(k))
                         for k, p in _pairs(args.branches).items()], ignore_index=True) if args.branches else None
     tables = {}
+    if spines is not None and args.attached_only:
+        branch_roots = _pairs(args.branches)
+        flags = pd.concat([attached_spine_flags(p, k) for k, p in branch_roots.items()], ignore_index=True)
+        spines = spines[spines["dataset"].isin([dataset_kind(k) for k in branch_roots])]
+        spines, kept = keep_attached_spines(spines, flags)
+        tables["attached_only_filter"] = kept
+        print("[global] attached-only filter (share of spines kept):")
+        print(kept.to_string(index=False), flush=True)
     ms = {"default": args.min_spines, "labid": args.min_spines_labid}
     if spines is not None:
         tables.update({f"inventory_{k}": v for k, v in dataset_inventory(spines).items()})
@@ -110,7 +124,7 @@ def main() -> None:
     (out / "run_info.json").write_text(json.dumps({"spines": {k: str(v) for k, v in _pairs(args.spines).items()},
         "branches": {k: str(v) for k, v in _pairs(args.branches).items()}, "compartment_tables": {k: str(v) for k, v in comp.items()},
         "min_neurons": args.min_neurons, "min_spines": args.min_spines, "min_spines_labid": args.min_spines_labid, "n_permutations": args.n_permutations,
-        "n_boot_consistency": args.n_boot_consistency,
+        "n_boot_consistency": args.n_boot_consistency, "attached_only": bool(args.attached_only),
         "created": time.strftime("%Y-%m-%d %H:%M")}, indent=2), encoding="utf-8")
     print(f"-> {out} ({time.time() - t0:.0f} s)")
 
