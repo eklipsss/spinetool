@@ -63,16 +63,38 @@ def control_poisson(spine: Mapping[str, Any], *, k_normal: int, poisson: Mapping
     return _reports(raw, postprocess_cfg=postprocess_cfg, bbox=None, check_self_intersections=check_self_intersections)
 
 
+def banded_sdf(reference, grid, margin_voxels: float = 3.0):
+    """Exact SDF of ``reference`` inside its own box + ``margin_voxels`` grid steps, distance to that box outside.
+
+    The spine fills ~1 % of the frozen bbox; the exact distance + winding number at all 128^3 nodes took minutes per spine.
+    Outside the padded box the true SDF is positive and >= the distance to the box (> margin), so no grid edge with a sign
+    change is affected and Marching Cubes returns the same surface."""
+    from ...spine_sampling import signed_distance
+
+    step = (np.asarray(grid.high, float) - np.asarray(grid.low, float)) / (int(grid.resolution) - 1)
+    pad = margin_voxels * float(step.max())
+    lo, hi = np.asarray(reference.bounds[0], float) - pad, np.asarray(reference.bounds[1], float) + pad
+
+    def fn(q: np.ndarray) -> np.ndarray:
+        q = np.asarray(q, float)
+        out = np.linalg.norm(np.maximum(np.maximum(lo - q, q - hi), 0.0), axis=1) + pad
+        inside = np.all((q >= lo) & (q <= hi), axis=1)
+        if inside.any():
+            out[inside] = signed_distance(reference, q[inside])[0]
+        return out
+
+    return fn
+
+
 def control_mc(spine: Mapping[str, Any], *, bbox_low: Sequence[float], bbox_high: Sequence[float], resolution: int,
                postprocess_cfg=None, chunk_size: int = 262_144, check_self_intersections: bool = False) -> Dict[str, Any]:
     """Exact signed distance of the real mesh on the same frozen-bbox grid the VAE is decoded on."""
     from ...spine_geometry import load_trimesh
-    from ...spine_sampling import signed_distance
     from ..reconstruction.marching_cubes import GridSpec, sdf_to_mesh
 
     reference = load_trimesh(spine["local_sealed_mesh_path"], process=False)
     grid = GridSpec(tuple(bbox_low), tuple(bbox_high), int(resolution))
-    raw, _, _ = sdf_to_mesh(lambda q: signed_distance(reference, q)[0], grid, chunk_size=chunk_size)
+    raw, _, _ = sdf_to_mesh(banded_sdf(reference, grid), grid, chunk_size=chunk_size)
     return _reports(raw, postprocess_cfg=postprocess_cfg, bbox=(tuple(bbox_low), tuple(bbox_high)),
                     check_self_intersections=check_self_intersections)
 

@@ -64,6 +64,19 @@ def test_controls_write_generator_layout_readable_by_evaluation(tmp_path):
         assert meta["model"] == f"real_{control}" and meta["spine_key"] == "k0"
 
 
+def test_banded_sdf_gives_the_same_marching_cubes_mesh(tmp_path):
+    from src.neuron_model.spine_generation.evaluation.real_controls import banded_sdf
+    from src.neuron_model.spine_generation.reconstruction.marching_cubes import GridSpec, sdf_to_mesh
+    from src.neuron_model.spine_sampling import signed_distance
+
+    mesh = _sphere(tmp_path / "s.off", radius=150.0)
+    grid = GridSpec((-1200.0, -300.0, -900.0), (1300.0, 1800.0, 1000.0), 40)
+    full, _, v_full = sdf_to_mesh(lambda q: signed_distance(mesh, q)[0], grid)
+    band, _, v_band = sdf_to_mesh(banded_sdf(mesh, grid), grid)
+    assert np.array_equal(np.sign(v_full), np.sign(v_band))
+    assert np.allclose(np.sort(full.vertices, axis=0), np.sort(band.vertices, axis=0))
+
+
 def test_failed_control_is_a_row_not_a_crash(tmp_path):
     from src.neuron_model.spine_generation.evaluation.real_controls import run_control
 
