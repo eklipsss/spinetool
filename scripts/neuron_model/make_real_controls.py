@@ -4,7 +4,7 @@
         --manifest cache\\manifest_minnie65_meta.parquet --path-mode absolute \
         --splits data\\processed\\neuron-model\\splits\\splits_dev_100n_untouched_test.parquet \
         --vae-run runs\\training\\neuron-model\\2026-10-19_003408_vae-dev-reg0-cos \
-        --controls asis poisson mc --n-samples 1000 --seeds 1 2 3 --workers 16
+        --controls asis poisson mc --n-samples 200 --seeds 1 --workers 8
 
 Writes ``runs/analysis/neuron-model/<date>_real-controls/<control>/seed_<s>/sample_<i>/...`` (generator layout) and
 ``controls.csv`` (which real spine is behind which sample). Then evaluate them exactly like the generators, on the same split:
@@ -93,10 +93,6 @@ def main() -> None:
         mc = load_config(mc_path)
         kwargs["mc"] = {"bbox_low": list(bbox.low), "bbox_high": list(bbox.high), "resolution": int(args.resolution),
                         "postprocess_cfg": dict(mc["postprocess"]), "chunk_size": int(mc.get("chunk_size", 262_144)), "check_self_intersections": check}
-    # the as-is control keeps the mesh as it is; postprocessing it like the others (small components) is the fair choice
-    if "asis" in kwargs and "poisson" in kwargs:
-        kwargs["asis"]["postprocess_cfg"] = kwargs["poisson"]["postprocess_cfg"]
-
     out = args.out or resolve_path(Path("runs/analysis/neuron-model") / f"{pd.Timestamp.now():%Y-%m-%d_%H%M%S}_real-controls")
     out.mkdir(parents=True, exist_ok=True)
     jobs = []

@@ -44,10 +44,16 @@ def _reports(raw, *, postprocess_cfg: Optional[Mapping[str, Any]], bbox, check_s
 
 
 def control_asis(spine: Mapping[str, Any], *, postprocess_cfg=None, check_self_intersections: bool = False) -> Dict[str, Any]:
+    """The real mesh unchanged, also as the 'postprocessed' mesh: postprocessing (merge_vertices) glued coincident vertices of a
+    sealed real mesh and made it non-manifold / non-watertight (Windows probe, 1 of 5), which is not what this control is
+    about. ``postprocess_cfg`` is accepted and ignored (old job configs)."""
+    from ..reconstruction.mesh_validation import validate_mesh
     from ...spine_geometry import load_trimesh
 
     mesh = load_trimesh(spine["local_sealed_mesh_path"], process=False)
-    return _reports(mesh, postprocess_cfg=postprocess_cfg, bbox=None, check_self_intersections=check_self_intersections)
+    report = validate_mesh(mesh, bbox=None, check_self_intersections=check_self_intersections)
+    return {"mesh_raw": mesh, "validation_raw": report, "mesh_postprocessed": mesh, "validation_postprocessed": dict(report),
+            "postprocess_changes": {"skipped": "asis control: the real mesh as it is"}}
 
 
 def control_poisson(spine: Mapping[str, Any], *, k_normal: int, poisson: Mapping[str, Any], postprocess_cfg=None, n_points: int = 8192,
