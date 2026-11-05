@@ -172,28 +172,47 @@ def median_heuristic_sigma(x: np.ndarray, y: np.ndarray, max_points: int = 2000,
     return sigma if sigma > 0 else 1.0
 
 
-def rbf_mmd2(x: np.ndarray, y: np.ndarray, *, sigma: Optional[float] = None, unbiased: bool = True) -> Tuple[float, float]:
+MMD_MAX_REFERENCE = 15_000   # larger sets are subsampled once (fixed seed): same subset for every model compared
+
+
+def _kernel_sum(x: np.ndarray, y: np.ndarray, gamma: float, chunk: int = 2048) -> float:
+    """sum_ij exp(-gamma ||x_i - y_j||^2) without the full [n, m] matrix (blocks of ``chunk`` rows of x)."""
+    total = 0.0
+    for i in range(0, len(x), chunk):
+        total += float(np.exp(-gamma * _squared_distances(x[i:i + chunk], y)).sum())
+    return total
+
+
+def rbf_mmd2(x: np.ndarray, y: np.ndarray, *, sigma: Optional[float] = None, unbiased: bool = True,
+             max_reference: Optional[int] = MMD_MAX_REFERENCE, seed: int = 0) -> Tuple[float, float]:
     """MMD^2 with a Gaussian kernel ``exp(-||a-b||^2 / (2 sigma^2))``; returns ``(mmd2, sigma)``.
 
     Unbiased U-statistic by default (can be slightly negative for equal distributions);
     ``sigma=None`` -> median heuristic on the pooled sample. Compare models with ONE fixed
     sigma (pass it explicitly), otherwise the scale of the kernel differs per model.
+    A set larger than ``max_reference`` (the real reference: 69 520 spines of the untouched test split would need a 36 GB
+    matrix) is replaced by a seeded random subset of that size, identical for every model; the kernel sums are computed
+    in blocks, so memory is O(block x n).
     """
     x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    if max_reference is not None:
+        if len(x) > max_reference:
+            x = x[np.sort(np.random.default_rng(seed).choice(len(x), max_reference, replace=False))]
+        if len(y) > max_reference:
+            y = y[np.sort(np.random.default_rng(seed + 1).choice(len(y), max_reference, replace=False))]
     sigma = median_heuristic_sigma(x, y) if sigma is None else float(sigma)
     gamma = 1.0 / (2.0 * sigma**2)
-    k_xx = np.exp(-gamma * _squared_distances(x, x))
-    k_yy = np.exp(-gamma * _squared_distances(y, y))
-    k_xy = np.exp(-gamma * _squared_distances(x, y))
     n, m = len(x), len(y)
+    s_xx, s_yy, s_xy = _kernel_sum(x, x, gamma), _kernel_sum(y, y, gamma), _kernel_sum(x, y, gamma)
     if unbiased:
         if n < 2 or m < 2:
             raise ValueError("unbiased MMD needs at least 2 samples per set")
-        term_xx = (k_xx.sum() - np.trace(k_xx)) / (n * (n - 1))
-        term_yy = (k_yy.sum() - np.trace(k_yy)) / (m * (m - 1))
+        # the diagonal of k_xx / k_yy is exp(0) = 1
+        term_xx = (s_xx - n) / (n * (n - 1))
+        term_yy = (s_yy - m) / (m * (m - 1))
     else:
-        term_xx, term_yy = k_xx.mean(), k_yy.mean()
-    return float(term_xx + term_yy - 2.0 * k_xy.mean()), sigma
+        term_xx, term_yy = s_xx / (n * n), s_yy / (m * m)
+    return float(term_xx + term_yy - 2.0 * s_xy / (n * m)), sigma
 
 
 def mmd_permutation_pvalue(x: np.ndarray, y: np.ndarray, *, sigma: float, n_permutations: int = 200, seed: int = 0) -> float:
