@@ -120,6 +120,8 @@ def main() -> None:
     parser.add_argument("--fit-n", type=int, default=2000)
     parser.add_argument("--gmm-components", type=int, default=1, help="--prior data: 1 = one full-covariance Gaussian")
     parser.add_argument("--resolution", type=int, help="marching-cubes grid (default: resolution_final of the reconstruction config, 256)")
+    parser.add_argument("--out-name", help="output folder inside the run instead of the default meshes_* name (e.g. meshes_flow_prior_r256: "
+                        "another grid resolution must not overwrite the evaluated seed_<s> of the default folder)")
     parser.add_argument("--no-postprocess", action="store_true")
     parser.add_argument("--crop-to-spine", action="store_true", help="reconstruction mode, DIAGNOSTIC: extract the mesh only in the box of the real spine (+ --crop-margin) instead of the frozen train bbox. "
                         "The decoder is supervised only inside the box of its own spine; outside it is unconstrained and Marching Cubes returns thousands of fragments there")
@@ -173,7 +175,11 @@ def main() -> None:
     else:
         z_all, keys, real_clouds = _reconstruction_latents(model, args, cfg, device)
         out_root = run.root / ("meshes_reconstruction_crop" if args.crop_to_spine else "meshes_reconstruction")
+    if args.out_name:
+        out_root = run.root / args.out_name
     tag = f"seed_{args.seed}"
+    if (out_root / tag).exists():
+        parser.error(f"{out_root / tag} already exists; choose another --seed or --out-name")
     writer = SampleWriter(out_root)
     print(f"{args.mode}: {len(z_all)} samples, grid {resolution}^3, checkpoint {checkpoint_id} -> {out_root / tag}", flush=True)
 
