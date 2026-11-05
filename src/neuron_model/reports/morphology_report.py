@@ -86,7 +86,6 @@ def build_payload(folder: Path) -> Dict[str, Any]:
     info0 = json.loads((folder / "run_info.json").read_text(encoding="utf-8")) if (folder / "run_info.json").exists() else {}
     METRIC_INFO_, ORDER, _texts = _profile(info0)
     binary = _read(folder, "cell_type_binary")
-    within = _read(folder, "cell_type_binary_within_compartment")
     comp = _read(folder, "compartment")
     pairs = _read(folder, "cell_type")
     omni = _read(folder, "cell_type_omnibus")
@@ -98,7 +97,7 @@ def build_payload(folder: Path) -> Dict[str, Any]:
     metrics = [m for m in ORDER if m in METRIC_INFO_ and m in tested and (med.empty or m in med.columns)]
     metric_meta = [{"id": m, "abs": METRIC_INFO_[m].get("diff") == "abs", **{k: METRIC_INFO_[m][k] for k in ("name", "unit", "factor", "about")}} for m in metrics]
 
-    # ---- overview: binary (all, within compartments), compartment pairs
+    # ---- overview: binary (all), compartment pairs
     columns: List[Dict[str, Any]] = []
     cells: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -114,9 +113,6 @@ def build_payload(folder: Path) -> Dict[str, Any]:
 
     if not binary.empty:
         add_column("binary_all", "Тормозные / возбуждающие<br>все " + _texts["unit_word"], "binary", binary, "rel_diff_a_vs_b")
-    if not within.empty:
-        for c in ("basal", "uncertain", "apical"):
-            add_column(f"binary_{c}", f"Тормозные / возбуждающие<br>только {COMPARTMENT_RU[c]}", "binary", within[within["compartment"] == c], "rel_diff_a_vs_b")
     if not comp.empty:
         for (a, b), rows in comp.groupby(["a", "b"], sort=False):
             add_column(f"comp_{a}_{b}", f"{COMPARTMENT_RU.get(a, a).capitalize()} / {COMPARTMENT_RU.get(b, b)}<br>внутри нейрона", "compartment", rows, "median_paired_rel_diff")
@@ -178,7 +174,7 @@ def build_payload(folder: Path) -> Dict[str, Any]:
     # neurons of each binary type that have at least one limb with a known compartment (inhibitory: none in Minnie65)
     with_comp = cmed.drop_duplicates("neuron_id")["cell_type_binary"].value_counts().to_dict() if not cmed.empty else {}
     n_sig = {name: (int(t["significant"].sum()) if "significant" in t.columns else 0, int(t["p"].notna().sum()) if "p" in t.columns else 0)
-             for name, t in (("binary", binary), ("within", within), ("compartment", comp), ("types", pairs), ("omnibus", omni))}
+             for name, t in (("binary", binary), ("compartment", comp), ("types", pairs), ("omnibus", omni))}
     return {"metrics": metric_meta, "columns": columns, "cells": cells, "types": type_info, "matrices": matrices, "omnibus": omnibus,
             "dist": dist, "metric_info": METRIC_INFO_, "compartment_ru": COMPARTMENT_RU, "binary_ru": BINARY_RU, "info": info, "counts_binary": counts_binary, "with_compartment": with_comp, "n_sig": n_sig}
 
@@ -260,7 +256,7 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
     body.append(section("Сводная карта", "Строки — морфометрики, столбцы — сравнения. Цвет — относительная разность медиан (первая группа к второй), серый — различие не значимо.",
                         card("Относительная разность медиан, %", '<div id="overview" class="plot" style="height:520px"></div>', hint="наведите на клетку: медианы, число нейронов, q")
                         + note(["Цветная клетка означает значимое различие (q < 0,05), её цвет — знак и величину эффекта: розовый — у первой группы значение больше, зелёный — меньше, насыщенность растёт с величиной разности (шкала обрезана на ±50 %). Серая клетка — различие не значимо, число в ней показывает наблюдаемую разность, которую нельзя отличить от случайной. Пустая клетка — сравнение невозможно (например, у тормозных клеток нет апикальных дендритов).",
-                                "Столбцы «только базальный / неопределённый» повторяют сравнение типов клеток внутри одного компартмента. Это нужно, потому что у тормозных клеток нет апикальных дендритов: если бы различие типов было на самом деле различием компартментов, внутри одного компартмента оно бы исчезло. Столбцы компартментов показывают медиану относительных разностей внутри нейронов."],
+                                "Столбцы компартментов показывают медиану относительных разностей внутри нейронов. Тип клетки в пределах одного компартмента не сравнивается: у тормозных клеток нет деления на апикальные и базальные дендриты, их компартмент не определён."],
                                title="Как читать сводную карту", collapsible=True), anchor="sec-overview"))
 
     body.append(section("Тормозные и возбуждающие клетки", "Распределение медиан нейронов по выбранной морфометрике: все шипики и внутри компартментов.",
@@ -289,8 +285,6 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
         ("cell_type_binary", "Тормозные / возбуждающие", [("metric", "Метрика", "text"), ("n_neurons_a", "Нейронов (торм.)", "int"), ("n_neurons_b", "Нейронов (возб.)", "int"),
                                                           ("median_a", "Медиана (торм.)", "median"), ("median_b", "Медиана (возб.)", "median"), ("rel_diff_a_vs_b", "Разность", "pct"),
                                                           ("cliffs_delta", "Дельта Клиффа", "num"), ("p", "p", "sci"), ("q_bh", "q", "sci")]),
-        ("cell_type_binary_within_compartment", "Тормозные / возбуждающие внутри компартмента", [("compartment", "Компартмент", "text"), ("metric", "Метрика", "text"), ("n_neurons_a", "Нейронов (торм.)", "int"),
-                                                                                              ("n_neurons_b", "Нейронов (возб.)", "int"), ("rel_diff_a_vs_b", "Разность", "pct"), ("p", "p", "sci"), ("q_bh", "q", "sci")]),
         ("compartment", "Компартменты внутри нейрона", [("a", "Первый", "text"), ("b", "Второй", "text"), ("metric", "Метрика", "text"), ("n_neurons_paired", "Нейронов", "int"),
                                                         ("median_paired_rel_diff", "Разность (медиана по нейронам)", "pct"), ("share_neurons_a_gt_b", "Доля нейронов «первый больше»", "num"), ("p", "p", "sci"), ("q_bh", "q", "sci")]),
         ("cell_type_omnibus", "Подробные типы: общий тест", [("metric", "Метрика", "text"), ("n_types", "Типов", "int"), ("n_neurons", "Нейронов", "int"), ("p", "p", "sci"), ("q_bh", "q", "sci")]),
