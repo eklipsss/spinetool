@@ -159,6 +159,28 @@ def branch_metric_table(branches: pd.DataFrame) -> pd.DataFrame:
     return b
 
 
+def join_spine_morphometrics(spines: pd.DataFrame, morphometrics: pd.DataFrame) -> pd.DataFrame:
+    """Marks for the neighbour / position correlations: ``log_volume`` and ``length`` (nm) of every positioned spine from the
+    stage-8 table of the S preprocessing (keys neuron, limb, ORIGINAL branch, spine). Spines without a successful stage 8
+    get NaN (they still count for the placement metrics)."""
+    m = morphometrics
+    if "status" in m.columns:
+        m = m[m["status"].astype(str) == "success"]
+    m = pd.DataFrame({"neuron_id": m["neuron_id"].astype(str), "limb_id": pd.to_numeric(m["limb_id"].astype(str).str.extract(r"(\d+)")[0]).astype(int),
+                      "original_branch_id": pd.to_numeric(m["branch_id"].astype(str).str.extract(r"(\d+)")[0]).astype(int),
+                      "spine_id": m["spine_id"].astype(str), "Volume": m["Volume"], "Length": m["Length"]})
+    m = m.drop_duplicates(["neuron_id", "limb_id", "original_branch_id", "spine_id"], keep="last")
+    s = spines.drop(columns=[c for c in ("Volume", "Length", "log_volume", "length") if c in spines.columns]).copy()
+    s["neuron_id"] = s["neuron_id"].astype(str)
+    s["limb_id"] = pd.to_numeric(s["limb_id"].astype(str).str.extract(r"(\d+)")[0]).astype(int)
+    s["original_branch_id"] = pd.to_numeric(s["original_branch_id"]).astype(int)
+    s["spine_id"] = s["spine_id"].astype(str)
+    s = s.merge(m, on=["neuron_id", "limb_id", "original_branch_id", "spine_id"], how="left")
+    s["log_volume"] = np.log(pd.to_numeric(s["Volume"], errors="coerce").where(lambda v: v > 0))
+    s["length"] = pd.to_numeric(s["Length"], errors="coerce")
+    return s
+
+
 def group_table(branches: pd.DataFrame, spines: pd.DataFrame, *, min_branches: int = 10, min_pairs: int = 30,
                 group_by: Sequence[str] = ("neuron_id", "compartment")) -> pd.DataFrame:
     """One row per group with every metric of ``ALL_METRICS``, ``n_spines_group`` = positioned spines, ``n_branches``.

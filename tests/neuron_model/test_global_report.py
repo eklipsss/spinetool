@@ -197,3 +197,39 @@ def test_harmonised_factors_cell_class_and_layer():
     assert r["significant"] and not r["causal"]
     mat = availability_matrix(frame, min_neurons=10, min_spines=5)
     assert {"cell_class", "layer", "layer_native", "species | layer"} <= set(mat.index)
+
+
+def test_cross_dataset_threshold_is_per_dataset():
+    # Minnie65 / H01 units carry 25 rows, LabID folders 12: with 20 for EM and 5 for LabID every unit counts by ITS dataset
+    # (taking the larger threshold for both, as before, dropped every LabID folder from the LabID vs EM comparisons)
+    frame = _build()
+    comps = valid_comparisons(frame, min_neurons=10, min_spines={"default": 20, "labid": 5})
+    lab = [c for c in comps if c["factor"] == "dataset" and "labid" in c["dataset"]]
+    assert lab and all(c["valid"] for c in lab)
+    assert all(c["n_units_a"] + c["n_units_b"] > 48 for c in lab)
+    res = run_comparisons(frame, ["M_path"], min_neurons=10, min_spines={"default": 20, "labid": 5}, n_permutations=200, n_boot=20,
+                          log=lambda *_: None)["results"]
+    assert (res["dataset"] == "labid vs minnie65").any()
+    assert "cell_type_binary | compartment" not in set(res["factor"])
+
+
+def test_consistency_between_minnie65_and_h01():
+    from src.neuron_model.global_report.consistency import consistency
+
+    frame = _build()
+    # M_null: an H01-only cell-type effect (x0.6 in H01 interneurons, nothing in Minnie65)
+    h01_int = (frame["dataset"] == "h01") & (frame["cell_type_binary"] == "inhibitory")
+    frame.loc[h01_int, "M_null"] *= 0.6
+    out = consistency(frame, METRICS, min_neurons=10, min_spines=5, n_boot=300, seed=1)
+    pairs = out["pairs"].set_index(["factor", "metric"])
+    r = pairs.loc[("cell_type_binary", "M_cell")]
+    assert r["verdict"] == "consistent" and r["same_sign"] and abs(r["effect_minnie65"] - 0.5) < 0.2 and abs(r["effect_h01"] - 0.5) < 0.2
+    assert r["difference_ci_low"] < 0 < r["difference_ci_high"]
+    r = pairs.loc[("cell_type_binary", "M_null")]
+    assert r["verdict"] == "h01_only" and r["difference_significant"] and r["difference"] > 0.2
+    assert pairs.loc[("cell_type_binary", "M_species"), "verdict"] == "neither"
+    # compartment exists only in Minnie65 here -> no consistency row for it
+    assert "compartment" not in set(out["pairs"]["factor"])
+    s = out["summary"].set_index("factor").loc["cell_type_binary"]
+    assert s["n_metrics"] == len(METRICS) and s["n_consistent"] == 1 and s["n_h01_only"] == 1
+    assert -1 <= s["spearman_ci_low"] <= s["spearman"] <= s["spearman_ci_high"] <= 1

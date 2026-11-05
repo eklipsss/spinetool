@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.neuron_model.branch_statistics import ALL_METRICS, group_table  # noqa: E402
+from src.neuron_model.branch_statistics import ALL_METRICS, group_table, join_spine_morphometrics  # noqa: E402
 from src.neuron_model.metadata import cell_type_binary, dataset_kind, load_metadata_tables  # noqa: E402
 from src.neuron_model.spine_generation.evaluation.morphology_by_condition import morphology_by_condition, neuron_medians  # noqa: E402
 
@@ -71,17 +71,7 @@ def load(args):
     spines = spines[(spines["status"].astype(str) == "valid") & spines["has_position"].astype(bool)].copy()
     if args.morphometrics_table is not None:
         m = _read(args.morphometrics_table, ["neuron_id", "limb_id", "branch_id", "spine_id", "status", "Volume", "Length"])
-        if "status" in m.columns:
-            m = m[m["status"].astype(str) == "success"]
-        m["neuron_id"] = m["neuron_id"].astype(str)
-        m["limb_id"] = pd.to_numeric(m["limb_id"]).astype(int)
-        m["original_branch_id"] = pd.to_numeric(m["branch_id"]).astype(int)
-        m["spine_id"] = m["spine_id"].astype(str)
-        spines["spine_id"] = spines["spine_id"].astype(str)
-        spines = spines.merge(m[["neuron_id", "limb_id", "original_branch_id", "spine_id", "Volume", "Length"]],
-                              on=["neuron_id", "limb_id", "original_branch_id", "spine_id"], how="left")
-        spines["log_volume"] = np.log(pd.to_numeric(spines["Volume"], errors="coerce").where(lambda v: v > 0))
-        spines["length"] = pd.to_numeric(spines["Length"], errors="coerce")
+        spines = join_spine_morphometrics(spines, m)
         print(f"[branch-stats] morphometrics joined for {spines['log_volume'].notna().mean():.1%} of the positioned spines", flush=True)
     return branches, spines
 

@@ -38,11 +38,10 @@ class Factor:
 
 
 FACTORS: Tuple[Factor, ...] = (
+    # no "cell_type_binary | compartment": inhibitory cells have no apical / basal division (their compartment is undefined),
+    # so the stratified contrast cannot exist; it was always "too few units" (removed 2026-11-06)
     Factor("cell_type_binary", "cell_type_binary", "between", ("minnie65", "h01"), ("inhibitory", "excitatory"),
-           warnings=("inhibitory cells have no apical dendrite: a pooled contrast can be a compartment contrast "
-                     "(see cell_type_binary | compartment)",)),
-    Factor("cell_type_binary | compartment", "cell_type_binary", "between", ("minnie65", "h01"), ("inhibitory", "excitatory"),
-           stratify="compartment"),
+           warnings=("inhibitory cells have no apical / basal division: the binary contrast pools all dendrites of a neuron",)),
     Factor("cell_type", "cell_type", "between", ("minnie65", "h01"), None, omnibus=True, exclude_levels=EXCLUDED_TYPES),
     Factor("compartment", "compartment", "within", ("minnie65", "h01"), ("apical", "basal", "uncertain"),
            warnings=("compartment of H01 comes from the direction rule (pia axis estimated from layers), not a ground truth",)),
@@ -75,19 +74,32 @@ FACTORS: Tuple[Factor, ...] = (
 
 
 def resolve_min_rows(min_spines, datasets) -> int:
-    """``min_spines`` is an int or ``{dataset: int}`` (LabID branches carry ~9 spines, Minnie neurons ~1000); a comparison
-    across datasets needs the largest of the datasets involved."""
+    """Threshold of ONE dataset: ``min_spines`` is an int or ``{dataset: int, "default": int}`` (LabID branch folders carry
+    ~9 spines, Minnie65 neurons ~1000). For several datasets use ``row_thresholds`` (each unit by its own dataset); the
+    largest threshold is returned here only for callers that need one number."""
     if isinstance(min_spines, dict):
         names = [datasets] if isinstance(datasets, str) else list(datasets)
         return max(int(min_spines.get(d, min_spines.get("default", 20))) for d in names)
     return int(min_spines)
 
 
-def _units_with_rows(frame: pd.DataFrame, column: str, min_rows: int) -> pd.DataFrame:
-    """Per (unit, value of ``column``) row counts, units with >= min_rows rows."""
+def row_thresholds(datasets: pd.Series, min_spines) -> pd.Series:
+    """Minimal rows of a unit, per row, by the unit's OWN dataset. Taking the largest threshold of the compared datasets
+    (as before 2026-11-06) dropped almost every LabID folder from the LabID vs Minnie65 / H01 spine comparisons (20 spines
+    required, ~9 per folder)."""
+    if isinstance(min_spines, dict):
+        default = int(min_spines.get("default", 20))
+        return datasets.astype(str).map(lambda d: int(min_spines.get(d, default))).astype(int)
+    return pd.Series(int(min_spines), index=datasets.index)
+
+
+def _units_with_rows(frame: pd.DataFrame, column: str, min_rows) -> pd.DataFrame:
+    """Per (unit, value of ``column``) row counts, units with at least the threshold of their dataset (``min_rows``: int or
+    ``{dataset: int}``)."""
     f = frame[frame[column].notna()]
-    n = f.groupby(["neuron_id", column], observed=True).size().rename("n_rows").reset_index()
-    return n[n["n_rows"] >= min_rows]
+    keys = list(dict.fromkeys(["dataset", "neuron_id", column]))   # column may be "dataset" itself
+    n = f.groupby(keys, observed=True).size().rename("n_rows").reset_index()
+    return n[n["n_rows"] >= row_thresholds(n["dataset"], min_rows).to_numpy()]
 
 
 def _record(factor: Factor, dataset: str, a, b, stratum, **kw) -> Dict[str, Any]:
@@ -182,7 +194,7 @@ def _cross(frame: pd.DataFrame, factor: Factor, present: Sequence[str], min_unit
         sub = frame[frame["dataset"].isin(["h01", "minnie65"]) & (frame["modality"] == "EM")]
         if not {"h01", "minnie65"} <= set(sub["dataset"].unique()):
             return [_record(factor, "h01 vs minnie65", "human", "mouse", None, reason="needs both EM datasets")]
-        rows = resolve_min_rows(min_rows, ["h01", "minnie65"])
+        rows = min_rows
         if factor.stratify is None:
             return _between(sub, factor, "h01 vs minnie65", None, min_units, rows)
         if not sub[factor.stratify].notna().any():
@@ -196,7 +208,7 @@ def _cross(frame: pd.DataFrame, factor: Factor, present: Sequence[str], min_unit
     for a, b in pairs:
         sub = frame[frame["dataset"].isin([a, b])]
         f2 = Factor(**{**factor.__dict__, "levels": (a, b)})
-        recs = _between(sub, f2, f"{a} vs {b}", None, min_units, resolve_min_rows(min_rows, [a, b]))
+        recs = _between(sub, f2, f"{a} vs {b}", None, min_units, min_rows)
         for r in recs:
             r["warnings"] = r["warnings"] + (["modality differs (EM vs confocal): size metrics depend on resolution"] if "labid" in (a, b) else [])
         out += recs

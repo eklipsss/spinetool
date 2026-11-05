@@ -28,7 +28,7 @@ import pandas as pd
 
 from ..spine_generation.evaluation.morphology_by_condition import (
     _perm_omnibus, bh_qvalues, compare_neuron_groups, compare_within_neuron, neuron_medians)
-from .factors import FACTORS, Factor, resolve_min_rows, valid_comparisons
+from .factors import FACTORS, Factor, resolve_min_rows, row_thresholds, valid_comparisons
 
 FAMILY = ["dataset", "factor", "level", "stratum"]
 
@@ -70,6 +70,20 @@ def _decorate(row: Dict[str, Any], comp: Dict[str, Any], level: str) -> Dict[str
     return {**keep, **{k: v for k, v in row.items() if k not in ("factor",)}}
 
 
+def unit_medians(frame: pd.DataFrame, metrics: Sequence[str], min_spines) -> pd.DataFrame:
+    """Per-unit medians (``neuron_id`` + ``dataset`` + ``n_spines``), each unit kept if it has at least the threshold of ITS
+    dataset (``min_spines``: int or ``{dataset: int}``)."""
+    med = neuron_medians(frame, metrics, ["dataset", "neuron_id"], 1)
+    return med[med["n_spines"] >= row_thresholds(med["dataset"], min_spines).to_numpy()].reset_index(drop=True)
+
+
+def _with_level(unit: pd.DataFrame, frame: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Attach the unit's value of ``col`` (which may be ``dataset`` itself, already a column of ``unit``)."""
+    if col in unit.columns:
+        return unit
+    return unit.merge(frame.groupby("neuron_id")[[col]].first(), on="neuron_id")
+
+
 def run_comparisons(frame: pd.DataFrame, metrics: Sequence[str], *, level: str = "spine", comparisons: Optional[List[Dict[str, Any]]] = None,
                     factors: Sequence[Factor] = FACTORS, min_neurons: int = 10, min_spines: int = 20, n_permutations: int = 10000,
                     seed: int = 0, margin_rel: float = 0.10, margin_sd: float = 0.5, margins: Optional[Dict[str, float]] = None,
@@ -97,8 +111,7 @@ def run_comparisons(frame: pd.DataFrame, metrics: Sequence[str], *, level: str =
             res = compare_within_neuron(sub, col, a, b, metrics, min_spines=min_rows, n_permutations=n_permutations, seed=sd_seed)
             med = neuron_medians(sub[sub[col].isin([a, b])], metrics, ["neuron_id", col], min_rows).pivot(index="neuron_id", columns=col)
         else:
-            unit = neuron_medians(sub, metrics, ["neuron_id"], min_rows).merge(
-                sub.groupby("neuron_id")[[col]].first(), on="neuron_id")
+            unit = _with_level(unit_medians(sub, metrics, min_spines), sub, col)
             res = compare_neuron_groups(unit, col, a, b, metrics, n_permutations=n_permutations, seed=sd_seed)
         for r in res:
             m = r["metric"]
@@ -187,7 +200,7 @@ def _omnibus(frame, metrics, comps, min_spines, n_permutations, seed, level) -> 
             continue
         sub = frame[frame["dataset"] == comp["dataset"]]
         col = comp["column"]
-        unit = neuron_medians(sub, metrics, ["neuron_id"], resolve_min_rows(min_spines, comp["dataset"])).merge(sub.groupby("neuron_id")[[col]].first(), on="neuron_id")
+        unit = _with_level(unit_medians(sub, metrics, min_spines), sub, col)
         unit = unit[unit[col].isin(levels)]
         rng = np.random.default_rng(seed + 1)
         for m in metrics:

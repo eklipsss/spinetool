@@ -118,3 +118,19 @@ def test_branch_profile_report_builds(tmp_path):
     assert cell["sig"] and cell["rel"] == pytest.approx(0.6, abs=0.1)  # absolute difference of g, not a ratio
     html = build_report(tmp_path).read_text(encoding="utf-8")
     assert "Ствол и расположение шипиков" in html
+
+
+def test_join_spine_morphometrics_by_original_branch_and_string_limbs():
+    import numpy as np
+    import pandas as pd
+
+    from src.neuron_model.branch_statistics import join_spine_morphometrics
+
+    spines = pd.DataFrame({"neuron_id": ["n1", "n1", "n1"], "limb_id": [3, 3, 3], "merged_branch_id": [0, 0, 0],
+                           "original_branch_id": [1, 2, 2], "spine_id": ["5", "5", "6"], "s": [1.0, 2.0, 3.0]})
+    morph = pd.DataFrame({"neuron_id": ["n1", "n1", "n1"], "limb_id": ["limb_003", "limb_003", "limb_003"], "branch_id": ["branch_001", "2", "2"],
+                          "spine_id": ["5", "5", "6"], "status": ["success", "success", "failed"], "Volume": [8.0, 27.0, 1.0], "Length": [100.0, 200.0, 300.0]})
+    out = join_spine_morphometrics(spines, morph)
+    assert len(out) == 3 and np.allclose(out["log_volume"].iloc[:2], np.log([8.0, 27.0]))
+    assert out["length"].iloc[:2].tolist() == [100.0, 200.0]
+    assert np.isnan(out["log_volume"].iloc[2])          # stage 8 failed -> no mark, the spine still counts for placement

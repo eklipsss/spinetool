@@ -177,9 +177,25 @@ def tidy_branch_groups(branches: pd.DataFrame, spines: pd.DataFrame, kind: str, 
     return out.reset_index(drop=True)
 
 
+def read_table_with_parts(path: Path, columns: Sequence[str]) -> pd.DataFrame:
+    """A stage table (``<name>.parquet`` + ``<name>.parquet.parts/*.parquet``), only ``columns`` that exist; later rows win
+    is left to the caller (keys differ between tables)."""
+    import pyarrow.parquet as pq
+
+    path = Path(path)
+    parts = Path(f"{path}.parts")
+    frames = []
+    for p in [path] + (sorted(parts.glob("*.parquet")) if parts.exists() else []):
+        names = set(pq.read_schema(p).names)
+        frames.append(pq.read_table(p, columns=[c for c in columns if c in names]).to_pandas())
+    return pd.concat(frames, ignore_index=True)
+
+
 def load_branch_groups(kind: str, branches_root: Path, metadata_root: Path, *, compartment_table: Optional[Path] = None,
-                       min_branches: Optional[int] = None, min_pairs: int = 30) -> pd.DataFrame:
-    """``branches.parquet`` + ``branch_spines.parquet`` of a branch-preprocessing output -> tidy group frame."""
+                       min_branches: Optional[int] = None, min_pairs: int = 30, morphometrics_table: Optional[Path] = None) -> pd.DataFrame:
+    """``branches.parquet`` + ``branch_spines.parquet`` of a branch-preprocessing output -> tidy group frame. With the stage-8
+    ``morphometrics_table`` of the same dataset the mark metrics (neighbour similarity of volume / length, volume vs u) are
+    computed too; without it they stay NaN."""
     import pyarrow.parquet as pq
 
     kind = dataset_kind(kind)
@@ -194,6 +210,12 @@ def load_branch_groups(kind: str, branches_root: Path, metadata_root: Path, *, c
                                          "n_spines", "train_eligible_T", "train_eligible_P"])
     spines = read("branch_spines.parquet", ["neuron_id", "limb_id", "merged_branch_id", "original_branch_id", "spine_id", "status", "has_position", "s", "u"])
     spines = spines[(spines["status"].astype(str) == "valid") & spines["has_position"].astype(bool)]
+    if morphometrics_table is not None:
+        from ..branch_statistics import join_spine_morphometrics
+
+        m = read_table_with_parts(morphometrics_table, ["neuron_id", "limb_id", "branch_id", "spine_id", "status", "Volume", "Length"])
+        spines = join_spine_morphometrics(spines, m)
+        print(f"[global] {kind}: morphometrics joined for {spines['log_volume'].notna().mean():.1%} of the positioned spines", flush=True)
     meta = load_metadata_tables(Path(metadata_root), compartment_table)
     return tidy_branch_groups(branches, spines, kind, meta, min_branches=min_branches if min_branches is not None else (1 if kind == "labid" else 10),
                               min_pairs=min_pairs)

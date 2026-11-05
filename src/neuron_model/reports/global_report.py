@@ -54,8 +54,8 @@ def reason_ru(reason: Any) -> str:
 
 
 WARN_RU = {
-    "inhibitory cells have no apical dendrite: a pooled contrast can be a compartment contrast (see cell_type_binary | compartment)":
-        "У тормозных клеток нет апикального дендрита: общее различие может быть различием компартментов (см. сравнение внутри компартмента).",
+    "inhibitory cells have no apical / basal division: the binary contrast pools all dendrites of a neuron":
+        "У тормозных клеток нет деления на апикальные и базальные дендриты: сравнение типов объединяет все дендриты нейрона.",
     "compartment of H01 comes from the direction rule (pia axis estimated from layers), not a ground truth":
         "Компартмент H01 получен по правилу направления к пиа (ось оценена по слоям), это оценка, а не разметка.",
     "unit = branch folder: animals / slices are unknown, folders of one animal are not independent (pseudo-replication possible)":
@@ -97,7 +97,6 @@ def cf_ru(text: Any) -> str:
 
 FACTOR_RU = {
     "cell_type_binary": "Тормозные / возбуждающие",
-    "cell_type_binary | compartment": "Тормозные / возбуждающие внутри компартмента",
     "cell_type": "Подробный тип клетки",
     "cell_class": "Класс клетки (унифицированный)",
     "layer": "Слой (унифицированный)",
@@ -111,7 +110,11 @@ FACTOR_RU = {
     "dataset": "Датасет против датасета",
 }
 LABEL_RU = {"significant": "значимо", "not_significant": "не значимо, мощности достаточно", "underpowered": "не значимо, мощности не хватает", "not_tested": "не проверялось"}
-LEVEL_RU = {"spine": "Шипик (модуль S)", "branch": "Ветвь (модули T и P)"}
+LEVEL_RU = {"spine": "Шипики (модуль S)", "trunk": "Ствол ветви (модуль T)", "placement": "Расположение шипиков (модуль P)"}
+# the branch tables hold both T and P metrics; the page splits them by the metric's module
+BRANCH_SPLIT = {"trunk": "T", "placement": "P"}
+VERDICT_RU = {"consistent": "согласуется", "same_sign_different_size": "тот же знак, размер разный", "opposite": "противоположный знак",
+              "minnie65_only": "только в Minnie65", "h01_only": "только в H01", "neither": "нет ни в одном"}
 
 
 def _records(folder: Path, name: str) -> List[Dict[str, Any]]:
@@ -172,8 +175,31 @@ def _level_payload(folder: Path, level: str) -> Optional[Dict[str, Any]]:
     dist = [{k: (r.get(k) if k not in ("hist_edges", "hist_counts") else r.get(k)) for k in
              ("dataset", "cell_type_binary", "metric", "level", "n", "n_units", "mean", "sd", "q05", "q25", "q50", "q75", "q95", "icc", "hist_edges", "hist_counts")
              if k in r} for r in desc]
+    cons = [{"lv": r.get("level", level), "f": r["factor"], "a": r["a"], "b": r["b"], "m": r["metric"], "kind": r.get("effect_kind"),
+             "em": _num(r.get("effect_minnie65")), "em_lo": _num(r.get("ci_low_minnie65")), "em_hi": _num(r.get("ci_high_minnie65")),
+             "eh": _num(r.get("effect_h01")), "eh_lo": _num(r.get("ci_low_h01")), "eh_hi": _num(r.get("ci_high_h01")),
+             "pm": bool(r.get("present_minnie65")), "ph": bool(r.get("present_h01")), "nm": r.get("n_units_minnie65"), "nh": r.get("n_units_h01"),
+             "d": _num(r.get("difference")), "d_lo": _num(r.get("difference_ci_low")), "d_hi": _num(r.get("difference_ci_high")),
+             "q": _num(r.get("q_difference")), "ver": r.get("verdict")} for r in _records(folder, f"consistency_pairs_{level}")]
+    cons_sum = [{"lv": r.get("level", level), "f": r["factor"], "a": r["a"], "b": r["b"], "n": r.get("n_metrics"), "both": r.get("n_present_both"),
+                 "same_both": r.get("n_same_sign_of_both"), "same_all": _num(r.get("share_same_sign_all")), "ndiff": r.get("n_difference_significant"),
+                 "rho": _num(r.get("spearman")), "rho_lo": _num(r.get("spearman_ci_low")), "rho_hi": _num(r.get("spearman_ci_high")),
+                 "nm": r.get("n_present_minnie65"), "nh": r.get("n_present_h01"), **{k: r.get(f"n_{k}") for k in VERDICT_RU}}
+                for r in _records(folder, f"consistency_summary_{level}")]
     return {"metrics": [_meta(m, info) for m in metrics], "results": rows, "comparisons": comp_rows, "dist": dist,
-            "omnibus": [{k: r.get(k) for k in ("dataset", "factor", "metric", "n_types", "n_neurons", "p", "q_bh", "significant")} for r in _records(folder, f"omnibus_{level}")]}
+            "omnibus": [{k: r.get(k) for k in ("dataset", "factor", "metric", "n_types", "n_neurons", "p", "q_bh", "significant")} for r in _records(folder, f"omnibus_{level}")],
+            "consistency": cons, "consistency_summary": cons_sum, "matrix": True}
+
+
+def _split_branch(lp: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """The T or the P part of the branch payload (metrics of that module); the validity matrix is shown once (trunk)."""
+    module = BRANCH_SPLIT[name]
+    keep = {m["id"] for m in lp["metrics"] if m.get("module") == module}
+    return {"metrics": [m for m in lp["metrics"] if m["id"] in keep], "results": [r for r in lp["results"] if r["m"] in keep],
+            "comparisons": lp["comparisons"], "dist": [r for r in lp["dist"] if r["metric"] in keep],
+            "omnibus": [r for r in lp["omnibus"] if r["metric"] in keep],
+            "consistency": [r for r in lp["consistency"] if r["m"] in keep and r["lv"] in (name, "branch")],
+            "consistency_summary": [r for r in lp["consistency_summary"] if r["lv"] in (name, "branch")], "matrix": name == "trunk"}
 
 
 def _pill(text: str, tone: str = "") -> str:
@@ -231,7 +257,7 @@ def _summary_html(level_payloads: Dict[str, Dict[str, Any]]) -> str:
             a[r["lab"]] = a.get(r["lab"], 0) + 1
         for (module, ds, f, causal), a in sorted(agg.items(), key=lambda kv: (kv[0][0], kv[0][3] is False, kv[0][1], kv[0][2])):
             total = sum(a.values())
-            rows.append(f"<tr><td>{esc(module)}</td><td>{esc(scope_name(ds))}</td><td>{esc(FACTOR_RU.get(f, f))}</td>"
+            rows.append(f"<tr data-mod=\"{esc(module)}\"><td>{esc(module)}</td><td>{esc(scope_name(ds))}</td><td>{esc(FACTOR_RU.get(f, f))}</td>"
                         f"<td>{'' if causal else _pill('описательно, смешано', 'warn')}</td><td>{total}</td><td>{a['significant']}</td><td>{a['not_significant']}</td>"
                         f"<td>{a['underpowered']}</td><td>{a['not_tested']}</td></tr>")
     if not rows:
@@ -274,9 +300,16 @@ def _inventory_counts(folder: Path) -> Dict[str, List[Dict[str, Any]]]:
 def build_payload(folder: Path) -> Dict[str, Any]:
     folder = Path(folder)
     info = json.loads((folder / "run_info.json").read_text(encoding="utf-8")) if (folder / "run_info.json").exists() else {}
-    levels = {lv: p for lv in ("spine", "branch") if (p := _level_payload(folder, lv))}
+    levels: Dict[str, Any] = {}
+    if (sp := _level_payload(folder, "spine")):
+        levels["spine"] = sp
+    if (br := _level_payload(folder, "branch")):
+        for name in BRANCH_SPLIT:
+            part = _split_branch(br, name)
+            if part["metrics"]:
+                levels[name] = part
     return {"info": info, "levels": levels, "inventory": _inventory_counts(folder), "dataset_ru": {**DATASET_RU, **{f"{a} vs {b}": f"{SHORT[a]} и {SHORT[b]}" for a in SHORT for b in SHORT if a != b}}, "factor_ru": FACTOR_RU,
-            "label_ru": LABEL_RU, "level_ru": LEVEL_RU}
+            "label_ru": LABEL_RU, "level_ru": LEVEL_RU, "verdict_ru": VERDICT_RU}
 
 
 def report_name(info: Dict[str, Any]) -> str:
@@ -308,8 +341,13 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
         "**«Не значимо» не значит «одинаково».** Для каждого теста считаются минимально обнаружимый эффект при имеющемся числе единиц и доверительный интервал эффекта. Если минимально обнаружимый эффект больше порога значимости, страница пишет «мощности не хватает», а не «различий нет».",
     ], title="О чём эта страница"))
 
+    body.append('<style>.lvtabs{position:sticky;top:0;z-index:20;background:var(--surface);display:flex;gap:6px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--border);margin:6px 0 4px}'
+                '.lvtabs button{font:inherit;font-size:14px;padding:6px 14px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--ink-2);cursor:pointer}'
+                '.lvtabs button.on{background:var(--ink);color:var(--surface);border-color:var(--ink)}.lvtabs .lab{color:var(--ink-3);font-size:12.5px;align-self:center;margin-right:4px}</style>'
+                '<div class="lvtabs" id="level-tabs"><span class="lab">Что показывают разделы ниже:</span></div>')
     body.append(section("Что можно сравнивать", "Матрица «фактор × датасет»: где сравнение возможно, где оно только описательное, а где нельзя — с причиной.",
-                        "".join('<div style="margin-bottom:14px">' + card(LEVEL_RU[lv] + ": допустимость сравнений", _matrix_html(lp["comparisons"])) + "</div>" for lv, lp in levels.items() if lp["comparisons"])
+                        "".join('<div style="margin-bottom:14px">' + card({"spine": "Шипики", "trunk": "Ветви (стволы и расположение шипиков)"}.get(lv, LEVEL_RU.get(lv, lv)) + ": допустимость сравнений", _matrix_html(lp["comparisons"])) + "</div>"
+                                for lv, lp in levels.items() if lp["comparisons"] and lp.get("matrix"))
                         + note(["«Можно проверять» означает, что фактор есть в датасете, оба уровня представлены достаточным числом единиц (не меньше порога) и сравнение внутри датасета не смешано с другим фактором. «Только описательно» — сравнение возможно, но его результат смешан: вид с датасетом и методом съёмки, лечение с серией съёмки и поправкой по z. «Нельзя» — метаданных нет или единиц слишком мало; причина указана в клетке.",
                                 "Единый словарь для разных датасетов: **класс клетки** (пирамидная, другая возбуждающая, интернейрон) и **слой** выводятся из исходных названий; слой Minnie65 грубый и получен из названия типа клетки (только возбуждающие), то есть он не независим от типа. Слои L2 и L3 в H01 объединены в L2/3 для сравнения с Minnie65, исходные слои H01 сравниваются отдельным фактором."],
                                title="Как читать матрицу", collapsible=True), anchor="sec-validity"))
@@ -322,7 +360,7 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
                                title="Как читать", collapsible=True), anchor="sec-inventory"))
 
     body.append(section("Распределения морфометрик", "Распределение выбранной метрики по датасетам (и типам клеток); внутри каждой группы — доля дисперсии между единицами.",
-                        card("Распределение", '<div class="row" style="margin-bottom:8px"><div style="min-width:260px"><label class="field">Уровень</label><select id="sel-dist-level"></select></div>'
+                        card("Распределение", '<div class="row" style="margin-bottom:8px">'
                              '<div style="min-width:320px"><label class="field">Метрика</label><select id="sel-dist-metric"></select></div>'
                              '<div style="min-width:260px"><label class="field">Группировка</label><select id="sel-dist-by"></select></div></div>'
                              '<div id="plot-dist" class="plot m"></div><div id="dist-table"></div>')
@@ -331,15 +369,26 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
                                title="Как читать", collapsible=True), anchor="sec-dist"))
 
     body.append(section("Что различается между типами дендритов", "Тепловая карта «метрики × сравнения» для выбранного датасета и фактора: цвет — размер эффекта у значимых различий.",
-                        card("Значимость и эффект", '<div class="row" style="margin-bottom:8px"><div style="min-width:240px"><label class="field">Уровень</label><select id="sel-sig-level"></select></div>'
+                        card("Значимость и эффект", '<div class="row" style="margin-bottom:8px">'
                              '<div style="min-width:300px"><label class="field">Датасет</label><select id="sel-sig-scope"></select></div>'
                              '<div style="min-width:360px"><label class="field">Фактор</label><select id="sel-sig-factor"></select></div></div>'
-                             '<div id="sig-warning"></div><div class="legend" id="sig-legend"></div><div id="plot-sig" class="plot l"></div>')
-                        + '<div style="height:14px"></div>' + card("Сводка по модулям и факторам", _summary_html(levels))
+                             '<div id="sig-warning"></div><div class="legend" id="sig-legend"></div><div id="plot-sig" class="plot l"></div><div id="omni"></div>')
+                        + '<div id="pairs-card" style="margin-top:14px">' + card("Попарные сравнения типов", '<div class="row" style="margin-bottom:8px"><div style="min-width:320px"><label class="field">Метрика</label><select id="sel-pair-metric"></select></div></div>'
+                                                                   '<div id="pair-note" class="small muted"></div><div id="plot-pairs" class="plot l"></div>', hint="для факторов с тремя и более уровнями") + '</div>'
+                        + '<div style="height:14px"></div>' + card("Сводка по факторам для выбранной вкладки", _summary_html(levels))
                         + note(["Клетка тепловой карты — одна метрика в одном сравнении (первая группа к второй). **Розовый или зелёный цвет** — значимое различие (q < 0,05), цвет и число — относительная разность медиан единиц (для долей и корреляций — абсолютная разность); шкала обрезана на ±50 %. **Серая клетка** — не значимо и мощности достаточно: различие, не меньшее порога значимости, было бы обнаружено. **Светлая клетка с вопросом** — не значимо, но мощности не хватает: при таком числе единиц нельзя исключить значимого различия, поэтому «нет различий» утверждать нельзя. Пустая клетка — метрика не проверялась.",
                                 "При наведении видны медианы групп, число единиц, эффект с 95 % интервалом (бутстреп по единицам), минимально обнаружимый эффект и порог, p, q и признак эквивалентности (интервал целиком внутри порога). Для компартмента сравниваются два компартмента у одного и того же нейрона, поэтому стиль нейрона сокращается.",
-                                "Сравнения между датасетами и по лечению помечены рамкой «описательно, смешано» с перечнем смешивающих факторов. Подробные типы клеток проверяются парами; общий тест по всем типам сразу — в таблице омнибус-тестов в файлах рядом со страницей."],
+                                "Сравнения между датасетами и по лечению помечены рамкой «описательно, смешано» с перечнем смешивающих факторов.",
+                                "Для факторов с тремя и более уровнями (подробный тип, класс клетки, слой) под тепловой картой дан **общий тест**: различается ли метрика хоть между какими-то уровнями (ранговая статистика, перестановка меток между единицами, поправка по метрикам). Попарные сравнения считаются независимо от него. Матрица «Попарные сравнения типов» показывает для выбранной метрики все пары сразу: строка — первая группа, столбец — вторая, число — на сколько процентов медиана строки отличается от медианы столбца."],
                                title="Как читать", collapsible=True), anchor="sec-sig"))
+
+    body.append(section("Один и тот же эффект у мыши и человека?", "Эффект фактора внутри Minnie65 и внутри H01 рядом: совпадает ли знак, различается ли размер.",
+                        card("Эффект в Minnie65 и в H01", '<div class="row" style="margin-bottom:8px"><div style="min-width:360px"><label class="field">Сравнение</label><select id="sel-cons"></select></div></div>'
+                             '<div id="cons-summary"></div><div id="plot-cons" class="plot m"></div><div id="cons-table"></div>')
+                        + note(["Для каждого фактора, который есть в обоих датасетах электронной микроскопии (тормозные и возбуждающие, класс клетки, компартмент), эффект считается в каждом датасете отдельно, с нейроном как единицей, так же, как на тепловой карте. Интервал 95 % — бутстреп по нейронам. **Разность эффектов** Minnie65 минус H01 получает свой интервал (нейроны двух датасетов перевыбираются независимо) и p (метод сдвига), поправка Бенджамини–Хохберга по метрикам одного сравнения.",
+                                "Вердикт: «согласуется» — эффект значим в обоих датасетах, знак один и разность эффектов не значима; «тот же знак, размер разный» — значим в обоих, но разность значима; «противоположный знак»; «только в Minnie65» или «только в H01» — значим в одном (во втором его нет или не хватает мощности, см. тепловую карту); «нет ни в одном». Сводка над графиком: ранговая корреляция векторов эффектов по всем метрикам с интервалом и доля совпавших знаков.",
+                                "На графике точки — метрики с относительным эффектом (в процентах), диагональ — одинаковый эффект. Метрики с абсолютным эффектом (доли, g(r), корреляции) есть только в таблице. Вид совпадает с датасетом: различие эффектов означает, что фактор действует по-разному в двух датасетах, а не доказывает влияние вида."],
+                               title="Как читать", collapsible=True), anchor="sec-consistency"))
 
     body.append(section("Сгенерированные дендриты", "Соответствие сгенерированных данных этим правилам.",
                         note(["Этот раздел ещё не построен. План: те же сравнения (тип клетки, компартмент) считаются по сгенерированным шипикам и ветвям с условиями каждого типа; для каждой метрики сопоставляются эффект реальных данных и эффект сгенерированных, а внутри одного типа реальные и сгенерированные единицы проверяются на эквивалентность с порогом из шумового пола. Подробности генерации — в отчёте условной генерации."],
