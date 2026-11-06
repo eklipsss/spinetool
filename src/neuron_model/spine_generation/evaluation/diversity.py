@@ -9,11 +9,14 @@ real-real is the signature of mode collapse.
 
 from __future__ import annotations
 
-from typing import Dict, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 from scipy import stats
 from scipy.spatial.distance import pdist
+
+
+MAX_REAL_PAIRS = 5_000
 
 
 def upper_triangle(d: np.ndarray) -> np.ndarray:
@@ -52,10 +55,20 @@ def diversity_report(
     real_x: np.ndarray,
     gen_x: np.ndarray,
     features: Sequence[str],
+    max_real_pairs: Optional[int] = None,
+    seed: int = 0,
 ) -> Dict[str, float]:
-    """Pairwise Chamfer, pairwise morphometric distance and feature variances, real vs generated."""
+    """Pairwise Chamfer, pairwise morphometric distance and feature variances, real vs generated. ``max_real_pairs``:
+    at most this many real spines enter the real-real pairwise distances (default ``MAX_REAL_PAIRS`` = 5 000)."""
+    max_real_pairs = MAX_REAL_PAIRS if max_real_pairs is None else int(max_real_pairs)
     chamfer = compare_pairwise(upper_triangle(real_real_chamfer), upper_triangle(gen_gen_chamfer))
-    morph = compare_pairwise(pdist(real_x), pdist(gen_x))
+    # all real-real pairs of a large reference do not fit in memory (69 520 untouched test spines -> 2.4e9 pairs, 18 GB):
+    # a seeded subset (12.5 M pairs from 5 000 spines estimate the distribution of pairwise distances well; 15 000 spines
+    # = 112 M pairs needed ~9 GB in the Wasserstein / KS sorting)
+    rx = np.asarray(real_x)
+    if len(rx) > max_real_pairs:
+        rx = rx[np.sort(np.random.default_rng(seed).choice(len(rx), max_real_pairs, replace=False))]
+    morph = compare_pairwise(pdist(rx), pdist(gen_x))
     return {
         **{f"chamfer_{k}": v for k, v in chamfer.items()},
         **{f"morphometric_{k}": v for k, v in morph.items()},
