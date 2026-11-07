@@ -100,3 +100,14 @@ def test_optimize_latent_lowers_the_sdf_loss_of_a_frozen_decoder(fake_dataset, t
     z, info = optimize_latent(model, z0, path, coord_scale=float(cfg["data"]["coord_scale"]), sdf_clamp=None, steps=30, lr=5e-2, device=device)
     assert info["loss_end"] < info["loss_start"] and not np.allclose(z, z0)
     assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())   # the decoder stays frozen
+
+
+def test_fit_vae_codes_writes_codes_that_fit_latent_prior_reuses(fake_dataset, tmp_path):
+    run = _tiny_vae_run(fake_dataset, tmp_path)
+    proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts/neuron_model/fit_vae_codes.py"), "--run", str(run.root), "--n-train", "4",
+                           "--n-val", "2", "--steps", "3", "--batch-size", "3"], capture_output=True, text=True, cwd=REPO_ROOT)
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-4000:]
+    codes = np.load(run.root / "latent_prior_zopt" / "codes_train.npz")
+    assert codes["mu"].shape[:2] == (4, 1) and str(codes["tag"]).endswith("|train|4|1|[1]")
+    info = pd.read_parquet(run.root / "latent_prior_zopt" / "fit_info_val.parquet")
+    assert len(info) == 2 and (info["shift_from_mu"] > 0).all()

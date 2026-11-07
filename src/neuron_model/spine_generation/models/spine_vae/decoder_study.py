@@ -123,59 +123,81 @@ def cluster_mean_ci(values: pd.Series, groups: pd.Series, *, n_boot: int = 2000,
     return {"mean": float(v.mean()), "ci_low": float(np.nanquantile(boot, 0.025)), "ci_high": float(np.nanquantile(boot, 0.975)), "n": int(len(v))}
 
 
-def optimize_latent(model, z0, sdf_path, *, coord_scale: float, sdf_clamp: Optional[float], far_bbox=None, steps: int = 300,
-                    lr: float = 1e-2, n_far: int = 2048, far_clamp_nm: float = 300.0, far_slack_nm: float = 20.0, seed: int = 0, device="cpu"):
-    """Auto-decoder fit of the code of ONE spine with the decoder FROZEN (diagnostic of the amortisation gap).
 
-    Starts at the encoder's ``z0`` (= mu) and minimises the training SDF loss (clamped L1 on ALL samples of the spine's
-    ``sdf_samples.npz``) plus the far-field hinge outside the spine's box (as in training, otherwise a free code may create
-    surface where the decoder was never supervised). If the reconstructions of the optimised codes lose the bias, the
-    decoder CAN represent the shape and the encoder (the amortised inference) is the bottleneck; if the bias remains, the
-    decoder's capacity / representation is. Returns ``(z [D] numpy, {"loss_start", "loss_end"})``.
+def _far_points(q_np, sample_type, far_bbox, n_far, far_clamp_nm, far_slack_nm, rng):
+    from ...data.datasets import SAMPLE_SURFACE
+
+    surface = q_np[sample_type == SAMPLE_SURFACE]
+    low, high = surface.min(axis=0) - far_slack_nm, surface.max(axis=0) + far_slack_nm
+    g_low, g_high = np.asarray(far_bbox[0], dtype=np.float64), np.asarray(far_bbox[1], dtype=np.float64)
+    p = g_low + rng.random((n_far, 3)) * (g_high - g_low)
+    bound = np.minimum(np.maximum(np.maximum(low - p, p - high), 0.0).max(axis=1), far_clamp_nm)
+    return p, bound
+
+
+def optimize_latents(model, z0, sdf_paths, *, coord_scale: float, sdf_clamp: Optional[float], far_bbox=None, steps: int = 300,
+                     lr: float = 1e-2, n_far: int = 2048, far_clamp_nm: float = 300.0, far_slack_nm: float = 20.0, seed: int = 0,
+                     device="cpu", max_queries: Optional[int] = None):
+    """Auto-decoder fit of the codes of a BATCH of spines with the decoder FROZEN (diagnostic of the amortisation gap, and
+    codes for a prior fitted on directly optimised codes).
+
+    Starts at the encoder's ``z0 [B, D]`` (= mu) and minimises, per spine, the training SDF loss (clamped L1 on the samples of
+    its ``sdf_samples.npz``; all of them, or a fixed random ``max_queries`` / the smallest file of the batch when they differ)
+    plus the far-field hinge outside the spine's box (as in training: otherwise a free code may create surface where the
+    decoder was never supervised). The per-spine losses are SUMMED, so with Adam every spine's code follows the same path as
+    if fitted alone. If the reconstructions of the optimised codes lose the bias, the decoder CAN represent the shape and the
+    encoder (the amortised inference) is the bottleneck. Returns ``(z [B, D] numpy, [{"loss_start", "loss_end"} nm per spine])``.
     """
     import torch
 
-    from ...data.datasets import SAMPLE_SURFACE
-
-    data = np.load(sdf_path)
-    q_np = np.asarray(data["query_points"], dtype=np.float64)
-    sample_type = np.asarray(data["sample_type"])
-    q = torch.as_tensor(q_np * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
-    target = torch.as_tensor(np.asarray(data["sdf"], dtype=np.float64) * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
-    far_p = far_b = None
-    if far_bbox is not None and n_far > 0:
-        rng = np.random.default_rng(seed)
-        surface = q_np[sample_type == SAMPLE_SURFACE]
-        low, high = surface.min(axis=0) - far_slack_nm, surface.max(axis=0) + far_slack_nm
-        g_low, g_high = np.asarray(far_bbox[0], dtype=np.float64), np.asarray(far_bbox[1], dtype=np.float64)
-        p = g_low + rng.random((n_far, 3)) * (g_high - g_low)
-        bound = np.minimum(np.maximum(np.maximum(low - p, p - high), 0.0).max(axis=1), far_clamp_nm)
-        far_p = torch.as_tensor(p * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
-        far_b = torch.as_tensor(bound * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
+    rng = np.random.default_rng(seed)
+    loaded = [np.load(p) for p in sdf_paths]
+    sizes = [len(d["sdf"]) for d in loaded]
+    n_q = min(sizes) if max_queries is None else min(min(sizes), int(max_queries))
+    qs, ts, fps, fbs = [], [], [], []
+    for d in loaded:
+        q_np = np.asarray(d["query_points"], dtype=np.float64)
+        sample_type = np.asarray(d["sample_type"])
+        pick = np.arange(len(q_np)) if len(q_np) == n_q else np.sort(rng.choice(len(q_np), n_q, replace=False))
+        qs.append(q_np[pick])
+        ts.append(np.asarray(d["sdf"], dtype=np.float64)[pick])
+        if far_bbox is not None and n_far > 0:
+            p, b = _far_points(q_np, sample_type, far_bbox, n_far, far_clamp_nm, far_slack_nm, rng)
+            fps.append(p)
+            fbs.append(b)
+    as_t = lambda a: torch.as_tensor(np.stack(a) * coord_scale, dtype=torch.float32, device=device)  # noqa: E731
+    q, target = as_t(qs), as_t(ts)
+    far_p, far_b = (as_t(fps), as_t(fbs)) if fps else (None, None)
 
     for prm in model.parameters():
         prm.requires_grad_(False)
-    z = torch.as_tensor(np.asarray(z0), dtype=torch.float32, device=device).reshape(1, -1).clone().requires_grad_(True)
+    z = torch.as_tensor(np.asarray(z0), dtype=torch.float32, device=device).reshape(len(sdf_paths), -1).clone().requires_grad_(True)
     opt = torch.optim.Adam([z], lr=lr)
 
-    def loss_fn():
+    def per_spine():
         pred, tgt = model.decode(q, z), target
         if sdf_clamp is not None:
             pred, tgt = pred.clamp(-sdf_clamp, sdf_clamp), tgt.clamp(-sdf_clamp, sdf_clamp)
-        loss = (pred - tgt).abs().mean()
+        loss = (pred - tgt).abs().mean(dim=1)
         if far_p is not None:
-            active = far_b > 0
-            if bool(active.any()):
-                loss = loss + torch.relu(far_b - model.decode(far_p, z))[active].mean()
+            active = (far_b > 0).float()
+            hinge = torch.relu(far_b - model.decode(far_p, z)) * active
+            loss = loss + hinge.sum(dim=1) / active.sum(dim=1).clamp_min(1.0)
         return loss
 
     with torch.no_grad():
-        start = float(loss_fn())
+        start = per_spine().cpu().numpy()
     for _ in range(int(steps)):
         opt.zero_grad(set_to_none=True)
-        loss = loss_fn()
-        loss.backward()
+        per_spine().sum().backward()
         opt.step()
     with torch.no_grad():
-        end = float(loss_fn())
-    return z.detach()[0].cpu().numpy(), {"loss_start": start / coord_scale, "loss_end": end / coord_scale}
+        end = per_spine().cpu().numpy()
+    info = [{"loss_start": float(a) / coord_scale, "loss_end": float(b) / coord_scale} for a, b in zip(start, end)]
+    return z.detach().cpu().numpy(), info
+
+
+def optimize_latent(model, z0, sdf_path, **kwargs):
+    """One spine (see ``optimize_latents``): returns ``(z [D], {"loss_start", "loss_end"})``."""
+    z, info = optimize_latents(model, np.asarray(z0).reshape(1, -1), [sdf_path], **kwargs)
+    return z[0], info[0]
