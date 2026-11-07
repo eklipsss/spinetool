@@ -121,3 +121,61 @@ def cluster_mean_ci(values: pd.Series, groups: pd.Series, *, n_boot: int = 2000,
         return {"mean": float("nan"), "ci_low": float("nan"), "ci_high": float("nan"), "n": 0}
     boot = _cluster_means(v[:, None], g, n_boot, np.random.default_rng(seed))[:, 0]
     return {"mean": float(v.mean()), "ci_low": float(np.nanquantile(boot, 0.025)), "ci_high": float(np.nanquantile(boot, 0.975)), "n": int(len(v))}
+
+
+def optimize_latent(model, z0, sdf_path, *, coord_scale: float, sdf_clamp: Optional[float], far_bbox=None, steps: int = 300,
+                    lr: float = 1e-2, n_far: int = 2048, far_clamp_nm: float = 300.0, far_slack_nm: float = 20.0, seed: int = 0, device="cpu"):
+    """Auto-decoder fit of the code of ONE spine with the decoder FROZEN (diagnostic of the amortisation gap).
+
+    Starts at the encoder's ``z0`` (= mu) and minimises the training SDF loss (clamped L1 on ALL samples of the spine's
+    ``sdf_samples.npz``) plus the far-field hinge outside the spine's box (as in training, otherwise a free code may create
+    surface where the decoder was never supervised). If the reconstructions of the optimised codes lose the bias, the
+    decoder CAN represent the shape and the encoder (the amortised inference) is the bottleneck; if the bias remains, the
+    decoder's capacity / representation is. Returns ``(z [D] numpy, {"loss_start", "loss_end"})``.
+    """
+    import torch
+
+    from ...data.datasets import SAMPLE_SURFACE
+
+    data = np.load(sdf_path)
+    q_np = np.asarray(data["query_points"], dtype=np.float64)
+    sample_type = np.asarray(data["sample_type"])
+    q = torch.as_tensor(q_np * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
+    target = torch.as_tensor(np.asarray(data["sdf"], dtype=np.float64) * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
+    far_p = far_b = None
+    if far_bbox is not None and n_far > 0:
+        rng = np.random.default_rng(seed)
+        surface = q_np[sample_type == SAMPLE_SURFACE]
+        low, high = surface.min(axis=0) - far_slack_nm, surface.max(axis=0) + far_slack_nm
+        g_low, g_high = np.asarray(far_bbox[0], dtype=np.float64), np.asarray(far_bbox[1], dtype=np.float64)
+        p = g_low + rng.random((n_far, 3)) * (g_high - g_low)
+        bound = np.minimum(np.maximum(np.maximum(low - p, p - high), 0.0).max(axis=1), far_clamp_nm)
+        far_p = torch.as_tensor(p * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
+        far_b = torch.as_tensor(bound * coord_scale, dtype=torch.float32, device=device).unsqueeze(0)
+
+    for prm in model.parameters():
+        prm.requires_grad_(False)
+    z = torch.as_tensor(np.asarray(z0), dtype=torch.float32, device=device).reshape(1, -1).clone().requires_grad_(True)
+    opt = torch.optim.Adam([z], lr=lr)
+
+    def loss_fn():
+        pred, tgt = model.decode(q, z), target
+        if sdf_clamp is not None:
+            pred, tgt = pred.clamp(-sdf_clamp, sdf_clamp), tgt.clamp(-sdf_clamp, sdf_clamp)
+        loss = (pred - tgt).abs().mean()
+        if far_p is not None:
+            active = far_b > 0
+            if bool(active.any()):
+                loss = loss + torch.relu(far_b - model.decode(far_p, z))[active].mean()
+        return loss
+
+    with torch.no_grad():
+        start = float(loss_fn())
+    for _ in range(int(steps)):
+        opt.zero_grad(set_to_none=True)
+        loss = loss_fn()
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        end = float(loss_fn())
+    return z.detach()[0].cpu().numpy(), {"loss_start": start / coord_scale, "loss_end": end / coord_scale}

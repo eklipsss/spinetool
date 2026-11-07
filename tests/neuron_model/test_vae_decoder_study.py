@@ -73,13 +73,30 @@ def test_compare_vae_decoders_script_on_a_tiny_run(fake_dataset, tmp_path):
     out = tmp_path / "study"
     proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts/neuron_model/compare_vae_decoders.py"), "--run", f"a={run.root}",
                            "--run", f"b={run.root}", "--split", "train", "--n-spines", "6", "--resolution", "24", "--bbox", str(bbox),
-                           "--n-boot", "50", "--out", str(out)], capture_output=True, text=True, cwd=REPO_ROOT)
+                           "--n-boot", "50", "--optimize-latent", "5", "--out", str(out)], capture_output=True, text=True, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-4000:]
     summary = pd.read_csv(out / "summary.csv").set_index("kind")
-    assert {"a", "b", "real", "real_mc"} <= set(summary.index)
+    assert {"a", "a_zopt", "b", "real", "real_mc"} <= set(summary.index) and "b_zopt" not in summary.index
     assert summary.loc["real_mc", "chamfer_l1_nm"] < 30   # exact SDF + MC 24^3 of a sphere is close to the sphere
     # the untrained tiny decoder extracts no surface: its rows are NaN (counted, not dropped); the real mesh against its own
     # exact-SDF + MC copy is paired and almost unbiased
     assert summary.loc["a", "valid_rate"] == 0 and np.isnan(summary.loc["a", "mean_abs_bias_sd"])
     assert np.isfinite(summary.loc["real", "mean_abs_bias_sd"])
     assert (out / "summary.md").exists()
+
+
+def test_optimize_latent_lowers_the_sdf_loss_of_a_frozen_decoder(fake_dataset, tmp_path):
+    import torch
+
+    from src.neuron_model.spine_generation.data.index import load_spine_index
+    from src.neuron_model.spine_generation.models.spine_vae.decoder_study import optimize_latent
+    from src.neuron_model.spine_generation.models.spine_vae.latent_prior import load_vae_run
+
+    run = _tiny_vae_run(fake_dataset, tmp_path)
+    model, _, cfg, _, device = load_vae_run(run.root, "latest")
+    before = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    path = load_spine_index([fake_dataset / "manifest.parquet"]).frame["sdf_samples_path"].iloc[0]
+    z0 = np.zeros(model.cfg.latent_dim, dtype=np.float32)
+    z, info = optimize_latent(model, z0, path, coord_scale=float(cfg["data"]["coord_scale"]), sdf_clamp=None, steps=30, lr=5e-2, device=device)
+    assert info["loss_end"] < info["loss_start"] and not np.allclose(z, z0)
+    assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())   # the decoder stays frozen

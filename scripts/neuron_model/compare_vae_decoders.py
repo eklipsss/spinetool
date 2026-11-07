@@ -61,7 +61,7 @@ def main() -> None:
     from src.neuron_model.spine_generation.evaluation.real_controls import banded_sdf
     from src.neuron_model.spine_generation.experiment.artifacts import write_json
     from src.neuron_model.spine_generation.experiment.config import load_config, resolve_path
-    from src.neuron_model.spine_generation.models.spine_vae.decoder_study import cluster_mean_ci, paired_bias, surface_distances
+    from src.neuron_model.spine_generation.models.spine_vae.decoder_study import cluster_mean_ci, optimize_latent, paired_bias, surface_distances
     from src.neuron_model.spine_generation.models.spine_vae.generate import latent_to_mesh
     from src.neuron_model.spine_generation.models.spine_vae.latent_prior import encode_spines, load_split_index, load_vae_run
     from src.neuron_model.spine_generation.reconstruction.marching_cubes import GridSpec, sdf_to_mesh
@@ -81,6 +81,11 @@ def main() -> None:
     ap.add_argument("--mesh-path-mode", default="absolute", choices=("relative", "absolute"))
     ap.add_argument("--bbox", type=Path, help="frozen bbox json (default: data.bbox of the first run)")
     ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--optimize-latent", type=int, default=0, metavar="STEPS",
+                    help="also fit the code of every spine with the decoder FROZEN (Adam from mu, training SDF loss on the "
+                         "spine's sdf_samples.npz): kind <run>_zopt. Bias gone -> the encoder is the bottleneck; bias kept -> the decoder")
+    ap.add_argument("--opt-lr", type=float, default=1e-2)
+    ap.add_argument("--opt-runs", nargs="*", help="runs to fit codes for (default: the baseline only)")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
     runs = parse_runs(args.run)
@@ -126,28 +131,46 @@ def main() -> None:
     tables = [generated_morphometrics([real_meshes[k] for k in keys], attachment_finder=finder, compute_chords=False, sample_ids=keys).assign(kind="real"),
               generated_morphometrics([mc_meshes[k] for k in keys], attachment_finder=finder, compute_chords=False, sample_ids=keys).assign(kind="real_mc")]
 
+    opt_runs = set(args.opt_runs) if args.opt_runs else {runs[0][0]}
+    names = []
     for name, model, run, cfg, ckpt, device in loaded:
         codes = encode_spines(model, index, cfg["data"], variants=(1,), device=device, batch_size=16)
         mu = {k: codes["mu"][j, 0] for j, k in enumerate(codes["keys"])}
         coord_scale = float(cfg["data"]["coord_scale"])
-        meshes = []
-        for i, k in enumerate(keys, 1):
-            res = latent_to_mesh(model, mu[k], bbox=box, resolution=args.resolution, coord_scale=coord_scale, device=device, chunk_size=chunk,
-                                 iso_level=float(mc_cfg.get("iso_level", 0.0)), postprocess_cfg=post_cfg, check_self_intersections=False)
-            mesh = res["mesh_postprocessed"]
-            meshes.append(mesh)
-            rows.append({"spine_key": k, "kind": name, "valid": bool(res["validation_postprocessed"].get("is_valid")),
-                         "valid_raw": bool(res["validation_raw"].get("is_valid")), **surface_distances(mesh, real_meshes[k], seed=i)})
-            if i % 50 == 0 or i == len(keys):
-                print(f"  {name} ({ckpt}) {i}/{len(keys)} ({time.time() - started:.0f} s)", flush=True)
-        tables.append(generated_morphometrics(meshes, attachment_finder=finder, compute_chords=False, sample_ids=keys).assign(kind=name))
+        variants = [(name, mu, {})]
+        if args.optimize_latent > 0 and name in opt_runs:
+            clamp = cfg.get("loss", {}).get("sdf_clamp")
+            clamp = None if clamp is None else float(clamp)
+            far = int(cfg["data"].get("far_queries", 0)) > 0 and float(cfg.get("loss", {}).get("far", 0.0)) > 0
+            zopt, info = {}, {}
+            for i, k in enumerate(keys, 1):
+                zopt[k], info[k] = optimize_latent(model, mu[k], frame.loc[k, "sdf_samples_path"], coord_scale=coord_scale, sdf_clamp=clamp,
+                                                   far_bbox=box if far else None, steps=args.optimize_latent, lr=args.opt_lr,
+                                                   far_clamp_nm=float(cfg["data"].get("far_clamp_nm", 300.0)), seed=i, device=device)
+                if i % 50 == 0 or i == len(keys):
+                    print(f"  {name}_zopt fit {i}/{len(keys)}: SDF loss {np.mean([v['loss_start'] for v in info.values()]):.2f} -> "
+                          f"{np.mean([v['loss_end'] for v in info.values()]):.2f} nm ({time.time() - started:.0f} s)", flush=True)
+            variants.append((f"{name}_zopt", zopt, info))
+        for kind, z_by_key, info in variants:
+            names.append(kind)
+            meshes = []
+            for i, k in enumerate(keys, 1):
+                res = latent_to_mesh(model, z_by_key[k], bbox=box, resolution=args.resolution, coord_scale=coord_scale, device=device, chunk_size=chunk,
+                                     iso_level=float(mc_cfg.get("iso_level", 0.0)), postprocess_cfg=post_cfg, check_self_intersections=False)
+                mesh = res["mesh_postprocessed"]
+                meshes.append(mesh)
+                rows.append({"spine_key": k, "kind": kind, "valid": bool(res["validation_postprocessed"].get("is_valid")),
+                             "valid_raw": bool(res["validation_raw"].get("is_valid")), **surface_distances(mesh, real_meshes[k], seed=i),
+                             **({"opt_loss_start_nm": info[k]["loss_start"], "opt_loss_end_nm": info[k]["loss_end"]} if info else {})})
+                if i % 50 == 0 or i == len(keys):
+                    print(f"  {kind} ({ckpt}) {i}/{len(keys)} ({time.time() - started:.0f} s)", flush=True)
+            tables.append(generated_morphometrics(meshes, attachment_finder=finder, compute_chords=False, sample_ids=keys).assign(kind=kind))
 
     morph = pd.concat(tables, ignore_index=True).rename(columns={"sample_id": "spine_key"})
     spines = morph.merge(pd.DataFrame(rows), on=["spine_key", "kind"], how="left")
     spines["neuron_id"] = spines["spine_key"].map(neuron)
     spines.to_parquet(out / "spines.parquet", index=False)
 
-    names = [n for n, _ in runs]
     metrics = [m for m in SCALAR_METRICS if m in spines.columns]
     res = paired_bias(spines, names + ["real"], reference="real_mc", metrics=metrics, baseline=names[0], n_boot=args.n_boot, seed=args.seed)
     res["per_metric"].to_csv(out / "per_metric.csv", index=False)
