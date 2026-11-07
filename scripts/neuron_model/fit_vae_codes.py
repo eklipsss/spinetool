@@ -54,6 +54,10 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=32, help="spines optimised together (GPU memory ~ batch x SDF samples)")
     ap.add_argument("--seed", type=int, default=1, help="spine selection, as fit_latent_prior.py --seed")
     ap.add_argument("--out-name", default="latent_prior_zopt")
+    ap.add_argument("--anchor-weight", type=float, default=0.0,
+                    help="MAP penalty in nm * mean_d(((z - mu) / sigma)^2) (0 = none, as chain K; choose it with "
+                         "compare_vae_decoders.py --opt-anchor-weights on dev val)")
+    ap.add_argument("--anchor-scale", default="posterior", choices=("posterior", "unit"))
     ap.add_argument("--device")
     args = ap.parse_args()
 
@@ -76,12 +80,14 @@ def main() -> None:
         codes = encode_spines(model, index, data, variants=(1,), device=device, batch_size=16)
         keys, mu = list(codes["keys"]), codes["mu"][:, 0]
         paths = index.frame.set_index("spine_key").loc[keys, "sdf_samples_path"].tolist()
+        sigma = np.exp(0.5 * np.asarray(codes["logvar"][:, 0], dtype=float))
         z_all, info_all = np.empty_like(mu), []
         for b in range(0, len(keys), args.batch_size):
             sl = slice(b, b + args.batch_size)
             z, info = optimize_latents(model, mu[sl], paths[sl], coord_scale=coord_scale, sdf_clamp=clamp, far_bbox=box,
                                        steps=args.steps, lr=args.lr, far_clamp_nm=float(data.get("far_clamp_nm", 300.0)),
-                                       seed=args.seed + b, device=device)
+                                       seed=args.seed + b, device=device, anchor_weight_nm=args.anchor_weight,
+                                       anchor_scale=sigma[sl] if args.anchor_scale == "posterior" else None)
             z_all[sl] = z
             info_all += info
             done = min(b + args.batch_size, len(keys))
@@ -96,10 +102,11 @@ def main() -> None:
         shift = np.linalg.norm(z_all - mu, axis=1)
         spread = float(np.median(np.linalg.norm(mu - mu.mean(axis=0), axis=1)))
         pd.DataFrame({"spine_key": keys, "loss_start_nm": [i["loss_start"] for i in info_all], "loss_end_nm": [i["loss_end"] for i in info_all],
-                      "shift_from_mu": shift}).to_parquet(out_dir / f"fit_info_{split}.parquet", index=False)
+                      "shift_from_mu": shift, "posterior_dist2": [i["anchor_dist2"] for i in info_all]}).to_parquet(out_dir / f"fit_info_{split}.parquet", index=False)
         print(f"[codes] {split}: {len(keys)} codes -> {out_dir / f'codes_{split}.npz'}; |z - mu| median {np.median(shift):.3f} "
               f"(median |mu - mean| {spread:.3f}); |z| median {np.median(np.linalg.norm(z_all, axis=1)):.3f} "
-              f"vs |mu| {np.median(np.linalg.norm(mu, axis=1)):.3f}", flush=True)
+              f"vs |mu| {np.median(np.linalg.norm(mu, axis=1)):.3f}; ((z - mu)/sigma)^2 median "
+              f"{np.median([i['anchor_dist2'] for i in info_all]):.2f} (anchor weight {args.anchor_weight:g} nm)", flush=True)
     print(f"-> {out_dir}  ({checkpoint_id}, {time.time() - started:.0f} s)")
 
 

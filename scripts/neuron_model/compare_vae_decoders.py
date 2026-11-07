@@ -9,6 +9,12 @@ and its paired difference from the first run (the baseline), surface error to th
 mesh validity and the real_mc-vs-reconstruction classifier AUC (logistic, as the generator report). Two trainings of the
 same recipe passed as two runs give the training-noise floor.
 
+--optimize-latent STEPS adds kinds with the code of every spine fitted directly (decoder frozen): <run>_zopt without a
+penalty and <run>_zopt_a<w> for every --opt-anchor-weights w > 0 (MAP penalty w nm * mean_d(((z - mu) / sigma)^2), sigma
+the encoder's posterior std: keeps the code where the decoder was trained). --midpoints N decodes the midpoints of N fixed
+random pairs of codes of every kind (a proxy of prior samples falling BETWEEN fitted codes; chain K: a flow on unpenalised
+codes broke the necks in 43 % of its meshes) and reports their single-component / valid rate.
+
     python scripts/neuron_model/compare_vae_decoders.py ^
         --run base=runs/training/neuron-model/2026-10-19_003408_vae-dev-reg0-cos ^
         --run base_rerun=runs/training/neuron-model/2026-11-04_015937_vae-dev-reg0-cos-curves ^
@@ -86,6 +92,11 @@ def main() -> None:
                          "spine's sdf_samples.npz): kind <run>_zopt. Bias gone -> the encoder is the bottleneck; bias kept -> the decoder")
     ap.add_argument("--opt-lr", type=float, default=1e-2)
     ap.add_argument("--opt-runs", nargs="*", help="runs to fit codes for (default: the baseline only)")
+    ap.add_argument("--opt-anchor-weights", type=float, nargs="+", default=[0.0],
+                    help="MAP penalty weights in nm (0 = no penalty, kind <run>_zopt; w > 0 -> <run>_zopt_a<w>)")
+    ap.add_argument("--opt-anchor-scale", default="posterior", choices=("posterior", "unit"),
+                    help="scale of the distance from mu: the encoder's posterior sigma per dimension, or 1")
+    ap.add_argument("--midpoints", type=int, default=0, help="decode midpoints of this many random code pairs per kind")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
     runs = parse_runs(args.run)
@@ -132,25 +143,32 @@ def main() -> None:
               generated_morphometrics([mc_meshes[k] for k in keys], attachment_finder=finder, compute_chords=False, sample_ids=keys).assign(kind="real_mc")]
 
     opt_runs = set(args.opt_runs) if args.opt_runs else {runs[0][0]}
-    names = []
+    names, midpoint_rows = [], []
     for name, model, run, cfg, ckpt, device in loaded:
         codes = encode_spines(model, index, cfg["data"], variants=(1,), device=device, batch_size=16)
         mu = {k: codes["mu"][j, 0] for j, k in enumerate(codes["keys"])}
+        sigma = {k: np.exp(0.5 * np.asarray(codes["logvar"][j, 0], dtype=float)) for j, k in enumerate(codes["keys"])}
         coord_scale = float(cfg["data"]["coord_scale"])
         variants = [(name, mu, {})]
         if args.optimize_latent > 0 and name in opt_runs:
             clamp = cfg.get("loss", {}).get("sdf_clamp")
             clamp = None if clamp is None else float(clamp)
             far = int(cfg["data"].get("far_queries", 0)) > 0 and float(cfg.get("loss", {}).get("far", 0.0)) > 0
-            zopt, info = {}, {}
-            for i, k in enumerate(keys, 1):
-                zopt[k], info[k] = optimize_latent(model, mu[k], frame.loc[k, "sdf_samples_path"], coord_scale=coord_scale, sdf_clamp=clamp,
-                                                   far_bbox=box if far else None, steps=args.optimize_latent, lr=args.opt_lr,
-                                                   far_clamp_nm=float(cfg["data"].get("far_clamp_nm", 300.0)), seed=i, device=device)
-                if i % 50 == 0 or i == len(keys):
-                    print(f"  {name}_zopt fit {i}/{len(keys)}: SDF loss {np.mean([v['loss_start'] for v in info.values()]):.2f} -> "
-                          f"{np.mean([v['loss_end'] for v in info.values()]):.2f} nm ({time.time() - started:.0f} s)", flush=True)
-            variants.append((f"{name}_zopt", zopt, info))
+            for weight in args.opt_anchor_weights:
+                kind = f"{name}_zopt" if weight <= 0 else f"{name}_zopt_a{weight:g}"
+                zopt, info = {}, {}
+                for i, k in enumerate(keys, 1):
+                    zopt[k], info[k] = optimize_latent(model, mu[k], frame.loc[k, "sdf_samples_path"], coord_scale=coord_scale, sdf_clamp=clamp,
+                                                       far_bbox=box if far else None, steps=args.optimize_latent, lr=args.opt_lr,
+                                                       far_clamp_nm=float(cfg["data"].get("far_clamp_nm", 300.0)), seed=i, device=device,
+                                                       anchor_weight_nm=weight,
+                                                       anchor_scale=sigma[k] if args.opt_anchor_scale == "posterior" else None)
+                    if i % 50 == 0 or i == len(keys):
+                        print(f"  {kind} fit {i}/{len(keys)}: SDF loss {np.mean([v['loss_start'] for v in info.values()]):.2f} -> "
+                              f"{np.mean([v['loss_end'] for v in info.values()]):.2f} nm ({time.time() - started:.0f} s)", flush=True)
+                variants.append((kind, zopt, info))
+        pair_rng = np.random.default_rng(args.seed + 7)
+        pairs = [tuple(pair_rng.choice(len(keys), 2, replace=False)) for _ in range(args.midpoints)]
         for kind, z_by_key, info in variants:
             names.append(kind)
             meshes = []
@@ -161,10 +179,24 @@ def main() -> None:
                 meshes.append(mesh)
                 rows.append({"spine_key": k, "kind": kind, "valid": bool(res["validation_postprocessed"].get("is_valid")),
                              "valid_raw": bool(res["validation_raw"].get("is_valid")), **surface_distances(mesh, real_meshes[k], seed=i),
+                             "dist_from_mu": float(np.linalg.norm(np.asarray(z_by_key[k]) - mu[k])),
+                             "posterior_dist2": float(np.mean(((np.asarray(z_by_key[k]) - mu[k]) / sigma[k]) ** 2)),
+                             "code_norm": float(np.linalg.norm(z_by_key[k])),
                              **({"opt_loss_start_nm": info[k]["loss_start"], "opt_loss_end_nm": info[k]["loss_end"]} if info else {})})
                 if i % 50 == 0 or i == len(keys):
                     print(f"  {kind} ({ckpt}) {i}/{len(keys)} ({time.time() - started:.0f} s)", flush=True)
             tables.append(generated_morphometrics(meshes, attachment_finder=finder, compute_chords=False, sample_ids=keys).assign(kind=kind))
+            for a, b in pairs:
+                zm = 0.5 * (np.asarray(z_by_key[keys[a]]) + np.asarray(z_by_key[keys[b]]))
+                res = latent_to_mesh(model, zm, bbox=box, resolution=args.resolution, coord_scale=coord_scale, device=device, chunk_size=chunk,
+                                     iso_level=float(mc_cfg.get("iso_level", 0.0)), postprocess_cfg=post_cfg, check_self_intersections=False)
+                vr = res["validation_raw"]
+                midpoint_rows.append({"kind": kind, "single_component": vr.get("n_connected_components") == 1,
+                                      "valid_raw": bool(vr.get("is_valid")), "valid": bool(res["validation_postprocessed"].get("is_valid"))})
+            if pairs:
+                mp = pd.DataFrame([r for r in midpoint_rows if r["kind"] == kind])
+                print(f"  {kind} midpoints of {len(pairs)} pairs: single component {mp['single_component'].mean():.2f}, "
+                      f"valid {mp['valid'].mean():.2f} ({time.time() - started:.0f} s)", flush=True)
 
     morph = pd.concat(tables, ignore_index=True).rename(columns={"sample_id": "spine_key"})
     spines = morph.merge(pd.DataFrame(rows), on=["spine_key", "kind"], how="left")
@@ -182,6 +214,15 @@ def main() -> None:
         hd = cluster_mean_ci(g["hd95"], g["neuron_id"], n_boot=args.n_boot, seed=args.seed)
         entry = {"kind": kind, "valid_rate": float(g["valid"].mean()), "chamfer_l1_nm": ch["mean"], "chamfer_ci_low": ch["ci_low"],
                  "chamfer_ci_high": ch["ci_high"], "hd95_nm": hd["mean"]}
+        if kind != "real_mc":
+            entry.update(dist_from_mu_median=float(g["dist_from_mu"].median()), posterior_dist2_median=float(g["posterior_dist2"].median()),
+                         code_norm_median=float(g["code_norm"].median()))
+            if "opt_loss_end_nm" in g and g["opt_loss_end_nm"].notna().any():
+                entry["opt_loss_end_nm"] = float(g["opt_loss_end_nm"].mean())
+            mp = [r for r in midpoint_rows if r["kind"] == kind]
+            if mp:
+                entry.update(midpoint_single_component=float(np.mean([r["single_component"] for r in mp])),
+                             midpoint_valid=float(np.mean([r["valid"] for r in mp])))
         if kind != "real_mc":
             ref = spines[spines["kind"] == "real_mc"]
             feats = [f for f in JOINT_FEATURES if f in spines.columns]
@@ -201,15 +242,18 @@ def main() -> None:
 
     lines = ["# VAE decoder study", "", f"{len(keys)} {args.split} spines, {spines['neuron_id'].nunique()} neurons, MC {args.resolution}^3; "
              f"reference real_mc (exact SDF of the real mesh on the same grid); baseline {names[0]}.", "",
-             "| kind | mean abs bias (SD) [95 % CI] | vs baseline [95 % CI] | metrics with bias | valid | Chamfer-L1 nm [CI] | HD95 nm | AUC vs real_mc |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "| kind | mean abs bias (SD) [95 % CI] | vs baseline [95 % CI] | metrics with bias | valid | Chamfer-L1 nm [CI] | HD95 nm | AUC vs real_mc "
+             "| SDF fit nm | |z - mu| | ((z-mu)/sigma)^2 | midpoints 1 comp |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for r in summary.to_dict("records"):
         f = lambda v, p=3: "" if v is None or (isinstance(v, float) and not np.isfinite(v)) else f"{v:.{p}f}"
         bias = f"{f(r.get('mean_abs_bias_sd'))} [{f(r.get('ci_low'))}; {f(r.get('ci_high'))}]" if np.isfinite(r.get("mean_abs_bias_sd", np.nan)) else ""
         diff = f"{f(r.get('diff_vs_baseline'), 3)} [{f(r.get('diff_ci_low'))}; {f(r.get('diff_ci_high'))}]" if np.isfinite(r.get("diff_vs_baseline", np.nan)) else ""
         nsig = f"{int(r['n_significant'])}/{int(r['n_metrics'])}" if np.isfinite(r.get("n_significant", np.nan)) else ""
         lines.append(f"| {r['kind']} | {bias} | {diff} | {nsig} | {f(r.get('valid_rate'), 2)} | {f(r.get('chamfer_l1_nm'), 1)} "
-                     f"[{f(r.get('chamfer_ci_low'), 1)}; {f(r.get('chamfer_ci_high'), 1)}] | {f(r.get('hd95_nm'), 0)} | {f(r.get('auc_vs_real_mc'))} |")
+                     f"[{f(r.get('chamfer_ci_low'), 1)}; {f(r.get('chamfer_ci_high'), 1)}] | {f(r.get('hd95_nm'), 0)} | {f(r.get('auc_vs_real_mc'))} "
+                     f"| {f(r.get('opt_loss_end_nm'), 1)} | {f(r.get('dist_from_mu_median'), 2)} | {f(r.get('posterior_dist2_median'), 2)} "
+                     f"| {f(r.get('midpoint_single_component'), 2)} |")
     lines += ["", "Per metric (bias in SD of real_mc, 95 % CI, * = interval excludes 0):", "",
               "| metric | " + " | ".join(names + ["real"]) + " |", "| --- |" + " --- |" * (len(names) + 1)]
     pm = res["per_metric"]

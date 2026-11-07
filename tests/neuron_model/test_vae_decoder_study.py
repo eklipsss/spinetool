@@ -73,10 +73,12 @@ def test_compare_vae_decoders_script_on_a_tiny_run(fake_dataset, tmp_path):
     out = tmp_path / "study"
     proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts/neuron_model/compare_vae_decoders.py"), "--run", f"a={run.root}",
                            "--run", f"b={run.root}", "--split", "train", "--n-spines", "6", "--resolution", "24", "--bbox", str(bbox),
-                           "--n-boot", "50", "--optimize-latent", "5", "--out", str(out)], capture_output=True, text=True, cwd=REPO_ROOT)
+                           "--n-boot", "50", "--optimize-latent", "5", "--opt-anchor-weights", "0", "10",
+                           "--midpoints", "2", "--out", str(out)], capture_output=True, text=True, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-4000:]
     summary = pd.read_csv(out / "summary.csv").set_index("kind")
-    assert {"a", "a_zopt", "b", "real", "real_mc"} <= set(summary.index) and "b_zopt" not in summary.index
+    assert {"a", "a_zopt", "a_zopt_a10", "b", "real", "real_mc"} <= set(summary.index) and "b_zopt" not in summary.index
+    assert "midpoint_single_component" in summary.columns and summary.loc["a", "dist_from_mu_median"] == 0
     assert summary.loc["real_mc", "chamfer_l1_nm"] < 30   # exact SDF + MC 24^3 of a sphere is close to the sphere
     # the untrained tiny decoder extracts no surface: its rows are NaN (counted, not dropped); the real mesh against its own
     # exact-SDF + MC copy is paired and almost unbiased
@@ -102,12 +104,28 @@ def test_optimize_latent_lowers_the_sdf_loss_of_a_frozen_decoder(fake_dataset, t
     assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())   # the decoder stays frozen
 
 
+def test_anchor_penalty_keeps_the_code_near_the_anchor(fake_dataset, tmp_path):
+    from src.neuron_model.spine_generation.data.index import load_spine_index
+    from src.neuron_model.spine_generation.models.spine_vae.decoder_study import optimize_latents
+    from src.neuron_model.spine_generation.models.spine_vae.latent_prior import load_vae_run
+
+    run = _tiny_vae_run(fake_dataset, tmp_path)
+    model, _, cfg, _, device = load_vae_run(run.root, "latest")
+    paths = list(load_spine_index([fake_dataset / "manifest.parquet"]).frame["sdf_samples_path"].iloc[:2])
+    z0 = np.zeros((2, model.cfg.latent_dim), dtype=np.float32)
+    kw = dict(coord_scale=float(cfg["data"]["coord_scale"]), sdf_clamp=None, steps=40, lr=5e-2, device=device)
+    z_free, info_free = optimize_latents(model, z0, paths, **kw)
+    z_pen, info_pen = optimize_latents(model, z0, paths, anchor_weight_nm=1e6, anchor_scale=np.full_like(z0, 0.5), **kw)
+    assert np.linalg.norm(z_pen, axis=1).max() < 0.1 * np.linalg.norm(z_free, axis=1).min()
+    assert all(i["anchor_dist2"] >= 0 for i in info_pen) and info_free[0]["anchor_dist2"] > info_pen[0]["anchor_dist2"]
+
+
 def test_fit_vae_codes_writes_codes_that_fit_latent_prior_reuses(fake_dataset, tmp_path):
     run = _tiny_vae_run(fake_dataset, tmp_path)
     proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts/neuron_model/fit_vae_codes.py"), "--run", str(run.root), "--n-train", "4",
-                           "--n-val", "2", "--steps", "3", "--batch-size", "3"], capture_output=True, text=True, cwd=REPO_ROOT)
+                           "--n-val", "2", "--steps", "3", "--batch-size", "3", "--anchor-weight", "5"], capture_output=True, text=True, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-4000:]
     codes = np.load(run.root / "latent_prior_zopt" / "codes_train.npz")
     assert codes["mu"].shape[:2] == (4, 1) and str(codes["tag"]).endswith("|train|4|1|[1]")
     info = pd.read_parquet(run.root / "latent_prior_zopt" / "fit_info_val.parquet")
-    assert len(info) == 2 and (info["shift_from_mu"] > 0).all()
+    assert len(info) == 2 and (info["shift_from_mu"] > 0).all() and (info["posterior_dist2"] > 0).all()

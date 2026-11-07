@@ -137,7 +137,7 @@ def _far_points(q_np, sample_type, far_bbox, n_far, far_clamp_nm, far_slack_nm, 
 
 def optimize_latents(model, z0, sdf_paths, *, coord_scale: float, sdf_clamp: Optional[float], far_bbox=None, steps: int = 300,
                      lr: float = 1e-2, n_far: int = 2048, far_clamp_nm: float = 300.0, far_slack_nm: float = 20.0, seed: int = 0,
-                     device="cpu", max_queries: Optional[int] = None):
+                     device="cpu", max_queries: Optional[int] = None, anchor_weight_nm: float = 0.0, anchor=None, anchor_scale=None):
     """Auto-decoder fit of the codes of a BATCH of spines with the decoder FROZEN (diagnostic of the amortisation gap, and
     codes for a prior fitted on directly optimised codes).
 
@@ -146,7 +146,14 @@ def optimize_latents(model, z0, sdf_paths, *, coord_scale: float, sdf_clamp: Opt
     plus the far-field hinge outside the spine's box (as in training: otherwise a free code may create surface where the
     decoder was never supervised). The per-spine losses are SUMMED, so with Adam every spine's code follows the same path as
     if fitted alone. If the reconstructions of the optimised codes lose the bias, the decoder CAN represent the shape and the
-    encoder (the amortised inference) is the bottleneck. Returns ``(z [B, D] numpy, [{"loss_start", "loss_end"} nm per spine])``.
+    encoder (the amortised inference) is the bottleneck.
+
+    ``anchor_weight_nm`` > 0 adds a MAP penalty that keeps the code in the region the decoder was trained on (2026-11-08,
+    chain K: codes fitted without it drift ~11 units from mu, |z| x1.5, and a flow prior on them breaks the necks in 43 % of
+    the generated meshes): ``anchor_weight_nm * mean_d(((z - anchor) / anchor_scale)^2)`` per spine, in nm of SDF loss
+    (anchor default z0 = mu, scale default 1; with the posterior sigma as scale it is the log-density of q(z|x) up to a
+    factor, i.e. training saw codes at a value ~1). Returns ``(z [B, D] numpy, [{"loss_start", "loss_end", "anchor_dist2"}
+    per spine])``; the losses are the SDF data term only (nm), ``anchor_dist2`` the final mean squared scaled distance.
     """
     import torch
 
@@ -173,6 +180,13 @@ def optimize_latents(model, z0, sdf_paths, *, coord_scale: float, sdf_clamp: Opt
         prm.requires_grad_(False)
     z = torch.as_tensor(np.asarray(z0), dtype=torch.float32, device=device).reshape(len(sdf_paths), -1).clone().requires_grad_(True)
     opt = torch.optim.Adam([z], lr=lr)
+    center = torch.as_tensor(np.asarray(z0 if anchor is None else anchor), dtype=torch.float32, device=device).reshape(z.shape)
+    scale = (torch.ones_like(center) if anchor_scale is None
+             else torch.as_tensor(np.asarray(anchor_scale), dtype=torch.float32, device=device).reshape(z.shape))
+    lam = float(anchor_weight_nm) * coord_scale  # the SDF loss is in coord-scaled units
+
+    def anchor_dist2():
+        return (((z - center) / scale) ** 2).mean(dim=1)
 
     def per_spine():
         pred, tgt = model.decode(q, z), target
@@ -189,15 +203,23 @@ def optimize_latents(model, z0, sdf_paths, *, coord_scale: float, sdf_clamp: Opt
         start = per_spine().cpu().numpy()
     for _ in range(int(steps)):
         opt.zero_grad(set_to_none=True)
-        per_spine().sum().backward()
+        total = per_spine()
+        if lam > 0:
+            total = total + lam * anchor_dist2()
+        total.sum().backward()
         opt.step()
     with torch.no_grad():
         end = per_spine().cpu().numpy()
-    info = [{"loss_start": float(a) / coord_scale, "loss_end": float(b) / coord_scale} for a, b in zip(start, end)]
+        dist2 = anchor_dist2().cpu().numpy()
+    info = [{"loss_start": float(a) / coord_scale, "loss_end": float(b) / coord_scale, "anchor_dist2": float(c)}
+            for a, b, c in zip(start, end, dist2)]
     return z.detach().cpu().numpy(), info
 
 
 def optimize_latent(model, z0, sdf_path, **kwargs):
     """One spine (see ``optimize_latents``): returns ``(z [D], {"loss_start", "loss_end"})``."""
+    for key in ("anchor", "anchor_scale"):
+        if kwargs.get(key) is not None:
+            kwargs[key] = np.asarray(kwargs[key]).reshape(1, -1)
     z, info = optimize_latents(model, np.asarray(z0).reshape(1, -1), [sdf_path], **kwargs)
     return z[0], info[0]
