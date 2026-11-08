@@ -1,0 +1,15 @@
+# Screened Poisson sweep (chain P, 2026-11-09): real val spines through the MoGen surface chain. One factor against p0_current
+# (= configs/neuron-model/reconstruction/poisson.yaml: depth 7, point_weight 0, k_normal 30).
+frozen: false
+normals:
+  k_normal: 30
+poisson:
+  depth: 9
+  point_weight: 4.0
+  samples_per_node: 1.5
+  scale: 1.25
+  iters: 8
+  full_depth: 5
+  threads: 1
+postprocess:
+  min_component_area_fraction: 0.01
