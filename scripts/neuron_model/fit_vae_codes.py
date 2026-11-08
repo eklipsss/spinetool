@@ -98,7 +98,7 @@ def main() -> None:
         # the tag format of fit_latent_prior.get_codes (variants = [1]): it reuses these codes instead of encoding
         tag = f"{checkpoint_id}|{split}|{n}|{args.seed}|[1]"
         np.savez(out_dir / f"codes_{split}.npz", mu=z_all[:, None, :].astype(np.float64), logvar=codes["logvar"],
-                 keys=np.array(keys), tag=np.array(tag))
+                 keys=np.array(keys), tag=np.array(tag), mu_encoder=mu.astype(np.float64))
         shift = np.linalg.norm(z_all - mu, axis=1)
         spread = float(np.median(np.linalg.norm(mu - mu.mean(axis=0), axis=1)))
         pd.DataFrame({"spine_key": keys, "loss_start_nm": [i["loss_start"] for i in info_all], "loss_end_nm": [i["loss_end"] for i in info_all],
