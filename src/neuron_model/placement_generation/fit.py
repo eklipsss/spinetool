@@ -148,5 +148,10 @@ def load_p0_bundle(path) -> Dict[str, Any]:
     from pathlib import Path
 
     d = json.loads(Path(path).read_text(encoding="utf-8"))
+    position = PositionModel.from_dict(d["position_model"])
+    if d.get("interaction"):  # P1 bundle of fit_p1.py: the P0 density wrapped by the interaction model
+        from .models.interaction import interaction_from_dict
+
+        position = interaction_from_dict(d["interaction"], position)
     return {"design": CountDesign.from_dict(d["design"]), "count_model": CountModel.from_dict(d["count_model"]),
-            "position_model": PositionModel.from_dict(d["position_model"]), "d_min_nm": float(d["d_min_nm"])}
+            "position_model": position, "d_min_nm": float(d["d_min_nm"])}

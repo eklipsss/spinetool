@@ -254,7 +254,7 @@ def position_branches(table: pd.DataFrame, spines: pd.DataFrame, pack: GeometryP
 
     if len(spines):
         sp = spines[(spines["status"].astype(str) == "valid") & spines["has_position"].fillna(False).astype(bool)]
-        by_key = {k: g["s"].to_numpy(dtype=float) for k, g in sp.groupby(key_series(sp))}
+        by_key = {k: (g["s"].to_numpy(dtype=float), g["theta"].to_numpy(dtype=float) if "theta" in g else None) for k, g in sp.groupby(key_series(sp))}
     else:
         by_key = {}
     out = []
@@ -267,9 +267,13 @@ def position_branches(table: pd.DataFrame, spines: pd.DataFrame, pack: GeometryP
         k = np.hypot(g["kappa1"], g["kappa2"]).astype(float)
         if len(k) > 1:
             k[-1] = k[-2]  # the bending of the last node is undefined (NaN in the file)
-        pos = by_key.get(key)
+        pos, ang = by_key.get(key, (None, None))
+        if pos is not None:
+            order = np.argsort(pos, kind="stable")
+            pos = np.clip(pos[order], 0.0, float(g["s"][-1]))
+            ang = None if ang is None else ang[order]
         out.append(PositionBranch(g["s"].astype(float), g["radius"].astype(float), k, None if d0 is None or not np.isfinite(d0) else float(d0),
-                                  None if pos is None else np.sort(np.clip(pos, 0.0, float(g["s"][-1])))))
+                                  pos, ang))
     return out
 
 

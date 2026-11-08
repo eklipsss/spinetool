@@ -68,8 +68,11 @@ def generate_placements(
         min_dist = float("inf")
         while attempts < max_attempts:
             attempts += 1
-            s = position_model.sample_positions(branch, n, rng)
-            theta = sample_angles(n, rng)
+            if hasattr(position_model, "sample_configuration"):  # P1 (renewal / Strauss): positions and angles together
+                s, theta = position_model.sample_configuration(branch, n, rng)
+            else:
+                s = position_model.sample_positions(branch, n, rng)
+                theta = sample_angles(n, rng)
             min_dist = surface_min_distance(s, theta, np.interp(s, branch.s, branch.radius))
             if d_min_nm <= 0.0 or min_dist >= d_min_nm:
                 ok = True

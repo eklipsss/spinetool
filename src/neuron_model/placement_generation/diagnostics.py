@@ -130,3 +130,87 @@ def nearest_angle_differences(spines_theta: Sequence[np.ndarray], spines_s: Sequ
         d = np.diff(np.asarray(th)[o])
         out.append(np.angle(np.exp(1j * d)))
     return np.concatenate(out) if out else np.zeros(0)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# P0 / P1 comparison by simulation at the observed N of every branch (fit_p1.py)
+# ---------------------------------------------------------------------------------------------------------------------
+
+PCF_BINS_NM = ((0.0, 500.0), (500.0, 1000.0), (1000.0, 2000.0), (2000.0, 4000.0))
+
+
+def configuration_statistics(configs: Sequence[Any], branches: Sequence[Any]) -> Dict[str, float]:
+    """Pooled summary of one set of configurations [(s, theta) per branch] on the given branches (same order):
+    g(r) along the branch in PCF_BINS_NM (observed pairs / pairs of independent uniform points at the same N and L),
+    median distance to the nearest neighbour along the branch, CV of the intervals (each normalised by its branch mean),
+    median and 10 % quantile of the nearest-neighbour SURFACE distance sqrt(ds^2 + (r dtheta)^2)."""
+    from ..branch_statistics import expected_pairs
+    from .models.interaction import surface_distances
+
+    lengths, counts, pair_d, gaps, nn2d, along = [], [], [], [], [], []
+    for (s, th), b in zip(configs, branches):
+        s, th = np.asarray(s, float), np.asarray(th, float)
+        n = len(s)
+        lengths.append(b.length)
+        counts.append(n)
+        if n < 2:
+            continue
+        order = np.argsort(s)
+        s, th = s[order], th[order]
+        d = np.abs(s[:, None] - s[None, :])[~np.eye(n, dtype=bool)]
+        pair_d.append(d)
+        g = np.diff(s)
+        if g.mean() > 0:
+            gaps.append(g / g.mean())
+        along.append(np.minimum(np.r_[np.inf, g], np.r_[g, np.inf]))
+        r = np.interp(s, b.s, b.radius)
+        dd = surface_distances(s, th, r, s, th, r)
+        np.fill_diagonal(dd, np.inf)
+        nn2d.append(dd.min(axis=1))
+    pair_d = np.concatenate(pair_d) if pair_d else np.zeros(0)
+    out = {}
+    for a, c in PCF_BINS_NM:
+        exp = expected_pairs(np.asarray(lengths), np.asarray(counts), a, c)
+        out[f"pcf_{int(a)}_{int(c)}"] = float(((pair_d >= a) & (pair_d < c)).sum() / exp) if exp > 0 else float("nan")
+    gaps = np.concatenate(gaps) if gaps else np.zeros(0)
+    along = np.concatenate(along) if along else np.zeros(0)
+    nn2d = np.concatenate(nn2d) if nn2d else np.zeros(0)
+    out["nn_along_median_nm"] = float(np.median(along)) if len(along) else float("nan")
+    out["gap_cv"] = float(gaps.std() / gaps.mean()) if len(gaps) > 1 else float("nan")
+    out["surface_nn_median_nm"] = float(np.median(nn2d)) if len(nn2d) else float("nan")
+    out["surface_nn_q10_nm"] = float(np.quantile(nn2d, 0.10)) if len(nn2d) else float("nan")
+    return out
+
+
+def simulation_comparison(models: Dict[str, Any], branches: Sequence[Any], *, n_sim: int = 19, seed: int = 0) -> Dict[str, Any]:
+    """Observed statistics of ``branches`` (positions AND angles) against ``n_sim`` simulations of every model at the
+    observed N of every branch (Monte Carlo goodness of fit). Per model and statistic: mean and sd of the simulations,
+    the 2.5-97.5 % envelope, z = (observed - mean) / sd; ``score`` = mean |z| over the statistics."""
+    from .models.position import sample_angles
+
+    used = [b for b in branches if b.positions is not None and b.angles is not None and len(b.positions) >= 1]
+    observed = configuration_statistics([(b.positions, b.angles) for b in used], used)
+    result = {"observed": observed, "n_branches": len(used), "n_points": int(sum(len(b.positions) for b in used)), "n_sim": n_sim, "models": {}}
+    for name, model in models.items():
+        rng = np.random.default_rng(seed)
+        sims = []
+        for _ in range(n_sim):
+            configs = []
+            for b in used:
+                n = len(b.positions)
+                if hasattr(model, "sample_configuration"):
+                    configs.append(model.sample_configuration(b, n, rng))
+                else:
+                    configs.append((model.sample_positions(b, n, rng), sample_angles(n, rng)))
+            sims.append(configuration_statistics(configs, used))
+        table = {}
+        for key, obs in observed.items():
+            v = np.array([s[key] for s in sims], float)
+            mean, sd = float(np.nanmean(v)), float(np.nanstd(v, ddof=1)) if n_sim > 1 else float("nan")
+            lo, hi = (float(x) for x in np.nanpercentile(v, [2.5, 97.5]))
+            table[key] = {"observed": obs, "sim_mean": mean, "sim_sd": sd, "sim_lo": lo, "sim_hi": hi,
+                          "z": (obs - mean) / sd if sd and np.isfinite(sd) and sd > 0 else float("nan"), "outside": bool(obs < lo or obs > hi)}
+        zs = [abs(t["z"]) for t in table.values() if np.isfinite(t["z"])]
+        result["models"][name] = {"statistics": table, "score_mean_abs_z": float(np.mean(zs)) if zs else float("nan"),
+                                  "n_outside": int(sum(t["outside"] for t in table.values()))}
+    return result

@@ -50,7 +50,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--t0-run", type=Path)
     parser.add_argument("--t0-model", default=None, help="parabola / gam (default: the one chosen in report.json)")
-    parser.add_argument("--p0-run", type=Path, required=True)
+    parser.add_argument("--p0-run", type=Path, required=True, help="a P0 run (fit_p0.py) or a P1 run (fit_p1.py)")
+    parser.add_argument("--bundle", default="p0_bundle.json", help="bundle file inside --p0-run (P1 runs: p1a_bundle.json / p1b_bundle.json; "
+                        "p0_bundle.json of a P1 run = the chosen one)")
     parser.add_argument("--n", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--mode", choices=["generated", "real_t"], default="generated")
@@ -61,7 +63,7 @@ def main() -> None:
         parser.error("--t0-run is required for --mode generated")
     p_run = open_run(args.p0_run)
     d = p_run.load_config()["data"]
-    bundle = load_p0_bundle(p_run.root / "p0_bundle.json")
+    bundle = load_p0_bundle(p_run.root / args.bundle)
     table, _, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None, io_threads=int(d["io_threads"]))
     eligible = "train_eligible_T" if args.mode == "generated" else "train_eligible_P"
     pool = select(table, eligible=eligible, splits=[args.split], exclude_compartments=d.get("exclude_compartments"))
@@ -73,7 +75,7 @@ def main() -> None:
                      soma_distance_start_nm=None if pd.isna(r.get("soma_distance_start_nm")) else float(r["soma_distance_start_nm"]), source_branch=branch_key(r))
                 for r in picked.to_dict("records")]
 
-    info = {"mode": args.mode, "seed": args.seed, "n": args.n, "split": args.split, "p0_run": str(args.p0_run), "t0_run": str(args.t0_run) if args.t0_run else None}
+    info = {"mode": args.mode, "seed": args.seed, "n": args.n, "split": args.split, "p0_run": str(args.p0_run), "bundle": args.bundle, "t0_run": str(args.t0_run) if args.t0_run else None}
     if args.mode == "generated":
         t_run = open_run(args.t0_run)
         chosen = args.t0_model or json.loads((t_run.root / "report.json").read_text(encoding="utf-8"))["chosen"]

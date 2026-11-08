@@ -29,6 +29,7 @@ class PositionBranch:
     kappa: np.ndarray  # [M] (|bending|; the last entry may be NaN and is replaced by its neighbour)
     soma_start_nm: Optional[float] = None  # distance to the soma at s = 0, along the dendritic path
     positions: Optional[np.ndarray] = None  # observed s_i (those entering the positional likelihood)
+    angles: Optional[np.ndarray] = None  # observed theta_i in the RMF of the trunk, same order as ``positions`` (P1b)
 
     @property
     def length(self) -> float:
