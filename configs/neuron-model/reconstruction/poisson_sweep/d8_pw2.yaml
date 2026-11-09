@@ -1,0 +1,16 @@
+# Screened Poisson sweep, second round (chain R, 2026-11-09): point_weight around 4 at depth 8. Round 1 (chain P,
+# 2026-11-09_013155_poisson-sweep-val): point_weight 0 -> 4 lowers the real-vs-chain AUC 0.857 -> 0.734 (depth 9: 0.709), depth and
+# k_normal alone do not matter (0.853-0.867).
+frozen: false
+normals:
+  k_normal: 30
+poisson:
+  depth: 8
+  point_weight: 2.0
+  samples_per_node: 1.5
+  scale: 1.25
+  iters: 8
+  full_depth: 5
+  threads: 1
+postprocess:
+  min_component_area_fraction: 0.01

@@ -12,12 +12,22 @@ separate processes avoids the conflict entirely:
 Fills in the same files ``generate_mogen.py`` would have written itself (``generated_mesh_raw.off``,
 ``generated_mesh_postprocessed.off``, ``poisson_config.json``, ``mesh_validation_*.json``) using the
 Poisson parameters from ``configs/neuron-model/reconstruction/poisson.yaml`` (or ``--poisson-config``).
+
+Re-meshing already generated samples with OTHER Poisson parameters without touching them (chain R, 2026-11-09):
+
+    python scripts/neuron_model/reconstruct_mogen_poisson.py --run <run> --seed 1 --meshes-dir <run>/meshes \
+        --out <run>/meshes_poisson_d8_pw4 --poisson-config configs/neuron-model/reconstruction/poisson_sweep/d8_pw4.yaml --workers 8
+
+copies every sample folder (point cloud, metadata) into ``--out/seed_<s>/`` and writes the new meshes there, so
+``evaluate_generators.py --model name=<out>`` reads it like any generated set.
 """
 
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,41 +49,63 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True, help="seed tag used by generate_mogen.py --seed")
     parser.add_argument("--poisson-config", type=Path, default=REPO_ROOT / "configs/neuron-model/reconstruction/poisson.yaml")
     parser.add_argument("--check-self-intersections", action="store_true", help="off by default - CGAL subprocess per mesh is slow")
+    parser.add_argument("--meshes-dir", type=Path, help="folder with seed_<s>/sample_* (default: the run's meshes folder)")
+    parser.add_argument("--out", type=Path, help="write into a COPY of the sample folders here (the source stays untouched)")
+    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
 
     run = open_run(args.run)
-    seed_dir = run.meshes / f"seed_{args.seed}"
+    src_seed_dir = (args.meshes_dir or run.meshes) / f"seed_{args.seed}"
     rec_cfg = load_config(args.poisson_config)
+    sample_dirs = sorted(src_seed_dir.glob("sample_*"), key=lambda p: int(p.name.split("_")[1]))
+    if not sample_dirs:
+        parser.error(f"no sample_* directories under {src_seed_dir} - run generate_mogen.py --no-mesh first")
+    seed_dir = src_seed_dir
+    if args.out is not None:
+        seed_dir = args.out / f"seed_{args.seed}"
+        if seed_dir.resolve() == src_seed_dir.resolve():
+            parser.error("--out must differ from the source meshes folder")
+        for d in sample_dirs:
+            target = seed_dir / d.name
+            target.mkdir(parents=True, exist_ok=True)
+            for f in d.iterdir():
+                if f.is_file() and not f.name.startswith(("generated_mesh_", "mesh_validation_", "poisson_config")):
+                    shutil.copy2(f, target / f.name)
+        sample_dirs = [seed_dir / d.name for d in sample_dirs]
+        write_json(args.out / "reconstruction_source.json", {"source": str(src_seed_dir), "poisson_config": str(args.poisson_config)})
+
+    jobs = [(str(d), rec_cfg, bool(args.check_self_intersections)) for d in sample_dirs]
+    if args.workers > 1:
+        with ProcessPoolExecutor(args.workers) as pool:
+            results = list(pool.map(_reconstruct, jobs, chunksize=4))
+    else:
+        results = [_reconstruct(j) for j in jobs]
+    n_ok = sum(r is not None for r in results)
+    n_valid = sum(bool(r and r.get("is_valid")) for r in results)
+    print(f"reconstructed {n_ok}/{len(sample_dirs)} samples (valid postprocessed {n_valid}) -> {seed_dir}")
+
+
+def _reconstruct(job):
+    """One sample folder: estimated normals -> Screened Poisson -> postprocess; returns the postprocessed validation or None."""
+    d, rec_cfg, check = job
+    d = Path(d)
+    ply = d / "generated_pointcloud.ply"
+    if not ply.exists():
+        print(f"  {d.name}: no {ply.name}, skipping", flush=True)
+        return None
     poisson = PoissonParams.from_mapping(rec_cfg["poisson"])
     k_normal = int(rec_cfg["normals"]["k_normal"])
-    postprocess_cfg = dict(rec_cfg["postprocess"])
-
-    sample_dirs = sorted(seed_dir.glob("sample_*"), key=lambda p: int(p.name.split("_")[1]))
-    if not sample_dirs:
-        parser.error(f"no sample_* directories under {seed_dir} - run generate_mogen.py --no-mesh first")
-
-    n_ok = 0
-    for d in sample_dirs:
-        ply = d / "generated_pointcloud.ply"
-        if not ply.exists():
-            print(f"  {d.name}: no {ply.name}, skipping")
-            continue
-        points, _ = read_pointcloud_ply(ply)
-        normals, diag = estimate_normals(points, k=k_normal)
-        mesh = screened_poisson(points, normals, poisson)
-        post, changes = postprocess_mesh(mesh, **postprocess_cfg)
-        write_json(d / "poisson_config.json", {**poisson.to_dict(), "k_normal": k_normal, "normal_diagnostics": diag})
-        write_mesh_off(d / "generated_mesh_raw.off", mesh)
-        write_mesh_off(d / "generated_mesh_postprocessed.off", post)
-        write_json(d / "mesh_validation_raw.json", validate_mesh(mesh, check_self_intersections=args.check_self_intersections))
-        write_json(
-            d / "mesh_validation_postprocessed.json",
-            {**validate_mesh(post, check_self_intersections=args.check_self_intersections), "postprocess_changes": changes},
-        )
-        n_ok += 1
-        print(f"  {d.name}: reconstructed ({len(mesh.faces) if mesh is not None else 0} faces)")
-
-    print(f"reconstructed {n_ok}/{len(sample_dirs)} samples -> {seed_dir}")
+    points, _ = read_pointcloud_ply(ply)
+    normals, diag = estimate_normals(points, k=k_normal)
+    mesh = screened_poisson(points, normals, poisson)
+    post, changes = postprocess_mesh(mesh, **dict(rec_cfg["postprocess"]))
+    write_json(d / "poisson_config.json", {**poisson.to_dict(), "k_normal": k_normal, "normal_diagnostics": diag})
+    write_mesh_off(d / "generated_mesh_raw.off", mesh)
+    write_mesh_off(d / "generated_mesh_postprocessed.off", post)
+    write_json(d / "mesh_validation_raw.json", validate_mesh(mesh, check_self_intersections=check))
+    valid_post = {**validate_mesh(post, check_self_intersections=check), "postprocess_changes": changes}
+    write_json(d / "mesh_validation_postprocessed.json", valid_post)
+    return valid_post
 
 
 if __name__ == "__main__":
