@@ -62,7 +62,7 @@ def main() -> None:
     for c in LABELS:
         if c not in limbs.columns:
             limbs[c] = False
-        limbs[c] = limbs[c].fillna(False).astype(bool)
+        limbs[c] = limbs[c].astype(object).where(limbs[c].notna(), False).astype(bool)
     types = pd.read_csv(args.metadata_root / "minnie65" / "cell_types_with_nucleus.csv")
     cell_type = dict(zip(types["segment_id"].astype("int64"), types["cell_type"]))
     neurons = sorted(set(limbs["neuron_id"]) & set(args.neurons or limbs["neuron_id"]))
