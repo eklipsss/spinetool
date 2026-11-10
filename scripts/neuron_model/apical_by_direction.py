@@ -35,10 +35,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.neuron_model.compartments import classify_by_direction, estimate_pia_axis, layer_value, limb_features, soma_center  # noqa: E402
+from src.neuron_model.compartments import (classify_by_direction, estimate_pia_axis, label_no_apical_neurons, layer_value,  # noqa: E402
+                                           limb_features, soma_center)
 from src.neuron_model.metadata import cell_type_binary, load_metadata_tables  # noqa: E402
 
 NO_APICAL_TYPES = {"INTERNEURON", "BC", "BPC", "MC", "NGC", "Unsure I", "OLIGO"}
+NON_NEURONAL_TYPES = ("OLIGO",)  # no dendrites at all: every limb not_applicable
 
 
 def limb_branch_stats(branches_root: Path) -> pd.DataFrame:
@@ -74,6 +76,12 @@ def main() -> None:
     parser.add_argument("--axon-rule", choices=("auto", "table", "branches", "either"), default="auto",
                         help="axon-like limbs: the table flag (Minnie65), the rule from the branches (--branches-root), or "
                              "either of them (auto: either when both exist - the table misses axons, 2026-11-03)")
+    parser.add_argument("--inhibitory-axon-rule", choices=("auto", "thin_long", "none"), default="auto",
+                        help="neurons without an apical dendrite (interneurons): thin_long = the limb with median branch radius < "
+                             "--inh-radius-max-nm and cable > --inh-cable-min-nm is the axon, the other limbs inhibitory_dendrite "
+                             "(validated against synapses 2026-11-10); none = every limb not_applicable; auto = thin_long with --branches-root")
+    parser.add_argument("--inh-radius-max-nm", type=float, default=180.0)
+    parser.add_argument("--inh-cable-min-nm", type=float, default=1.5e6)
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--reuse", type=Path, help="folder of an earlier run: take the soma centres and limb directions from its "
                         "limb_features.parquet (no NAS reading, seconds) - to try another --pia-axis / --min-cos")
@@ -184,6 +192,20 @@ def main() -> None:
 
     applicable = {n: (types.get(n) not in NO_APICAL_TYPES) for n in limbs["neuron_id"].unique()}
     labelled, neurons = classify_by_direction(limbs, pia, min_cos=args.min_cos, applicable=applicable)
+    inh_rule = args.inhibitory_axon_rule
+    if inh_rule == "auto":
+        inh_rule = "thin_long" if "limb_radius_nm" in labelled.columns else "none"
+    if inh_rule == "thin_long":
+        if "limb_radius_nm" not in labelled.columns:
+            parser.error("--inhibitory-axon-rule thin_long needs --branches-root (limb radius)")
+        labelled = label_no_apical_neurons(labelled, applicable, non_neuronal=NON_NEURONAL_TYPES, cell_type=types,
+                                           radius_max_nm=args.inh_radius_max_nm, cable_min_nm=args.inh_cable_min_nm)
+        inh = labelled[labelled["neuron_id"].map(applicable).eq(False)]
+        per = inh.groupby("neuron_id")["axon_rule_inhibitory"].sum()
+        print(f"[apical] neurons without an apical dendrite: {len(per)}; thin-long axon limbs per neuron {per.value_counts().sort_index().to_dict()} "
+              f"(radius < {args.inh_radius_max_nm:.0f} nm, cable > {args.inh_cable_min_nm / 1e6:.2f} mm); labels {inh['compartment_dir'].value_counts().to_dict()}", flush=True)
+    else:
+        labelled["axon_rule_inhibitory"] = False
     neurons["cell_type"] = neurons["neuron_id"].map(types)
     neurons["cell_type_binary"] = neurons["cell_type"].map(lambda t: cell_type_binary(t) if isinstance(t, str) else None)
 
@@ -225,16 +247,20 @@ def main() -> None:
     neurons.to_csv(out / "neurons.csv", index=False)
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     # the compartment table (format of minnie65_limb_compartments_length_rule.parquet; metadata.load_metadata_tables(...,
-    # compartment_table=...)): neurons without an apical dendrite (interneurons) get not_applicable on EVERY limb, also
-    # on the axon-like ones - the branch rule (thin, no spines) cannot tell their aspiny dendrites from the axon, so their
-    # compartments stay unknown as with the length rule
+    # compartment_table=...)). Neurons without an apical dendrite (interneurons): with --inhibitory-axon-rule thin_long
+    # (default when the limb radius is known, 2026-11-10) the thin and long limb -> axon_like, the other limbs ->
+    # inhibitory_dendrite, a neuron without such a limb -> not_applicable; with "none" every limb not_applicable (the
+    # spine-based axon rules cannot tell their aspiny dendrites from the axon; as before 2026-11-10)
     conf = labelled.merge(neurons[["neuron_id", "confident"]], on="neuron_id", how="left")
     label = conf["compartment_dir"].copy()
-    label[conf["neuron_id"].map(applicable).eq(False)] = "not_applicable"
+    no_apical = conf["neuron_id"].map(applicable).eq(False)
+    if inh_rule != "thin_long":
+        label[no_apical] = "not_applicable"
+    axon = conf["axon_like"].astype(bool) & label.ne("not_applicable")
     pd.DataFrame({"dataset": args.dataset, "limb_id": conf["limb_id"], "cable_um": conf["cable_nm"] / 1000.0, "neuron": conf["neuron_id"],
-                  "limb": conf["limb"], "axon_like": conf["axon_like"] & label.ne("not_applicable"), "compartment": label,
-                  "cos_pia": conf["cos_pia"], "classification_confident": conf["confident"], "rule": "direction",
-                  "axon_rule": rule}).to_parquet(out / "limb_compartments_direction.parquet", index=False)
+                  "limb": conf["limb"], "axon_like": axon, "compartment": label,
+                  "cos_pia": conf["cos_pia"], "classification_confident": conf["confident"] | (no_apical & label.ne("not_applicable")),
+                  "rule": "direction", "axon_rule": rule, "axon_rule_inhibitory": inh_rule}).to_parquet(out / "limb_compartments_direction.parquet", index=False)
     print(f"[apical] compartment table: {label.value_counts().to_dict()} -> {out / 'limb_compartments_direction.parquet'}")
     print(f"-> {out}  ({time.time() - t0:.0f} s)")
 

@@ -34,7 +34,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 LABELS_RU = {
     "species": {"mouse": "мышь", "human": "человек"},
     "cell_type_binary": {"excitatory": "возбуждающая", "inhibitory": "тормозная"},
-    "compartment": {"apical": "апикальный", "basal": "базальный", "uncertain": "не определён"},
+    "compartment": {"apical": "апикальный", "basal": "базальный", "uncertain": "не определён", "inhibitory_dendrite": "дендрит тормозного нейрона"},
 }
 _ID = re.compile(r"^[0-9a-f]{16}$")
 

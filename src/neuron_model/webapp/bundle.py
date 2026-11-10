@@ -40,7 +40,7 @@ import numpy as np
 from ..branch_assembly import AssemblyConfig, PoolSpine, SpinePool, find_mesh_files
 from ..branch_assembly.selection import ContextSelector, base_radius
 from ..spine_morphometrics import SCALAR_METRICS
-from ..trunk_generation.conditions import CATEGORIES
+from ..trunk_generation.conditions import CATEGORIES, NO_APICAL_COMPARTMENTS
 
 FORMAT_VERSION = 1
 ANY_KEY = "any"
@@ -257,7 +257,8 @@ def _categories_from_groups(groups: Sequence[str]) -> Dict[str, List[str]]:
     out = {}
     for k, name in enumerate(CATEGORIES):
         seen = [g.split("|")[k] for g in groups if len(g.split("|")) == 3]
-        values = [c for c in CATEGORIES[name] if c in seen]
+        allowed = list(CATEGORIES[name]) + (list(NO_APICAL_COMPARTMENTS) if name == "compartment" else [])
+        values = [c for c in allowed if c in seen]
         out[name] = values or list(CATEGORIES[name])
     return out
 

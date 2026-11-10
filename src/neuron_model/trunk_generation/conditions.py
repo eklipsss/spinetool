@@ -19,6 +19,11 @@ SPECIES = ("mouse", "human")
 CELL_TYPE_BINARY = ("excitatory", "inhibitory")
 COMPARTMENT = ("apical", "basal", "uncertain")
 CATEGORIES = {"species": SPECIES, "cell_type_binary": CELL_TYPE_BINARY, "compartment": COMPARTMENT}
+# Dendrites of neurons WITHOUT an apical dendrite (interneurons, 2026-11-10, compartments.label_no_apical_neurons). Not a
+# separate category of the design: it occurs only together with cell_type_binary = inhibitory, so its own dummy would be
+# collinear with that one. In the regression design its compartment block is all zeros (neither a known compartment nor
+# "unknown") and the inhibitory dummy carries the effect; in the group key it is a group of its own.
+NO_APICAL_COMPARTMENTS = ("inhibitory_dendrite",)
 CONDITION_DIM = sum(len(c) + 1 for c in CATEGORIES.values()) + len(CATEGORIES)  # one-hot (+unknown) and known masks
 
 
@@ -84,6 +89,9 @@ class DesignEncoder:
         out = [1.0, self.z_length(length_nm)]
         for feature, categories in CATEGORIES.items():
             value = values[feature]
+            if feature == "compartment" and value in NO_APICAL_COMPARTMENTS:
+                out += [0.0] * len(categories)  # see NO_APICAL_COMPARTMENTS
+                continue
             known = _known(value, categories)
             out += [1.0 if known and value == c else 0.0 for c in categories[1:]]
             out.append(0.0 if known else 1.0)
@@ -108,6 +116,8 @@ class DesignEncoder:
 def group_key(species: Optional[str], cell_type_binary: Optional[str], compartment: Optional[str]) -> str:
     """Group of the hierarchical shrinkage: species | cell type | compartment (unknown values -> "unknown")."""
     def part(value, categories):
+        if categories is COMPARTMENT and value in NO_APICAL_COMPARTMENTS:
+            return value
         return value if _known(value, categories) else "unknown"
 
     return "|".join((part(species, SPECIES), part(cell_type_binary, CELL_TYPE_BINARY), part(compartment, COMPARTMENT)))

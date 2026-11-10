@@ -61,6 +61,37 @@ def test_limb_features_and_direction_labels(tmp_path):
     assert set(lab3["compartment_dir"]) == {"not_applicable"}
 
 
+def test_interneurons_get_thin_long_axon_and_inhibitory_dendrites():
+    from src.neuron_model.compartments import label_no_apical_neurons
+
+    limbs = pd.DataFrame({"neuron_id": ["i1"] * 3 + ["i2"] * 2 + ["o1"] + ["e1"] * 2,
+                          "limb_id": [0, 1, 2, 0, 1, 0, 0, 1],
+                          "limb_radius_nm": [150.0, 260.0, 240.0, 250.0, 230.0, 120.0, 300.0, 120.0],
+                          "cable_nm": [6e6, 6e5, 4e5, 8e5, 5e5, 5e6, 1e6, 4e6],
+                          "compartment_dir": ["not_applicable"] * 6 + ["apical", "axon_like"],
+                          "axon_like": [True, True, False, False, True, False, False, True]})  # spine-based flags: wrong on aspiny dendrites
+    applicable = {"i1": False, "i2": False, "o1": False, "e1": True}
+    out = label_no_apical_neurons(limbs, applicable, non_neuronal=("OLIGO",), cell_type={"o1": "OLIGO", "i1": "BC", "i2": "MC"})
+    assert out["compartment_dir"].tolist() == ["axon_like", "inhibitory_dendrite", "inhibitory_dendrite",  # i1: the thin long limb
+                                               "not_applicable", "not_applicable",  # i2: no thin long limb -> axon not identified
+                                               "not_applicable",  # OLIGO: not a neuron
+                                               "apical", "axon_like"]  # excitatory: untouched
+    assert out["axon_like"].tolist() == [True, False, False, False, False, False, False, True]
+
+
+def test_inhibitory_dendrite_in_the_design_is_not_collinear():
+    from src.neuron_model.trunk_generation.conditions import DesignEncoder, group_key
+
+    enc = DesignEncoder.fit([5000.0, 50000.0])
+    names = enc.names
+    row = dict(zip(names, enc.row("mouse", "inhibitory", "inhibitory_dendrite", 20000.0)))
+    assert row["cell_type_binary=inhibitory"] == 1.0
+    assert all(row[n] == 0.0 for n in names if n.startswith("compartment="))  # not "unknown", no own column
+    assert len(names) == len(DesignEncoder.fit([5000.0, 50000.0]).names)  # old model files keep their layout
+    assert group_key("mouse", "inhibitory", "inhibitory_dendrite") == "mouse|inhibitory|inhibitory_dendrite"
+    assert group_key("mouse", "inhibitory", None) == "mouse|inhibitory|unknown"
+
+
 def test_alternative_compartment_table_replaces_the_default(tmp_path):
     from src.neuron_model.metadata import load_metadata_tables
 

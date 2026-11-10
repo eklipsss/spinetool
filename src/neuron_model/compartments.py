@@ -122,6 +122,43 @@ def estimate_pia_axis(centers: np.ndarray, layers: np.ndarray, *, min_spread_rat
     return -g / np.linalg.norm(g), r2
 
 
+INHIBITORY_DENDRITE = "inhibitory_dendrite"
+
+
+def label_no_apical_neurons(limbs: pd.DataFrame, applicable: Dict[str, bool], *, non_neuronal: Sequence[str] = (),
+                            cell_type: Optional[Dict[str, Any]] = None, radius_max_nm: float = 180.0,
+                            cable_min_nm: float = 1.5e6) -> pd.DataFrame:
+    """Compartments of the neurons WITHOUT an apical dendrite (interneurons), by limb.
+
+    The axon of an interneuron cannot be found by spines (its dendrites are aspiny too); it is the thin and long limb:
+    median branch radius < ``radius_max_nm`` and cable > ``cable_min_nm`` (checked against synapses, 2026-11-10: on the
+    7 inhibitory neurons with >= 1 000 presynaptic points this limb carries 97-99 % of them, the other limbs are thicker
+    and shorter; docs/neuron-model/compartment-by-direction.md, section 9). Such limbs -> ``axon_like``, the other limbs
+    of the neuron -> ``inhibitory_dendrite`` (no apical / basal split). A neuron without such a limb keeps
+    ``not_applicable`` on every limb (its axon is not identified, so its dendrites cannot be separated from it); so do
+    non-neuronal cells (``non_neuronal`` cell types, e.g. OLIGO). Needs ``limb_radius_nm`` and ``cable_nm``; returns a
+    copy with ``compartment_dir`` and ``axon_like`` updated for these neurons and ``axon_rule_inhibitory`` (bool)."""
+    out = limbs.copy()
+    rule = (out["limb_radius_nm"].astype(float) < radius_max_nm) & (out["cable_nm"].astype(float) > cable_min_nm)
+    out["axon_rule_inhibitory"] = False
+    for neuron, g in out.groupby("neuron_id", sort=False):
+        if applicable.get(str(neuron), True):
+            continue
+        if cell_type is not None and cell_type.get(str(neuron)) in set(non_neuronal):
+            out.loc[g.index, "compartment_dir"] = "not_applicable"
+            out.loc[g.index, "axon_like"] = False
+            continue
+        r = rule.loc[g.index].fillna(False).astype(bool)
+        if not r.any():
+            out.loc[g.index, "compartment_dir"] = "not_applicable"
+            out.loc[g.index, "axon_like"] = False
+            continue
+        out.loc[g.index, "axon_rule_inhibitory"] = r.to_numpy()
+        out.loc[g.index, "axon_like"] = r.to_numpy()
+        out.loc[g.index, "compartment_dir"] = np.where(r.to_numpy(), "axon_like", INHIBITORY_DENDRITE)
+    return out
+
+
 def classify_by_direction(limbs: pd.DataFrame, pia: np.ndarray, *, min_cos: float = 0.6, length_ratio: float = 2.0,
                           min_cos_gap: float = 0.3, gap: float = 0.4,
                           applicable: Optional[Dict[str, bool]] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:

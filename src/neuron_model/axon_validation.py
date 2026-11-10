@@ -8,7 +8,8 @@ rule:
 * the PRESYNAPTIC point of a synapse made by the neuron (``pre_pt_root_id`` = neuron) lies on its axon (boutons);
 * the POSTSYNAPTIC point of a synapse onto the neuron (``post_pt_root_id`` = neuron), tagged ``shaft`` or ``spine``,
   lies on a dendrite (axo-axonic synapses on the axon initial segment exist, chandelier cells, but are rare);
-* manual myelination points tagged ``t`` lie on an axon.
+* manual myelination points lie on the axon of the cell ``valid_id`` (tag ``t`` myelin present, ``f`` absent). For our
+  735 Minnie65 neurons the table has no points (its 1 027 annotated cells are other neurons; 2026-11-10).
 
 Source: ``minnie65_metadata/vortex_compartment_targets.parquet`` (synapses with a compartment tag of the target) and
 ``vortex_manual_myelination_v0.parquet``. Positions are in voxels of 4 x 4 x 40 nm (``dataset_info.json``,
@@ -30,7 +31,7 @@ import pandas as pd
 
 VOXEL_NM = np.array([4.0, 4.0, 40.0])
 SOMA_LIMB = -1
-AXON_KINDS = ("pre", "myelin")
+AXON_KINDS = ("pre", "myelin", "axon_unmyelinated")
 DENDRITE_KINDS = ("post_shaft", "post_spine")
 
 
@@ -57,9 +58,14 @@ def load_synapse_points(metadata_dir: Path, neurons: Iterable[int]) -> pd.DataFr
                                **dict(zip("xyz", _xyz(post["post_pt_position"]).T))}))
     path = metadata_dir / "vortex_manual_myelination_v0.parquet"
     if path.exists():
-        my = pd.read_parquet(path, columns=["tag", "pt_root_id", "pt_position"])
-        my = my[(my["tag"].astype(str) == "t") & my["pt_root_id"].astype("int64").isin(ids)]
-        parts.append(pd.DataFrame({"neuron_id": my["pt_root_id"].astype("int64").to_numpy(), "kind": "myelin",
+        # every point of this table lies on the axon of the annotated cell (tag t = myelin present, f = absent); the
+        # cell is ``valid_id`` ("NOT necessarily the root id" - the table description), not ``pt_root_id``
+        cols = pd.read_parquet(path).columns
+        cell = "valid_id" if "valid_id" in cols else "pt_root_id"
+        my = pd.read_parquet(path, columns=["tag", cell, "pt_position"])
+        my = my[my[cell].astype("int64").isin(ids)]
+        kind = np.where(my["tag"].astype(str) == "t", "myelin", "axon_unmyelinated")
+        parts.append(pd.DataFrame({"neuron_id": my[cell].astype("int64").to_numpy(), "kind": kind,
                                    **dict(zip("xyz", _xyz(my["pt_position"]).T))}))
     out = pd.concat([p for p in parts if len(p)], ignore_index=True) if any(len(p) for p in parts) else \
         pd.DataFrame(columns=["neuron_id", "kind", "x", "y", "z"])

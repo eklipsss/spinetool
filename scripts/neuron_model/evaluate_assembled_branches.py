@@ -50,6 +50,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--bootstrap", type=int, default=1000, help="resamplings of NEURONS for the interval of the median difference (0 = off)")
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--cell-type-binary", choices=("excitatory", "inhibitory"),
+                        help="only the requests copied from branches of this cell type (output: evaluation_<type>/)")
     args = parser.parse_args()
 
     info = json.loads((args.tp_dir / "generation_info.json").read_text(encoding="utf-8"))
@@ -69,6 +71,13 @@ def main() -> None:
                     "spines_placed": int((st["status"] == "placed").sum()), "spines_dropped": int((st["status"] == "dropped").sum()),
                     "immersion_depth_nm_median": float(st["delta_nm"].median()) if "delta_nm" in st.columns else None,
                     "immersion_depth_nm_p90": float(st["delta_nm"].quantile(0.9)) if "delta_nm" in st.columns else None}
+    if args.cell_type_binary:
+        ctb = dict(zip(key_series(table), table["cell_type_binary"].astype(str)))
+        src = dict(zip(branches["branch_index"].astype(int), branches["source_branch"].astype(str)))
+        indices = [i for i in indices if ctb.get(src.get(i)) == args.cell_type_binary]
+        print(f"[evaluate] cell type {args.cell_type_binary}: {len(indices)} generated branches", flush=True)
+        if not indices:
+            raise SystemExit(f"[evaluate] no request of cell type {args.cell_type_binary} in {args.tp_dir}")
 
     # ---- generated
     gen_rows, gen_stats, sources = [], [], []
@@ -118,7 +127,7 @@ def main() -> None:
         bb, sb = collect([real_rows[i] for i in idx_b], [real_stats[i] for i in idx_b])
         floor = compare_sets(ba, bb, sa, sb)
 
-    out = args.out or (args.assembly if args.assembly else args.tp_dir / "evaluation")
+    out = args.out or (args.assembly if args.assembly else args.tp_dir / ("evaluation" + (f"_{args.cell_type_binary}" if args.cell_type_binary else "")))
     out.mkdir(parents=True, exist_ok=True)
     report = {"tp_dir": str(args.tp_dir), "assembly": str(args.assembly) if args.assembly else None, "level": "assembled" if args.assembly else "tp",
               "n_generated": int(len(gen_b)), "n_real": int(len(real_b)), "n_real_neurons": int(len(set(real_neurons))),

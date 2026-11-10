@@ -18,7 +18,7 @@ from ..spine_generation.atlas import METRIC_INFO
 from ..spine_morphometrics import SCALAR_METRICS
 from .html_kit import card, clean_floats, esc, header, note, page, section, tiles
 
-COMPARTMENT_RU = {"apical": "апикальный", "basal": "базальный", "uncertain": "неопределённый", "axon_like": "аксоноподобный"}
+COMPARTMENT_RU = {"apical": "апикальный", "basal": "базальный", "uncertain": "неопределённый", "axon_like": "аксоноподобный", "inhibitory_dendrite": "дендрит тормозного нейрона"}
 BINARY_RU = {"inhibitory": "тормозные", "excitatory": "возбуждающие"}
 
 
