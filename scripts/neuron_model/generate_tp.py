@@ -6,6 +6,11 @@
 The requests (conditions, length, is_terminal, distance to the soma) are copied from random ``--split`` branches, so
 the generated set has the condition mix of real data. ``--mode real_t`` keeps the real trunk of each request and
 generates only P (the 'real T + generated P' level of the evaluation, p-module-technical-spec.md section 8).
+``--counts`` separates the count model from the position model (diagnostic): ``model`` (default) samples N from the
+P0 count model; ``real`` takes N = ``n_spines_in_range`` of the source branch (the count the evaluation compares
+with); ``real_positioned`` takes N = ``n_with_position`` (the spines that have a position, the ones the real
+nearest-neighbour distances are computed on and the ones the P1 Monte Carlo check of fit_p1.py conditions on).
+With a real count the pool is restricted to ``train_eligible_P`` branches (elsewhere the count is not reliable).
 Output (one folder, a few files - no file per branch): ``runs/analysis/neuron-model/tp_generation/<id>/``
 ``trunks.npz`` (flat node arrays + offsets), ``branches.parquet`` (one row per branch: request, checks, N,
 attempts), ``placements.parquet`` (one row per spine: s, u, theta, anchor, normal), ``generation_info.json``. CPU.
@@ -46,6 +51,17 @@ from src.neuron_model.trunk_generation.generate import generate_trunks
 from src.neuron_model.trunk_generation.models.t0_statistical import T0Model
 
 
+REAL_COUNT_COLUMNS = {"real": "n_spines_in_range", "real_positioned": "n_with_position"}
+
+
+def real_counts(rows: pd.DataFrame, counts: str) -> np.ndarray:
+    """N of each source branch for ``--counts real|real_positioned`` (rows from a ``train_eligible_P`` pool)."""
+    values = pd.to_numeric(rows[REAL_COUNT_COLUMNS[counts]], errors="coerce")
+    if values.isna().any():
+        raise ValueError(f"{int(values.isna().sum())} source branches without {REAL_COUNT_COLUMNS[counts]}")
+    return values.to_numpy(dtype=np.int64)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--t0-run", type=Path)
@@ -57,6 +73,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--mode", choices=["generated", "real_t"], default="generated")
     parser.add_argument("--split", default="val")
+    parser.add_argument("--counts", choices=list(REAL_COUNT_COLUMNS) + ["model"], default="model",
+                        help="N per branch: from the P0 count model, or the real count of the source branch (diagnostic, see above)")
     parser.add_argument("--out-root", type=Path, default=REPO_ROOT / "runs/analysis/neuron-model/tp_generation")
     args = parser.parse_args()
     if args.mode == "generated" and args.t0_run is None:
@@ -67,6 +85,8 @@ def main() -> None:
     table, _, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None, io_threads=int(d["io_threads"]))
     eligible = "train_eligible_T" if args.mode == "generated" else "train_eligible_P"
     pool = select(table, eligible=eligible, splits=[args.split], exclude_compartments=d.get("exclude_compartments"))
+    if args.counts != "model" and eligible != "train_eligible_P":
+        pool = pool[pool["train_eligible_P"].fillna(False).astype(bool)]
     pool = pool[[branch_key(r) in pack for r in pool.to_dict("records")]].reset_index(drop=True)
     rng = np.random.default_rng(args.seed)
     picked = pool.iloc[rng.integers(0, len(pool), args.n)].reset_index(drop=True)
@@ -75,7 +95,8 @@ def main() -> None:
                      soma_distance_start_nm=None if pd.isna(r.get("soma_distance_start_nm")) else float(r["soma_distance_start_nm"]), source_branch=branch_key(r))
                 for r in picked.to_dict("records")]
 
-    info = {"mode": args.mode, "seed": args.seed, "n": args.n, "split": args.split, "p0_run": str(args.p0_run), "bundle": args.bundle, "t0_run": str(args.t0_run) if args.t0_run else None}
+    info = {"mode": args.mode, "seed": args.seed, "n": args.n, "split": args.split, "p0_run": str(args.p0_run), "bundle": args.bundle,
+            "counts": args.counts, "t0_run": str(args.t0_run) if args.t0_run else None}
     if args.mode == "generated":
         t_run = open_run(args.t0_run)
         chosen = args.t0_model or json.loads((t_run.root / "report.json").read_text(encoding="utf-8"))["chosen"]
@@ -89,15 +110,19 @@ def main() -> None:
     keep = [i for i, t in enumerate(trunks) if t is not None]
     trunks = [trunks[i] for i in keep]
     requests = [requests[i] for i in keep]
-    # one neuron per generated branch (independent neuron effects); real_t: the real neuron of the request
-    neurons = [q["source_branch"].split("/")[1] if args.mode == "real_t" else f"gen{i}" for i, q in enumerate(requests)]
-    cov = [covariates_from_trunk(t, q, n) for t, q, n in zip(trunks, requests, neurons)]
-    data = build_count_data(bundle["design"], cov, bundle["count_model"].exposure)
-    counts = bundle["count_model"].sample(data, rng)
+    if args.counts == "model":
+        # one neuron per generated branch (independent neuron effects); real_t: the real neuron of the request
+        neurons = [q["source_branch"].split("/")[1] if args.mode == "real_t" else f"gen{i}" for i, q in enumerate(requests)]
+        cov = [covariates_from_trunk(t, q, n) for t, q, n in zip(trunks, requests, neurons)]
+        data = build_count_data(bundle["design"], cov, bundle["count_model"].exposure)
+        counts = bundle["count_model"].sample(data, rng)
+    else:
+        counts = real_counts(picked.iloc[keep], args.counts)
     placements = generate_placements(trunks, counts, bundle["position_model"], d_min_nm=bundle["d_min_nm"],
                                      soma_start_nm=[q["soma_distance_start_nm"] for q in requests], seed=args.seed)
 
-    out = Path(args.out_root) / f"{_dt.datetime.now():%Y-%m-%d_%H%M%S}_{args.mode}_seed{args.seed}"
+    suffix = "" if args.counts == "model" else f"_counts-{args.counts}"
+    out = Path(args.out_root) / f"{_dt.datetime.now():%Y-%m-%d_%H%M%S}_{args.mode}{suffix}_seed{args.seed}"
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trunks.npz", **pack_records(trunks))
     brows, prows = [], []
