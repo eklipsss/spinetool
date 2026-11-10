@@ -52,7 +52,7 @@ for /f "delims=" %%d in ('dir /b /ad /o-n %RUNS%\*_p0') do (set P0=%RUNS%\%%d& g
 :p0found
 echo P0 run: %P0%
 
-echo ===== [T5] P1 on the new P0 ===== %date% %time%
+echo ===== [T5] P1 on the new P0 (P1a, P1b, P1b2 with two radii; chosen by the Monte Carlo check) ===== %date% %time%
 python scripts\neuron_model\fit_p1.py --p0-run %P0% --n-eval 400 --n-sim 19
 if errorlevel 1 goto :end
 for /f "delims=" %%d in ('dir /b /ad /o-n %RUNS%\*_p1') do (set P1=%RUNS%\%%d& goto :p1found)

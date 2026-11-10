@@ -1,4 +1,4 @@
-"""P1: renewal (P1a) and Strauss (P1b) placement models on synthetic branches (models/interaction.py)."""
+"""P1: renewal (P1a), Strauss (P1b) and two-radius Strauss (P1b2) placement models on synthetic branches (models/interaction.py)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import numpy as np
 
 from src.neuron_model.placement_generation.diagnostics import configuration_statistics, simulation_comparison
-from src.neuron_model.placement_generation.models.interaction import RenewalModel, StraussModel, interaction_from_dict
+from src.neuron_model.placement_generation.models.interaction import MultiStraussModel, RenewalModel, StraussModel, interaction_from_dict
 from src.neuron_model.placement_generation.models.position import PositionBranch, PositionModel
 
 
@@ -69,7 +69,7 @@ def test_bundle_round_trip_and_generation_uses_the_interaction(tmp_path):
     base = _uniform_base()
     strauss = StraussModel(base, radius_nm=900.0, log_gamma=-20.0, burn_factor=30)
     renewal = RenewalModel(base, 2.5)
-    for m in (strauss, renewal):
+    for m in (strauss, renewal, MultiStraussModel(base, [300.0, 900.0], [-20.0, -1.0], burn_factor=30)):
         back = interaction_from_dict(json.loads(json.dumps(m.to_dict())), base)
         assert type(back) is type(m) and back.to_dict()["kind"] == m.kind
     # a P1 bundle: the P0 bundle + "interaction" (count model / design are only carried through here)
@@ -92,3 +92,42 @@ def test_bundle_round_trip_and_generation_uses_the_interaction(tmp_path):
              "gamma": np.c_[np.zeros(len(s)), np.zeros(len(s)), s], "normal": e1, "binormal": e2}
     out = generate_placements([trunk] * 5, [20] * 5, loaded["position_model"], d_min_nm=0.0, seed=3)
     assert all(p["min_distance_nm"] >= 900.0 for p in out)   # hard core of the Strauss model respected
+
+
+def test_multi_strauss_one_shell_matches_strauss():
+    base, rng = _uniform_base(), np.random.default_rng(4)
+    br = _branches(60)
+    data = _with(br, [StraussModel(base, radius_nm=700.0, log_gamma=np.log(0.1), burn_factor=30).sample_configuration(b, 25, rng) for b in br])
+    radii = [300.0, 500.0, 700.0, 900.0]
+    one = StraussModel(base).fit(data, radii=radii, n_angles=16)
+    multi = MultiStraussModel(base).fit(data, radii=radii, n_shells=1, n_angles=16)
+    assert multi.radii_nm == [one.radius_nm]
+    assert abs(multi.log_gammas[0] - one.log_gamma) < 1e-3 and abs(multi.alpha - one.alpha) < 1e-3
+
+
+def test_multi_strauss_recovers_two_shells_and_collapses_on_one():
+    base, rng = _uniform_base(), np.random.default_rng(5)
+    br = _branches(150)
+    radii = [200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0, 1500.0, 1800.0]
+    # hard core 400 nm + soft repulsion to 1200 nm
+    truth = MultiStraussModel(base, [400.0, 1200.0], [-20.0, np.log(0.4)], burn_factor=40)
+    data = _with(br, [truth.sample_configuration(b, 20, rng) for b in br])
+    fit = MultiStraussModel(base).fit(data, radii=radii, n_shells=2, n_angles=16)
+    r1, r2 = fit.radii_nm
+    g1, g2 = fit.gammas
+    assert r1 in (200.0, 400.0, 600.0) and r2 in (1000.0, 1200.0, 1500.0), fit.radii_nm
+    assert g1 < 0.1 and 0.15 < g2 < 0.7, fit.gammas
+    assert fit.fit_info["log_pl_gain_over_one_radius"] > 5.0
+    # data from a single Strauss: the second shell adds (almost) nothing
+    single = _with(br, [StraussModel(base, radius_nm=800.0, log_gamma=np.log(0.05), burn_factor=40).sample_configuration(b, 20, rng) for b in br])
+    fit1 = MultiStraussModel(base).fit(single, radii=radii, n_shells=2, n_angles=16)
+    one_best = fit1.fit_info["best_by_n_shells"]["1"]
+    assert one_best["radii_nm"][0] in (600.0, 800.0, 1000.0)
+    assert fit1.fit_info["log_pl_gain_over_one_radius"] < 0.1 * one_best["log_pl_gain_over_poisson"]
+    # the hard core of the true model is respected by the simulation
+    s, th = truth.sample_configuration(br[0], 20, rng)
+    from src.neuron_model.placement_generation.models.interaction import surface_distances
+    r = np.full(len(s), 300.0)
+    d = surface_distances(s, th, r, s, th, r)
+    np.fill_diagonal(d, np.inf)
+    assert d.min() >= 400.0

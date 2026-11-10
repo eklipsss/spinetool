@@ -19,6 +19,9 @@ P1b  Strauss process on the trunk surface W = [0, L] x (-pi, pi] with the metric
      f_s x uniform angle (the trend cancels), acceptance min(1, gamma^{t_new - t_old}), burn-in ``burn_factor`` * N moves
      from a P0 configuration.
 
+P1b2 multi-Strauss (``MultiStraussModel``): the same with a piecewise-constant pair potential, K shells with their own
+     gamma_k (default K = 2); K = 1 is P1b.
+
 Units: nm, radians.
 """
 
@@ -280,11 +283,206 @@ class StraussModel:
                 "fit_info": self.fit_info}
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# P1b2: Strauss process with a piecewise-constant pair potential (several interaction radii)
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+class MultiStraussModel:
+    """Multi-Strauss process (piecewise-constant pair potential; Penttinen 1984, Baddeley & Turner 2000) on the trunk surface.
+
+    Shells k = 1..K: R_{k-1} <= d < R_k (R_0 = 0); f(P) ~ prod lambda(p_i) prod_k gamma_k^{n_k(P)}, n_k the number of pairs in
+    shell k, 0 <= gamma_k <= 1 (log gamma_k in [LOG_GAMMA_MIN, 0]). K = 1 is ``StraussModel``; gamma_k = 1 switches a shell
+    off, gamma_1 = gamma_2 gives a single Strauss with radius R_2. Why: with one radius P1b still places nearest
+    neighbours 65 nm closer than real ones (2026-11-09): a strong short-range core and a weaker longer-range repulsion
+    cannot both be described by one (R, gamma).
+
+    Fit: Besag's pseudo-likelihood as for P1b. For fixed radii, alpha is profiled out in closed form and the remaining
+    function of the log gammas, n log sum_g w_g exp(T_g . lg) - lg . t_data, is convex (log-sum-exp minus linear) and is
+    minimised by L-BFGS-B in the box [LOG_GAMMA_MIN, 0]^K; the radii by the profile over all increasing K-subsets of a grid.
+    The grid integral is accumulated as weights over the distinct shell-count vectors T_g, so the profile costs one pass of
+    distances per branch. Simulation: the same Metropolis-Hastings as P1b, acceptance min(1, exp(sum_k lg_k delta_k)).
+    """
+
+    kind = "multi_strauss"
+
+    def __init__(self, base: PositionModel, radii_nm: Sequence[float] = (), log_gammas: Sequence[float] = (), alpha: float = 0.0,
+                 burn_factor: int = 50) -> None:
+        self.base, self.alpha, self.burn_factor = base, float(alpha), int(burn_factor)
+        self.radii_nm = [float(r) for r in radii_nm]
+        self.log_gammas = [float(g) for g in log_gammas]
+        if len(self.radii_nm) != len(self.log_gammas):
+            raise ValueError("radii_nm and log_gammas must have the same length")
+        if any(b <= a for a, b in zip(self.radii_nm, self.radii_nm[1:])):
+            raise ValueError("radii_nm must be strictly increasing")
+        self.fit_info: Dict[str, Any] = {}
+
+    @property
+    def gammas(self) -> list:
+        return [math.exp(g) for g in self.log_gammas]
+
+    # ---- shell counts --------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _cumulative_counts(d: np.ndarray, radii: np.ndarray) -> np.ndarray:
+        """[rows, len(radii)]: number of points closer than each radius (d of one row against all points)."""
+        d_sorted = np.sort(d, axis=1)
+        return np.stack([(d_sorted < R).sum(axis=1) for R in radii], axis=1) if d.shape[1] else np.zeros((d.shape[0], len(radii)), int)
+
+    @staticmethod
+    def _shells(cum: np.ndarray, idx: Tuple[int, ...]) -> np.ndarray:
+        """Shell counts T [rows, K] from cumulative counts for the radii with grid indices ``idx`` (increasing)."""
+        c = cum[:, list(idx)]
+        return np.diff(np.c_[np.zeros(len(c), dtype=c.dtype), c], axis=1)
+
+    def _branch_terms(self, branch: PositionBranch, radii: np.ndarray, n_angles: int):
+        s, th = np.asarray(branch.positions, float), np.asarray(branch.angles, float)
+        n = len(s)
+        r_pts = np.interp(s, branch.s, branch.radius)
+        f_nodes = _density_on_nodes(self.base, branch)
+        offset = float(np.log(n * np.maximum(np.interp(s, branch.s, f_nodes), 1e-300) / (2.0 * np.pi)).sum())
+        d_pp = surface_distances(s, th, r_pts, s, th, r_pts)
+        np.fill_diagonal(d_pp, np.inf)
+        ds = np.diff(branch.s)
+        w_s = np.zeros(len(branch.s))
+        w_s[:-1] += ds / 2.0
+        w_s[1:] += ds / 2.0
+        phi = -np.pi + (np.arange(n_angles) + 0.5) * (2.0 * np.pi / n_angles)
+        gs, gth = np.repeat(branch.s, n_angles), np.tile(phi, len(branch.s))
+        gr = np.repeat(branch.radius, n_angles)
+        gw = np.repeat(w_s * n * f_nodes / (2.0 * np.pi), n_angles) * (2.0 * np.pi / n_angles)
+        d_gp = surface_distances(gs, gth, gr, s, th, r_pts)
+        return n, offset, self._cumulative_counts(d_pp, radii).sum(axis=0), self._cumulative_counts(d_gp, radii), gw
+
+    @staticmethod
+    def _optimise(n_total: int, offset_total: float, t_data: np.ndarray, T: np.ndarray, w: np.ndarray):
+        """max log PL over lg in [LOG_GAMMA_MIN, 0]^K, alpha profiled out. Returns (log PL, lg, alpha, log PL at lg = 0)."""
+        from scipy.optimize import minimize
+
+        T = T.astype(float)
+        const = n_total * math.log(n_total) + offset_total - n_total
+
+        def neg(lg):
+            e = w * np.exp(T @ lg)
+            integral = float(e.sum())
+            val = n_total * math.log(integral) - float(lg @ t_data) - const
+            grad = n_total * (T.T @ e) / integral - t_data
+            return val, grad
+
+        K = T.shape[1]
+        x0 = np.where(t_data > 0, -0.5, LOG_GAMMA_MIN / 2.0)
+        res = minimize(neg, x0, jac=True, method="L-BFGS-B", bounds=[(LOG_GAMMA_MIN, 0.0)] * K, options={"ftol": 1e-12, "gtol": 1e-8})
+        lg = np.asarray(res.x, dtype=float)
+        alpha = math.log(n_total / float((w * np.exp(T @ lg)).sum()))
+        return -float(neg(lg)[0]), lg, alpha, -float(neg(np.zeros(K))[0])
+
+    def fit(self, branches: Sequence[PositionBranch], *, radii: Optional[Sequence[float]] = None, n_shells: int = 2, d_min_nm: float = 50.0,
+            n_radii: int = 12, n_angles: int = 32, max_branches: int = 3000, seed: int = 0) -> "MultiStraussModel":
+        from itertools import combinations
+
+        use = [b for b in branches if b.positions is not None and b.angles is not None and len(b.positions) >= 1]
+        if not use:
+            raise ValueError("P1b2 needs branches with observed positions AND angles")
+        rng = np.random.default_rng(seed)
+        if len(use) > max_branches:
+            use = [use[i] for i in rng.choice(len(use), max_branches, replace=False)]
+        if radii is None:
+            nn = []
+            for b in use:
+                if len(b.positions) < 2:
+                    continue
+                r = np.interp(b.positions, b.s, b.radius)
+                d = surface_distances(b.positions, b.angles, r, b.positions, b.angles, r)
+                np.fill_diagonal(d, np.inf)
+                nn.append(d.min(axis=1))
+            # longer range than P1b: the outer shell may extend past the typical nearest neighbour
+            r_max = float(np.percentile(np.concatenate(nn), 97)) if nn else 3000.0
+            radii = np.linspace(max(d_min_nm, 1.0), max(r_max, d_min_nm + 1.0), n_radii)
+        radii = np.asarray(sorted(float(r) for r in radii), dtype=float)
+        if len(radii) < n_shells:
+            raise ValueError(f"need at least {n_shells} radii in the grid")
+        combos = [c for k in range(1, n_shells + 1) for c in combinations(range(len(radii)), k)]
+        n_total, off_total = 0, 0.0
+        t_cum = np.zeros(len(radii))
+        acc: Dict[Tuple[int, ...], Dict[Tuple[int, ...], float]] = {c: {} for c in combos}
+        for b in use:
+            n, off, t_c, g_cum, gw = self._branch_terms(b, radii, n_angles)
+            n_total += n
+            off_total += off
+            t_cum += t_c
+            for c in combos:
+                T = self._shells(g_cum, c)
+                code = T @ ((n + 1) ** np.arange(len(c)))   # counts <= n: a unique integer per count vector (1-D unique is fast)
+                uniq, first, inv = np.unique(code, return_index=True, return_inverse=True)
+                wsum = np.bincount(inv.ravel(), weights=gw, minlength=len(uniq))
+                table = acc[c]
+                for row, wv in zip(map(tuple, T[first].tolist()), wsum):
+                    table[row] = table.get(row, 0.0) + float(wv)
+        profile = []
+        for c in combos:
+            t_data = np.diff(np.r_[0.0, t_cum[list(c)]])
+            rows = np.array(list(acc[c].keys()), dtype=float).reshape(-1, len(c))
+            w = np.array(list(acc[c].values()), dtype=float)
+            pl, lg, alpha, pl0 = self._optimise(n_total, off_total, t_data, rows, w)
+            profile.append({"radii_nm": [float(radii[i]) for i in c], "log_pl": pl, "log_gammas": lg.tolist(),
+                            "gammas": np.exp(lg).tolist(), "alpha": alpha, "log_pl_gain_over_poisson": pl - pl0,
+                            "mean_pairs_in_shell": (t_data / n_total).tolist()})
+        best_k = {k: max((p for p in profile if len(p["radii_nm"]) == k), key=lambda p: p["log_pl"]) for k in range(1, n_shells + 1)}
+        best = best_k[n_shells]
+        self.radii_nm, self.log_gammas, self.alpha = list(best["radii_nm"]), list(best["log_gammas"]), best["alpha"]
+        edge = {float(radii[0]), float(radii[-1])}
+        self.fit_info = {"radii_nm": self.radii_nm, "gammas": self.gammas, "log_gammas": self.log_gammas, "alpha": self.alpha,
+                         "n_shells": n_shells, "n_branches": len(use), "n_points": int(n_total), "n_angles": n_angles,
+                         "radius_grid_nm": radii.tolist(),
+                         "best_by_n_shells": {str(k): v for k, v in best_k.items()},
+                         # nested models: the gain is >= 0 by construction; a pseudo-likelihood is not a likelihood, so no
+                         # chi-square test - the choice is made by the Monte Carlo check (fit_p1.py)
+                         "log_pl_gain_over_one_radius": best["log_pl"] - best_k[1]["log_pl"],
+                         "radius_at_grid_edge": bool(any(r in edge for r in self.radii_nm[-1:])),
+                         "profile": sorted(profile, key=lambda p: -p["log_pl"])[:50]}
+        return self
+
+    # ---- simulation ------------------------------------------------------------------------------------------------------
+    def _shell_counts_1(self, d: np.ndarray) -> np.ndarray:
+        cum = np.array([(d < R).sum() for R in self.radii_nm])
+        return np.diff(np.r_[0, cum])
+
+    def sample_configuration(self, branch: PositionBranch, n: int, rng: np.random.Generator):
+        s, th = _base_configuration(self.base, branch, n, rng)
+        lg = np.asarray(self.log_gammas, dtype=float)
+        if n < 2 or not self.radii_nm or np.all(lg >= 0.0):
+            return s, th
+        cdf, nodes = _cdf(self.base, branch)
+        r = np.interp(s, branch.s, branch.radius)
+        for _ in range(self.burn_factor * n):
+            i = int(rng.integers(n))
+            s_new = float(np.interp(rng.random(), cdf, nodes))
+            th_new = float(np.pi - rng.random() * 2.0 * np.pi)
+            r_new = float(np.interp(s_new, branch.s, branch.radius))
+            mask = np.ones(n, dtype=bool)
+            mask[i] = False
+            d_old = surface_distances(s[i:i + 1], th[i:i + 1], r[i:i + 1], s[mask], th[mask], r[mask])[0]
+            d_new = surface_distances(np.array([s_new]), np.array([th_new]), np.array([r_new]), s[mask], th[mask], r[mask])[0]
+            log_ratio = float(lg @ (self._shell_counts_1(d_new) - self._shell_counts_1(d_old)))
+            if log_ratio >= 0.0 or math.log(max(rng.random(), 1e-300)) < log_ratio:
+                s[i], th[i], r[i] = s_new, th_new, r_new
+        order = np.argsort(s, kind="stable")
+        return s[order], th[order]
+
+    def sample_positions(self, branch: PositionBranch, n: int, rng: np.random.Generator) -> np.ndarray:
+        return self.sample_configuration(branch, n, rng)[0]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "radii_nm": self.radii_nm, "log_gammas": self.log_gammas, "alpha": self.alpha,
+                "burn_factor": self.burn_factor, "fit_info": self.fit_info}
+
+
 def interaction_from_dict(d: Dict[str, Any], base: PositionModel):
     if d["kind"] == "renewal":
         m = RenewalModel(base, d["k"])
     elif d["kind"] == "strauss":
         m = StraussModel(base, d["radius_nm"], d["log_gamma"], d.get("alpha", 0.0), d.get("burn_factor", 50))
+    elif d["kind"] == "multi_strauss":
+        m = MultiStraussModel(base, d["radii_nm"], d["log_gammas"], d.get("alpha", 0.0), d.get("burn_factor", 50))
     else:
         raise ValueError(f"unknown interaction model {d['kind']!r}")
     m.fit_info = d.get("fit_info", {})

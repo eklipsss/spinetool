@@ -1,5 +1,6 @@
 """Fit P1 (spine positions with interaction, p-module-technical-spec.md section 7) on top of a fitted P0 and compare
-P0 / P1a (renewal along the branch) / P1b (Strauss on the trunk surface) on the validation branches.
+P0 / P1a (renewal along the branch) / P1b (Strauss on the trunk surface) / P1b2 (Strauss with two interaction radii) on the
+validation branches.
 
 Why: the assembled branches place spines less regularly than real ones (2026-10-29: nearest neighbour -94 nm, intervals
 -200 nm, significant over neurons; real-T + generated-P test: intervals 1 188 vs 1 370 nm), and real spines repel each
@@ -10,12 +11,13 @@ other at short range (g(0-0.5 um) = 0.76, 2026-11-02). P0 places the N spines of
 Both models keep the P0 count model and the P0 longitudinal density (the same ``p0_bundle.json``); only the dependence
 between points changes. Validation:
   * P1a: renewal log-likelihood on the validation branches at the fitted k against k = 1 (P0);
-  * all three: Monte Carlo goodness of fit - for --n-eval random validation branches, --n-sim simulated configurations at
+  * all models: Monte Carlo goodness of fit - for --n-eval random validation branches, --n-sim simulated configurations at
     the observed N of every branch; g(r) along the branch (0-0.5 / 0.5-1 / 1-2 / 2-4 um), median nearest-neighbour
     interval, CV of the intervals, median and 10 % quantile of the nearest-neighbour SURFACE distance; z of the observed
     value and whether it lies outside the 2.5-97.5 % envelope. ``chosen`` = the smallest mean |z|.
 
-Writes ``runs/training/neuron-model/<date>_p1/`` with ``p1a_bundle.json``, ``p1b_bundle.json``, ``p0_bundle.json`` (= the
+Writes ``runs/training/neuron-model/<date>_p1/`` with ``p1a_bundle.json``, ``p1b_bundle.json``, ``p1b2_bundle.json`` (if
+fitted), ``p0_bundle.json`` (= the
 chosen one, so ``generate_tp.py --p0-run <this run>`` uses it; ``--bundle p1a_bundle.json`` picks another) and
 ``report.json``. CPU; P1b simulation dominates (minutes to tens of minutes).
 """
@@ -45,7 +47,7 @@ import numpy as np  # noqa: E402
 def main() -> None:
     from src.neuron_model.branch_data import position_branches, prepare_training_data, select
     from src.neuron_model.placement_generation.diagnostics import simulation_comparison
-    from src.neuron_model.placement_generation.models.interaction import RenewalModel, StraussModel
+    from src.neuron_model.placement_generation.models.interaction import MultiStraussModel, RenewalModel, StraussModel
     from src.neuron_model.placement_generation.models.position import PositionModel
     from src.neuron_model.spine_generation.experiment.config import resolve_path
     from src.neuron_model.spine_generation.experiment.run import create_run, open_run
@@ -57,6 +59,9 @@ def main() -> None:
     ap.add_argument("--strauss-branches", type=int, default=3000, help="training branches for the pseudo-likelihood")
     ap.add_argument("--strauss-radii", type=float, nargs="*", help="radius grid, nm (default: d_min ... 90 %% quantile of the nearest-neighbour surface distance)")
     ap.add_argument("--n-angles", type=int, default=32)
+    ap.add_argument("--strauss2-radii", type=float, nargs="*", help="radius grid of P1b2 (two radii), nm (default: 12 radii d_min ... 97 %% quantile "
+                    "of the nearest-neighbour surface distance)")
+    ap.add_argument("--no-strauss2", action="store_true", help="do not fit P1b2")
     ap.add_argument("--burn-factor", type=int, default=50, help="Metropolis-Hastings moves per point")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
@@ -89,10 +94,27 @@ def main() -> None:
         print(f"    R {r['radius_nm']:7.0f} nm: log PL {r['log_pl']:.1f} (gain over gamma = 1 {r['log_pl_gain_over_poisson']:+.1f}), gamma {r['gamma']:.3f}, "
               f"neighbours within R {r['mean_neighbours_within_R']:.2f}", flush=True)
 
+    models = {"P0": base, "P1a": renewal, "P1b": strauss}
+    strauss2 = None
+    if not args.no_strauss2:
+        strauss2 = MultiStraussModel(base, burn_factor=args.burn_factor).fit(train_pos, radii=args.strauss2_radii, n_shells=2,
+                                                                             d_min_nm=float(bundle["d_min_nm"]), n_angles=args.n_angles,
+                                                                             max_branches=args.strauss_branches, seed=args.seed)
+        f2 = strauss2.fit_info
+        r1, r2 = strauss2.radii_nm
+        g1, g2 = strauss2.gammas
+        print(f"[p1b2] shells 0-{r1:.0f} nm gamma {g1:.3f}, {r1:.0f}-{r2:.0f} nm gamma {g2:.3f}; log PL gain over the best single radius "
+              f"{f2['log_pl_gain_over_one_radius']:+.1f}{' (outer R at the edge of the grid!)' if f2['radius_at_grid_edge'] else ''} "
+              f"({time.time() - started:.0f} s)", flush=True)
+        for r in f2["profile"][:10]:
+            print(f"    R {', '.join(f'{x:.0f}' for x in r['radii_nm'])} nm: log PL {r['log_pl']:.1f}, gammas "
+                  f"{', '.join(f'{g:.3f}' for g in r['gammas'])}", flush=True)
+        models["P1b2"] = strauss2
+
     rng = np.random.default_rng(args.seed)
     eval_pool = [b for b in val_pos if b.positions is not None and b.angles is not None and len(b.positions) >= 1]
     eval_set = [eval_pool[i] for i in rng.choice(len(eval_pool), min(args.n_eval, len(eval_pool)), replace=False)]
-    check = simulation_comparison({"P0": base, "P1a": renewal, "P1b": strauss}, eval_set, n_sim=args.n_sim, seed=args.seed)
+    check = simulation_comparison(models, eval_set, n_sim=args.n_sim, seed=args.seed)
     scores = {k: v["score_mean_abs_z"] for k, v in check["models"].items()}
     chosen = min(scores, key=scores.get)
     keys = list(check["observed"])
@@ -115,8 +137,12 @@ def main() -> None:
     bundles = {"P1a": {**bundle, "interaction": renewal.to_dict()}, "P1b": {**bundle, "interaction": strauss.to_dict()}, "P0": bundle}
     (run.root / "p1a_bundle.json").write_text(json.dumps(bundles["P1a"]), encoding="utf-8")
     (run.root / "p1b_bundle.json").write_text(json.dumps(bundles["P1b"]), encoding="utf-8")
+    if strauss2 is not None:
+        bundles["P1b2"] = {**bundle, "interaction": strauss2.to_dict()}
+        (run.root / "p1b2_bundle.json").write_text(json.dumps(bundles["P1b2"]), encoding="utf-8")
     (run.root / "p0_bundle.json").write_text(json.dumps(bundles[chosen]), encoding="utf-8")
-    report = {"p0_run": str(args.p0_run), "renewal": renewal.fit_info, "strauss": strauss.fit_info, "simulation_check": check, "scores": scores,
+    report = {"p0_run": str(args.p0_run), "renewal": renewal.fit_info, "strauss": strauss.fit_info,
+              "strauss2": strauss2.fit_info if strauss2 is not None else None, "simulation_check": check, "scores": scores,
               "chosen": chosen, "seconds": time.time() - started}
     (run.root / "report.json").write_text(json.dumps(report, indent=2, default=float), encoding="utf-8")
     print(f"\n[p1] chosen {chosen} (smallest mean |z|); p0_bundle.json = {chosen}; run -> {run.root}", flush=True)
