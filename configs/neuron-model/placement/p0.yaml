@@ -17,6 +17,7 @@ model:
   families: [poisson, nb, zinb, hurdle]
   exposures: [length, area]
   random_effects: [false, true]
+  sigma_by_cell_type: [false, true]  # 2026-11-11: own spread of the neuron effect for inhibitory neurons (calibrate_p0_counts.py: ~0.65 vs 0.30); only with the neuron effect
   n_basis: 9                       # 2026-10-29: 9 (penalty 0.1) gave NLL 2.218 vs 2.317 with 5 (penalty 1.0): the empty share depends on the radius almost like a step
   smooth_penalty: 0.1
   max_iter: 300

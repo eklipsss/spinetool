@@ -88,6 +88,7 @@ def fit_p0(
     families: Sequence[str] = ("poisson", "nb", "zinb", "hurdle"),
     exposures: Sequence[str] = ("length", "area"),
     random_effects: Sequence[bool] = (False, True),
+    sigma_by_cell_type: Sequence[bool] = (False,),
     position_use: Sequence[str] = ("radius", "kappa", "soma", "end"),
     n_basis: int = 5,
     smooth_penalty: float = 1.0,
@@ -96,22 +97,26 @@ def fit_p0(
     log=functools.partial(print, flush=True),
 ) -> Dict[str, Any]:
     rng = np.random.default_rng(seed)
-    log(f"[p0] {len(train_cov)} train / {len(val_cov)} validation branches: {len(families) * len(exposures) * len(random_effects)} count models to fit (each takes up to ~1 min) ...")
+    # neuron-effect spread by cell type (own sigma_b for inhibitory neurons) only together with the neuron effect
+    effects = [(re, sg) for re in random_effects for sg in (sigma_by_cell_type if re else (False,))]
+    log(f"[p0] {len(train_cov)} train / {len(val_cov)} validation branches: {len(families) * len(exposures) * len(effects)} count models to fit (each takes up to ~1 min) ...")
     design = CountDesign(n_basis).fit(train_cov)
     variants = []
     best = None
     lengths_val = np.array([b.length_nm for b in val_cov])
-    for family, exposure, re in itertools.product(families, exposures, random_effects):
+    for family, exposure, (re, sg) in itertools.product(families, exposures, effects):
         dtr, dva = build_count_data(design, train_cov, exposure), build_count_data(design, val_cov, exposure)
-        model = CountModel(family, exposure, re, n_basis=n_basis, smooth_penalty=smooth_penalty).fit(dtr, max_iter=max_iter)
+        model = CountModel(family, exposure, re, n_basis=n_basis, smooth_penalty=smooth_penalty, sigma_groups=2 if sg else 1).fit(dtr, max_iter=max_iter)
         nll = model.neg_loglik(dva) / max(len(val_cov), 1)
         resid = model.randomized_quantile_residuals(dva, rng)
         row = {"family": family, "exposure": exposure, "random_effect": re, "val_nll_per_branch": float(nll),
                "train_nll_per_branch": float(model.fit_info["nll"] / max(len(train_cov), 1)),
-               "dispersion_k": None if family == "poisson" else float(model.dispersion), "sigma_b": float(model.sigma_b),
+               "dispersion_k": None if family == "poisson" else float(model.dispersion), "sigma_b": float(model.sigma_b), "sigma_by_cell_type": bool(sg),
+               "sigma_b_by_group": model.fit_info.get("sigma_b_by_group"),
                "residual_mean": float(resid.mean()), "residual_std": float(resid.std())}
         variants.append(row)
-        log(f"[p0-count] {family:8s} {exposure:6s} re={str(re):5s}  val NLL/branch {nll:.4f}")
+        sig = "/".join(f"{v:.2f}" for v in model.fit_info["sigma_b_by_group"].values()) if re else "-"
+        log(f"[p0-count] {family:8s} {exposure:6s} re={str(re):5s} sigma by type={str(sg):5s} (sigma_b {sig})  val NLL/branch {nll:.4f}")
         if best is None or nll < best[0]:
             best = (nll, model, row)
     _, count_model, chosen = best

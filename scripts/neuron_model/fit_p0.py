@@ -53,6 +53,7 @@ def main() -> None:
     train_pos, val_pos = position_branches(tr, spines, pack), position_branches(va, spines, pack)
     print(f"[p0] train {len(train_cov)} branches, validation {len(val_cov)}", flush=True)
     result = fit_p0(train_cov, val_cov, train_pos, val_pos, families=m["families"], exposures=m["exposures"], random_effects=m["random_effects"],
+                    sigma_by_cell_type=m.get("sigma_by_cell_type", [False]),
                     position_use=m["position_use"], n_basis=int(m["n_basis"]), smooth_penalty=float(m["smooth_penalty"]), max_iter=int(m["max_iter"]), seed=int(cfg["seed"]))
     train_spines = spines[key_series(spines).isin(set(key_series(tr)))] if len(spines) else spines
     d_min = estimate_d_min(train_spines, float(m["d_min_quantile_percent"]))
@@ -62,7 +63,7 @@ def main() -> None:
     (run.root / "p0_bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
     (run.root / "report.json").write_text(json.dumps(result["report"], indent=2, default=float), encoding="utf-8")
     c = result["report"]["count_chosen"]
-    print(f"[p0] chosen count model: {c['family']} / {c['exposure']} / neuron effect {c['random_effect']}; d_min {d_min['d_min_nm']:.0f} nm; run -> {run.root}", flush=True)
+    print(f"[p0] chosen count model: {c['family']} / {c['exposure']} / neuron effect {c['random_effect']} (own sigma_b for inhibitory: {c.get('sigma_by_cell_type')}, {c.get('sigma_b_by_group')}); d_min {d_min['d_min_nm']:.0f} nm; run -> {run.root}", flush=True)
 
 
 if __name__ == "__main__":
