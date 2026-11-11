@@ -10,7 +10,10 @@ Real reference = the source branch of every request (same conditions and length)
 the P0 run of the set (``data.branches_root`` / ``data.pack_dir``: local disk, no NAS). Compared: spines per branch,
 density, share of branches without spines (overall and per length class), trunk functionals, position along the
 branch, nearest-neighbour distance on the trunk surface, gaps along the branch, angle around the trunk; noise floor =
-two halves of the real reference. Writes ``<out>/evaluation.json``, ``<out>/evaluation_branches.csv`` and ``<out>/evaluation_spines.csv``
+two halves of the real reference. Per-spine statistics of the generated branches are computed after the same thinning
+the real ones undergo (spines without a position, ~7 %): every generated spine is kept with the share
+n_with_position / n_spines_in_range of its source branch (``--no-position-thinning``: all generated spines, as before
+2026-11-11). Counts and densities always use all spines; the generator is not affected. Writes ``<out>/evaluation.json``, ``<out>/evaluation_branches.csv`` and ``<out>/evaluation_spines.csv``
 (out = the assembly directory, else ``<tp-dir>/evaluation``). CPU, seconds.
 """
 
@@ -37,7 +40,8 @@ import numpy as np
 import pandas as pd
 
 from src.neuron_model.branch_assembly import load_tp_set
-from src.neuron_model.branch_assembly.evaluate import collect, compare_sets, spine_geometry_stats, split_halves, summarize, trunk_functionals
+from src.neuron_model.branch_assembly.evaluate import (collect, compare_sets, position_keep_fraction, position_keep_mask, spine_geometry_stats,
+                                                       split_halves, summarize, trunk_functionals)
 from src.neuron_model.branch_data import key_series, prepare_training_data, trunk_record
 from src.neuron_model.spine_generation.experiment.config import resolve_path
 from src.neuron_model.spine_generation.experiment.run import open_run
@@ -52,6 +56,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path)
     parser.add_argument("--cell-type-binary", choices=("excitatory", "inhibitory"),
                         help="only the requests copied from branches of this cell type (output: evaluation_<type>/)")
+    parser.add_argument("--no-position-thinning", action="store_true",
+                        help="per-spine statistics on ALL generated spines (biased: the real ones lack ~7 %% of positions)")
     args = parser.parse_args()
 
     info = json.loads((args.tp_dir / "generation_info.json").read_text(encoding="utf-8"))
@@ -79,7 +85,11 @@ def main() -> None:
         if not indices:
             raise SystemExit(f"[evaluate] no request of cell type {args.cell_type_binary} in {args.tp_dir}")
 
-    # ---- generated
+    # ---- generated (per-spine statistics after the thinning of the real positions, see the docstring)
+    keys = key_series(table)
+    rows_by_key = dict(zip(keys, table.to_dict("records")))
+    thin_rng = np.random.default_rng(args.seed + 1)
+    keep_fractions = []
     gen_rows, gen_stats, sources = [], [], []
     for i in indices:
         t = trunks[i]
@@ -88,15 +98,20 @@ def main() -> None:
             p = p[p["spine_index"].astype(int).isin(placed.get(i, set()))]
         s = p["s"].to_numpy(float) if p is not None else np.zeros(0)
         th = p["theta"].to_numpy(float) if p is not None else np.zeros(0)
-        r = np.interp(s, t["s"], t["radius"])
+        source = str(branches.loc[branches["branch_index"] == i, "source_branch"].iloc[0])
         gen_rows.append({"branch_index": i, "length_nm": float(t["length"]), "n_spines": int(len(s)), **trunk_functionals(t)})
+        if not args.no_position_thinning:
+            row = rows_by_key.get(source, {})
+            f = position_keep_fraction(row.get("n_spines_in_range"), row.get("n_with_position"))
+            keep_fractions.append(f)
+            m = position_keep_mask(len(s), f, thin_rng)
+            s, th = s[m], th[m]
+        r = np.interp(s, t["s"], t["radius"])
         gen_stats.append(spine_geometry_stats(s, th, r, float(t["length"])))
-        sources.append(str(branches.loc[branches["branch_index"] == i, "source_branch"].iloc[0]))
+        sources.append(source)
     gen_neurons = [k.split("/")[1] for k in sources]  # a generated branch shares the neuron of the request it copies (same conditions)
 
     # ---- real reference: the source branch of every request (paired list, duplicates kept)
-    keys = key_series(table)
-    rows_by_key = dict(zip(keys, table.to_dict("records")))
     sp = spines[(spines["status"].astype(str) == "valid") & spines["has_position"].fillna(False).astype(bool)] if len(spines) else spines
     sp_by_key = {k: g for k, g in sp.groupby(key_series(sp))} if len(sp) else {}
     real_rows, real_stats, real_neurons = [], [], []
@@ -131,13 +146,16 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     report = {"tp_dir": str(args.tp_dir), "assembly": str(args.assembly) if args.assembly else None, "level": "assembled" if args.assembly else "tp",
               "n_generated": int(len(gen_b)), "n_real": int(len(real_b)), "n_real_neurons": int(len(set(real_neurons))),
-              "noise_floor_by": "neuron" if len(set(real_neurons)) >= 2 else "branch", "result": result, "noise_floor": floor, "assembly_info": asm_info}
+              "noise_floor_by": "neuron" if len(set(real_neurons)) >= 2 else "branch",
+              "position_thinning": None if args.no_position_thinning else {"mean_keep_fraction": float(np.mean(keep_fractions)) if keep_fractions else float("nan")},
+              "result": result, "noise_floor": floor, "assembly_info": asm_info}
     (out / "evaluation.json").write_text(json.dumps(report, indent=2, default=float), encoding="utf-8")
     pd.concat([gen_b.assign(kind="generated"), real_b.assign(kind="real")], ignore_index=True).to_csv(out / "evaluation_branches.csv", index=False)
     pd.concat([gen_s.assign(kind="generated"), real_s.assign(kind="real")], ignore_index=True).to_csv(out / "evaluation_spines.csv", index=False)
 
     print(f"[evaluate] {report['level']} level: {len(gen_b)} generated branches vs {len(real_b)} real source branches "
-          f"({report['n_real_neurons']} neurons; noise floor by {report['noise_floor_by']})")
+          f"({report['n_real_neurons']} neurons; noise floor by {report['noise_floor_by']}; per-spine statistics "
+          + ("on all generated spines)" if args.no_position_thinning else f"after thinning the generated spines to the positioned share, mean {report['position_thinning']['mean_keep_fraction']:.3f})"))
     if asm_info:
         print(f"[evaluate] assembly: {asm_info['branch_status']}, spines placed {asm_info['spines_placed']}, dropped {asm_info['spines_dropped']}, "
               f"immersion depth median {asm_info['immersion_depth_nm_median']:.0f} nm (90 % {asm_info['immersion_depth_nm_p90']:.0f})")

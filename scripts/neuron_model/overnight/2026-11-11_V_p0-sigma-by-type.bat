@@ -22,6 +22,19 @@ cd /d %REPO%
 if not exist %OLDP0%\p0_bundle.json (echo MISSING %OLDP0%\p0_bundle.json & goto :end)
 if not exist %T0%\report.json (echo MISSING %T0%\report.json & goto :end)
 
+rem V0 (minutes): the evaluation now thins the generated spines to the positioned share of their source branch for the
+rem    per-spine statistics (as the real ones; before: ~34 nm of the nearest-neighbour gap was this measurement bias).
+rem    Re-evaluate the sets of chains T and U into NEW folders evaluation_thinned* (the old evaluations stay).
+rem    Expected: U1 (P1b2, real N) close to U2 of chain U (-22 nm); T6 generated / real_t: the count-model part only.
+set TT=runs\analysis\neuron-model\tp_generation
+echo ===== [V0] re-evaluation of the T6 and U1 sets with thinning ===== %date% %time%
+for %%s in (%TT%\inhibitory\generated\2026-11-10_114858_generated_seed1 %TT%\inhibitory\real_t\2026-11-10_115009_real_t_seed1 %TT%\counts_real\p1b2\2026-11-10_174333_real_t_counts-real_seed1) do (
+  echo ----- %%s -----
+  python scripts\neuron_model\evaluate_assembled_branches.py --tp-dir %%s --out %%s\evaluation_thinned
+  python scripts\neuron_model\evaluate_assembled_branches.py --tp-dir %%s --cell-type-binary excitatory --out %%s\evaluation_thinned_excitatory
+  python scripts\neuron_model\evaluate_assembled_branches.py --tp-dir %%s --cell-type-binary inhibitory --out %%s\evaluation_thinned_inhibitory
+)
+
 echo ===== [V1] old P0: calibration + rarity of the val groups ===== %date% %time%
 python scripts\neuron_model\calibrate_p0_counts.py --p0-run %OLDP0%
 

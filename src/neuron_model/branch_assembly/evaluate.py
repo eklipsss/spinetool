@@ -13,7 +13,11 @@ condition mix. Compared quantities (generated vs real, W1 / std of real, KS, med
 
 Noise floor: the same comparison between two halves of the real reference (by neuron when it has >= 2 neurons,
 otherwise by branch - optimistic). Real spine positions are those with ``has_position`` (about 7 % of the valid spines
-have none), so the real nearest-neighbour distances are slightly too long. Units: nm (density per um).
+have none), so the real per-spine statistics see a THINNED set of spines: nearest-neighbour distances and gaps come out
+longer than for all spines (chain U, 2026-11-10: ~34 nm of the 56 nm gap in the surface nearest neighbour). The same
+measurement is applied to the generated spines (``position_keep_mask``): every generated spine is kept with the share of
+positioned spines of its source branch, only for the per-spine statistics; counts and densities use all spines. The
+generator itself is not changed (a new branch without a source branch gets all its spines). Units: nm (density per um).
 """
 
 from __future__ import annotations
@@ -31,6 +35,23 @@ LENGTH_CLASSES = (("< 20 um", 0.0, 20000.0), ("20-50 um", 20000.0, 50000.0), (">
 
 def _wrap(a: np.ndarray) -> np.ndarray:
     return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def position_keep_fraction(n_in_range: Any, n_with_position: Any) -> float:
+    """Share of the spines of a real branch that have a position (1 when unknown)."""
+    try:
+        n, k = float(n_in_range), float(n_with_position)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(n) or not np.isfinite(k) or n <= 0:
+        return 1.0
+    return float(np.clip(k / n, 0.0, 1.0))
+
+
+def position_keep_mask(n: int, keep_fraction: float, rng: np.random.Generator) -> np.ndarray:
+    """Independent thinning of n generated spines: the measurement model of the real positions (a spine loses its position
+    independently of the others with probability 1 - keep_fraction)."""
+    return rng.random(int(n)) < float(keep_fraction)
 
 
 def spine_geometry_stats(s: np.ndarray, theta: np.ndarray, radius: np.ndarray, length: float) -> Dict[str, np.ndarray]:
