@@ -259,13 +259,115 @@ function drawCons() {
       '</td><td>' + (D.verdict_ru[r.ver] || r.ver) + '</td></tr>').join('') + '</tbody></table><p class="small muted">* — эффект значим в этом датасете (тепловая карта, q < 0,05).</p></div>';
 }
 
+// ---------------------------------------------------------------- section 4: generated sets (4a reproduction, 4b equivalence)
+const G = D.generated;
+const GEN_COLOR = {consistent: P.series_2, same_sign_different_size: P.series_1, opposite: P.series_1, real_only: P.reference, generated_only: P.series_3, neither: '#c8c8cc'};
+const EQ_COLOR = {equivalent: P.series_2, differs: P.series_1, indistinguishable_equivalence_not_shown: UNDER};
+function genLevel() { return G && G.levels ? G.levels[LEVEL] : null; }
+function fillGen() {
+  if (!G || !$('sel-gen-set')) return;
+  const L = genLevel();
+  if (!L) {
+    $('sel-gen-set').innerHTML = ''; $('sel-gen-cmp').innerHTML = ''; $('gen-repro-summary').innerHTML = ''; $('gen-repro-table').innerHTML = '';
+    $('plot-gen-repro').innerHTML = '<div class="empty">Для этой вкладки сгенерированных наборов нет</div>';
+    $('plot-gen-eq').innerHTML = '<div class="empty">Для этой вкладки сгенерированных наборов нет</div>'; $('plot-gen-eq').style.height = '';
+    return;
+  }
+  const sets = [...new Set(L.repro.map(r => r.set).concat(L.eq.map(r => r.set)))];
+  fillSelect('sel-gen-set', sets.map(s => [s, s]), () => { fillGenCmp(); drawGenEq(); });
+  fillGenCmp(); drawGenEq();
+}
+function fillGenCmp() {
+  const L = genLevel(), set = $('sel-gen-set').value;
+  const S = L.summary.filter(s => s.set === set);
+  if (!S.length) { $('sel-gen-cmp').innerHTML = ''; $('gen-repro-summary').innerHTML = ''; $('gen-repro-table').innerHTML = '';
+    $('plot-gen-repro').innerHTML = '<div class="empty">Нет сравнения типов, допустимого у реальных и у сгенерированных</div>'; return; }
+  fillSelect('sel-gen-cmp', S.map((s, i) => [i, factorName(s.f) + ': ' + vr(s.a) + ' / ' + vr(s.b)]), drawGenRepro);
+  drawGenRepro();
+}
+function drawGenRepro() {
+  const L = genLevel(), set = $('sel-gen-set').value;
+  const s = L.summary.filter(x => x.set === set)[+$('sel-gen-cmp').value];
+  const mt = Object.fromEntries(L.metrics.map(m => [m.id, m]));
+  const rows = L.repro.filter(r => r.set === set && r.f === s.f && r.a === s.a && r.b === s.b);
+  const pct = v => v === null ? '—' : sgn(100 * v, 1) + ' %';
+  const val = (r, v) => r.kind === 'abs' ? (v === null ? '—' : sgn(v * (mt[r.m] && !mt[r.m].abs ? mt[r.m].factor : 1), 3)) : pct(v);
+  const pp = (r, v) => r.kind === 'abs' ? val(r, v) : (v === null ? '—' : sgn(100 * v, 1) + ' п. п.');
+  $('gen-repro-summary').innerHTML = '<p class="small" style="margin:0 0 8px">Метрик ' + s.n + '. Значимо у реальных ' + s.nr + ', из них воспроизведено с тем же знаком ' + s.rep +
+    (s.share === null ? '' : ' (' + fmt(100 * s.share, 0) + ' %)') + '. Противоположный знак ' + s.opp + '. Лишних эффектов (значимо только у сгенерированных) ' + s.spur +
+    '. Разность эффектов значима у ' + s.ndiff + '. Ранговая корреляция эффектов: ' + (s.rho === null ? '—' : fmt(s.rho, 2) + ' (95 %: ' + fmt(s.rho_lo, 2) + ' … ' + fmt(s.rho_hi, 2) + ')') + '.</p>';
+  const rel = rows.filter(r => r.kind === 'rel' && r.er !== null && r.eg !== null);
+  if (rel.length) {
+    const lim = Math.max(10, ...rel.flatMap(r => [r.er_lo, r.er_hi, r.eg_lo, r.eg_hi].filter(v => v !== null).map(v => Math.abs(100 * v)))) * 1.05;
+    const traces = Object.keys(GEN_COLOR).map(v => {
+      const g = rel.filter(r => r.ver === v);
+      return {type: 'scatter', mode: 'markers+text', name: G.verdict_ru[v] || v, x: g.map(r => 100 * r.er), y: g.map(r => 100 * r.eg),
+        text: g.map(r => (r.pr || r.pg) ? (mt[r.m] ? mt[r.m].name : r.m) : ''), textposition: 'top center', textfont: {size: 10.5, color: P.ink_secondary},
+        meta: g.map(r => mt[r.m] ? mt[r.m].name : r.m), marker: {size: 10, color: GEN_COLOR[v], line: {color: '#ffffff', width: 2}},
+        error_x: {type: 'data', symmetric: false, array: g.map(r => 100 * (r.er_hi - r.er)), arrayminus: g.map(r => 100 * (r.er - r.er_lo)), color: GEN_COLOR[v], thickness: 1.2, width: 0},
+        error_y: {type: 'data', symmetric: false, array: g.map(r => 100 * (r.eg_hi - r.eg)), arrayminus: g.map(r => 100 * (r.eg - r.eg_lo)), color: GEN_COLOR[v], thickness: 1.2, width: 0},
+        customdata: g.map(r => [pct(r.er), pct(r.eg), pp(r, r.d), qtxt(r.q)]),
+        hovertemplate: '<b>%{meta}</b><br>реальные: %{customdata[0]}<br>сгенерированные: %{customdata[1]}<br>разность: %{customdata[2]}, q = %{customdata[3]}<extra>' + (G.verdict_ru[v] || v) + '</extra>'};
+    }).filter(t => t.x.length);
+    traces.unshift({type: 'scatter', mode: 'lines', x: [-lim, lim], y: [-lim, lim], line: {color: P.reference, dash: 'dot', width: 1}, hoverinfo: 'skip', showlegend: false});
+    Plotly.newPlot('plot-gen-repro', traces, layout({xaxis: {title: axisTitle('Эффект у реальных, %'), range: [-lim, lim], zeroline: true},
+      yaxis: {title: axisTitle('Эффект у сгенерированных, %'), range: [-lim, lim], zeroline: true}, legend: {orientation: 'h', y: 1.12}}), PLOT_CONFIG);
+  } else $('plot-gen-repro').innerHTML = '<div class="empty">У этих метрик абсолютные эффекты: смотрите таблицу</div>';
+  $('gen-repro-table').innerHTML = '<div style="overflow-x:auto;margin-top:10px"><table class="metrics"><thead><tr><th>Метрика</th><th>Реальные (95 %)</th><th>Сгенерированные (95 %)</th><th>Разность (95 %)</th><th>q</th><th>Вывод</th></tr></thead><tbody>' +
+    rows.map(r => '<tr><td>' + (mt[r.m] ? metricLabel(mt[r.m]) : r.m) + '</td><td>' + val(r, r.er) + ' (' + val(r, r.er_lo) + ' … ' + val(r, r.er_hi) + ')' + (r.pr ? ' *' : '') +
+      '</td><td>' + val(r, r.eg) + ' (' + val(r, r.eg_lo) + ' … ' + val(r, r.eg_hi) + ')' + (r.pg ? ' *' : '') + '</td><td>' + pp(r, r.d) + ' (' + pp(r, r.d_lo) + ' … ' + pp(r, r.d_hi) + ')</td><td>' + qtxt(r.q) +
+      '</td><td>' + (G.verdict_ru[r.ver] || r.ver) + '</td></tr>').join('') + '</tbody></table><p class="small muted">* — эффект значим на этой стороне (q < 0,05, поправка внутри семейства сравнений). ' +
+      'Единиц: реальные ' + (rows[0] ? rows[0].nr : '—') + ', сгенерированные ' + (rows[0] ? rows[0].ng : '—') + '.</p></div>';
+}
+function drawGenEq() {
+  const L = genLevel(), set = $('sel-gen-set').value;
+  const rows = L.eq.filter(r => r.set === set);
+  if (!rows.length) { $('plot-gen-eq').innerHTML = '<div class="empty">Нет проверок эквивалентности для этого набора</div>'; $('plot-gen-eq').style.height = ''; return; }
+  const strata = [...new Set(rows.map(r => r.sc + '\u0000' + r.sv))];
+  const xlab = strata.map(k => { const [c, v] = k.split('\u0000'); return c === 'all' ? 'все единицы' : (G.stratum_ru[c] || c) + ': ' + vr(v); });
+  const metrics = L.metrics.filter(m => rows.some(r => r.m === m.id && r.ver !== 'not_tested'));   // never-tested metrics: no empty rows
+  const y = metrics.map(metricLabel);
+  const layers = {equivalent: [], differs: [], indistinguishable_equivalence_not_shown: []}, hover = [], ann = [];
+  metrics.forEach((m, i) => {
+    Object.values(layers).forEach(a => a.push([])); const rh = [];
+    strata.forEach((k, j) => {
+      const [c, v] = k.split('\u0000');
+      const r = rows.find(q => q.m === m.id && q.sc === c && q.sv === v);
+      Object.entries(layers).forEach(([ver, a]) => a[i].push(r && r.ver === ver ? 1 : null));
+      if (!r || r.ver === 'not_tested' || r.eff === null) { rh.push('не проверялось' + (r ? ' (единиц: ' + r.nr + ' / ' + r.ng + ')' : '')); return; }
+      const absK = r.kind === 'abs';
+      const f = w => w === null ? '—' : (absK ? sgn(w * (m.abs ? 1 : m.factor), 3) : sgn(100 * w, 1) + ' %');
+      ann.push({x: xlab[j], y: y[i], text: (absK ? sgn(r.eff * (m.abs ? 1 : m.factor), 2) : sgn(100 * r.eff, 0) + ' %') + (r.ver === 'equivalent' ? ' =' : (r.ver === 'differs' ? ' ≠' : ' ?')),
+        showarrow: false, font: {size: 11, color: r.ver === 'indistinguishable_equivalence_not_shown' ? P.ink_muted : '#ffffff'}});
+      rh.push('<b>' + m.name + '</b><br>' + xlab[j] + '<br>сгенерированные к реальным: ' + f(r.eff) + ' (95 %: ' + f(r.lo) + ' … ' + f(r.hi) + ')' +
+        '<br>порог (шумовой пол): ±' + f(r.mg).replace('+', '') + '<br>наименьший доказуемый порог: ' + f(r.mm).replace('+', '') +
+        (r.mr !== null ? '<br>медианы: реальные ' + fmt(r.mr * m.factor) + ', сгенерированные ' + fmt(r.mgn * m.factor) + (m.unit ? ' ' + m.unit : '') : '') +
+        '<br>единиц: ' + r.nr + ' / ' + r.ng + ' (' + (r.pair === 'source neuron' ? 'парно по нейронам-источникам' : 'независимо') + ')' +
+        '<br>q различия = ' + qtxt(r.q) + ', q эквивалентности = ' + qtxt(r.qt) + '<br><b>' + (G.eq_ru[r.ver] || r.ver) + '</b>');
+    });
+    hover.push(rh);
+  });
+  const common = {type: 'heatmap', x: xlab, y: y, xgap: 2, ygap: 2, hoverinfo: 'text', text: hover, showscale: false, zmin: 0, zmax: 1};
+  const traces = Object.entries(layers).map(([ver, z]) => Object.assign({}, common, {z: z, colorscale: [[0, EQ_COLOR[ver]], [1, EQ_COLOR[ver]]]}));
+  const maxLab = Math.max(...xlab.map(s => s.length));
+  const top = xlab.length > 3 ? Math.min(220, 40 + maxLab * 3.6) : 50;
+  $('plot-gen-eq').style.height = (top + 40 + 28 * y.length) + 'px';
+  Plotly.newPlot('plot-gen-eq', traces, layout({annotations: ann, margin: {l: 290, r: xlab.length > 3 ? 90 : 20, t: top, b: 10},
+    xaxis: {side: 'top', tickangle: xlab.length > 3 ? -35 : 0, tickfont: {size: 11.5, color: P.ink_secondary}, showgrid: false, zeroline: false},
+    yaxis: {autorange: 'reversed', showgrid: false, zeroline: false, tickfont: {size: 12, color: P.ink}}}), PLOT_CONFIG);
+}
+if (G && $('gen-eq-legend')) $('gen-eq-legend').append(
+  el('span', {html: '<i class="swatch" style="background:' + P.series_2 + '"></i> эквивалентно (=)'}),
+  el('span', {html: '<i class="swatch" style="background:' + P.series_1 + '"></i> различается (≠)'}),
+  el('span', {html: '<i class="swatch" style="background:' + UNDER + ';border:1px solid #d9c98f"></i> различие не найдено, эквивалентность не доказана (?)'}));
+
 // ---------------------------------------------------------------- level tabs (spine / trunk / placement)
 function setLevel(l) {
   LEVEL = l;
   document.querySelectorAll('#level-tabs button').forEach(b => b.classList.toggle('on', b.dataset.level === l));
   const mod = {spine: 'S', trunk: 'T', placement: 'P'}[l];
   document.querySelectorAll('tr[data-mod]').forEach(tr => { tr.style.display = tr.dataset.mod === mod ? '' : 'none'; });
-  fillDistMetrics(); fillSigScopes(); fillCons();
+  fillDistMetrics(); fillSigScopes(); fillCons(); fillGen();
 }
 LEVELS.forEach(l => { const b = el('button', {text: D.level_ru[l] || l, 'data-level': l}); b.onclick = () => setLevel(l); $('level-tabs').append(b); });
 if (LEVELS.length) setLevel(LEVELS[0]);

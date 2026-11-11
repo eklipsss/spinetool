@@ -3,7 +3,8 @@
 
 Input = the folder written by ``scripts/neuron_model/build_global_tables.py`` (``<table>.json`` records, ``run_info.json``).
 Output = ``<date>_global-report.html`` next to it. Page logic: ``assets/global_report.js``. Design and statistics:
-docs/neuron-model/global-report-design.md. Sections 0-3 of the design (generated dendrites = section 4 are not built yet).
+docs/neuron-model/global-report-design.md. Sections 0-5 of the design; section 4 (generated dendrites) is built from the
+``generated_*`` tables (global_report/generated.py) and stays a stub when the folder has none.
 """
 
 from __future__ import annotations
@@ -115,6 +116,15 @@ LEVEL_RU = {"spine": "Шипики (модуль S)", "trunk": "Ствол ве�
 BRANCH_SPLIT = {"trunk": "T", "placement": "P"}
 VERDICT_RU = {"consistent": "согласуется", "same_sign_different_size": "тот же знак, размер разный", "opposite": "противоположный знак",
               "minnie65_only": "только в Minnie65", "h01_only": "только в H01", "neither": "нет ни в одном"}
+
+
+GEN_VERDICT_RU = {"consistent": "воспроизведено", "same_sign_different_size": "тот же знак, размер другой", "opposite": "противоположный знак",
+                  "real_only": "не воспроизведено", "generated_only": "лишний эффект", "neither": "нет ни там, ни там"}
+EQ_VERDICT_RU = {"equivalent": "эквивалентно", "differs": "различается", "indistinguishable_equivalence_not_shown": "различие не найдено, эквивалентность не доказана",
+                 "not_tested": "не проверялось"}
+MODULE_OF = {"spine": "S", "trunk": "T", "placement": "P"}
+VAL_RU = {"excitatory": "возбуждающие", "inhibitory": "тормозные", "apical": "апикальный", "basal": "базальный", "uncertain": "неопределённый"}
+STRATUM_RU = {"all": "все единицы", "cell_type_binary": "тип клетки", "cell_type": "подробный тип", "compartment": "компартмент"}
 
 
 def _records(folder: Path, name: str) -> List[Dict[str, Any]]:
@@ -297,6 +307,142 @@ def _inventory_counts(folder: Path) -> Dict[str, List[Dict[str, Any]]]:
     return out
 
 
+def _generated_payload(folder: Path) -> Optional[Dict[str, Any]]:
+    """Section 4: per tab (spine / trunk / placement) the reproduction rows (4a) and the equivalence rows (4b) of every set."""
+    sets = _records(folder, "generated_sets")
+    repro = {"spine": _records(folder, "generated_reproduction_spine"), "branch": _records(folder, "generated_reproduction_branch")}
+    summ = {"spine": _records(folder, "generated_reproduction_summary_spine"), "branch": _records(folder, "generated_reproduction_summary_branch")}
+    eq = {"spine": _records(folder, "generated_equivalence_spine"), "branch": _records(folder, "generated_equivalence_branch")}
+    if not (sets or any(repro.values()) or any(eq.values())):
+        return None
+    levels: Dict[str, Any] = {}
+    for name, src in (("spine", "spine"), ("trunk", "branch"), ("placement", "branch")):
+        info = _metric_info(src)
+        keep = (lambda r: True) if src == "spine" else (lambda r, n=name: r.get("level") == n)
+        keep_eq = (lambda r: True) if src == "spine" else (lambda r, n=name: r.get("module") == n)
+        rr = [r for r in repro[src] if keep(r)]
+        ss = [r for r in summ[src] if keep(r)]
+        ee = [r for r in eq[src] if keep_eq(r)]
+        if not (rr or ee):
+            continue
+        metrics = list(dict.fromkeys([r["metric"] for r in rr] + [r["metric"] for r in ee]))
+        levels[name] = {
+            "metrics": [_meta(m, info) for m in metrics],
+            "repro": [{"set": r["set"], "f": r["factor"], "a": r["a"], "b": r["b"], "m": r["metric"], "kind": r.get("effect_kind"),
+                       "er": _num(r.get("effect_real")), "er_lo": _num(r.get("ci_low_real")), "er_hi": _num(r.get("ci_high_real")),
+                       "eg": _num(r.get("effect_generated")), "eg_lo": _num(r.get("ci_low_generated")), "eg_hi": _num(r.get("ci_high_generated")),
+                       "pr": bool(r.get("present_real")), "pg": bool(r.get("present_generated")), "nr": r.get("n_units_real"), "ng": r.get("n_units_generated"),
+                       "d": _num(r.get("difference")), "d_lo": _num(r.get("difference_ci_low")), "d_hi": _num(r.get("difference_ci_high")),
+                       "q": _num(r.get("q_difference")), "ver": r.get("verdict")} for r in rr],
+            "summary": [{"set": r["set"], "f": r["factor"], "a": r["a"], "b": r["b"], "n": r.get("n_metrics"), "nr": r.get("n_present_real"),
+                         "ng": r.get("n_present_generated"), "rep": r.get("n_reproduced_same_sign"), "share": _num(r.get("share_reproduced")),
+                         "spur": r.get("n_spurious"), "opp": r.get("n_opposite"), "ndiff": r.get("n_difference_significant"),
+                         "rho": _num(r.get("spearman")), "rho_lo": _num(r.get("spearman_ci_low")), "rho_hi": _num(r.get("spearman_ci_high"))} for r in ss],
+            "eq": [{"set": r["set"], "sc": r.get("stratum_column"), "sv": r.get("stratum"), "m": r["metric"], "kind": r.get("effect_kind"),
+                    "eff": _num(r.get("effect")), "lo": _num(r.get("ci_low")), "hi": _num(r.get("ci_high")), "mg": _num(r.get("margin")),
+                    "mm": _num(r.get("min_margin")), "q": _num(r.get("q_boot")), "qt": _num(r.get("q_tost")), "ver": r.get("verdict"),
+                    "nr": r.get("n_units_real"), "ng": r.get("n_units_generated"), "pair": r.get("pairing"),
+                    "mr": _num(r.get("median_real")), "mgn": _num(r.get("median_generated"))} for r in ee],
+        }
+    return {"sets": sets, "levels": levels, "verdict_ru": GEN_VERDICT_RU, "eq_ru": EQ_VERDICT_RU, "stratum_ru": STRATUM_RU}
+
+
+def _generated_sets_html(sets: List[Dict[str, Any]]) -> str:
+    if not sets:
+        return '<p class="muted small">Нет описания наборов.</p>'
+    level_ru = {"spine": "шипики (S)", "branch": "ветви (T и P)"}
+    rows = []
+    by = {}
+    for r in sets:
+        by.setdefault((r.get("set"), r.get("level")), {})[r.get("side")] = r
+    for (name, level), sides in by.items():
+        g, rr = sides.get("generated", {}), sides.get("real", {})
+        unit = {"source neuron": "нейрон-источник условий"}.get(g.get("unit"), g.get("unit") or "")
+        if isinstance(unit, str) and unit.startswith("pseudo-unit of"):
+            unit = "псевдоединица из " + unit.split()[2] + " шипиков (у сгенерированных нет нейрона)"
+        thin = g.get("mean_keep_fraction")
+        rows.append(f"<tr><td>{esc(name)}</td><td>{esc(level_ru.get(level, level))}</td><td>{esc(SHORT.get(g.get('source_dataset'), g.get('source_dataset') or ''))}</td>"
+                    f"<td>{esc(unit)}</td><td>{rr.get('n_units', '—')} / {g.get('n_units', '—')}</td><td>{rr.get('n_inhibitory_units', '—')} / {g.get('n_inhibitory_units', '—')}</td>"
+                    f"<td>{rr.get('n_rows', '—')} / {g.get('n_rows', '—')}</td><td>{'—' if _num(thin) is None else f'{thin:.3f}'}</td>"
+                    f"<td class=\"small muted\" style=\"text-align:left\">{esc(g.get('source', ''))}</td></tr>")
+    return ('<div style="overflow-x:auto"><style>table.gs td:nth-child(-n+4),table.gs th:nth-child(-n+4),table.gs td:last-child,table.gs th:last-child{text-align:left}'
+            'table.gs td:last-child{word-break:break-all;min-width:160px}</style><table class="metrics gs"><thead><tr><th>Набор</th><th>Уровень</th><th>Датасет условий</th><th>Единица</th>'
+            '<th>Единиц: реальные / сгенерированные</th><th>Из них тормозных</th><th>Строк (шипиков или групп)</th><th>Доля шипиков с положением</th><th>Источник</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>')
+
+
+def _generated_summary_html(gen: Dict[str, Any]) -> str:
+    """4a and 4b in one table: per set, tab and comparison."""
+    rows = []
+    for lv, L in gen["levels"].items():
+        for s in L["summary"]:
+            share = "—" if s["share"] is None else f"{100 * s['share']:.0f} %"
+            rho = "—" if s["rho"] is None else f"{s['rho']:.2f}"
+            rows.append(f"<tr data-mod=\"{MODULE_OF[lv]}\"><td>{esc(s['set'])}</td><td>{esc(LEVEL_RU.get(lv, lv))}</td>"
+                        f"<td>{esc(FACTOR_RU.get(s['f'], s['f']))}: {esc(VAL_RU.get(s['a'], s['a']))} / {esc(VAL_RU.get(s['b'], s['b']))}</td><td>{s['n']}</td><td>{s['nr']}</td><td>{s['rep']} ({share})</td>"
+                        f"<td>{s['opp']}</td><td>{s['spur']}</td><td>{rho}</td></tr>")
+    eq_rows = []
+    for lv, L in gen["levels"].items():
+        agg: Dict[Any, Dict[str, int]] = {}
+        for r in L["eq"]:
+            a = agg.setdefault((r["set"], r["sc"], r["sv"]), {"equivalent": 0, "differs": 0, "indistinguishable_equivalence_not_shown": 0, "not_tested": 0})
+            a[r["ver"]] = a.get(r["ver"], 0) + 1
+        for (name, sc, sv), a in agg.items():
+            label = STRATUM_RU.get(sc, sc) + ("" if sc == "all" else f": {VAL_RU.get(sv, sv)}")
+            eq_rows.append(f"<tr data-mod=\"{MODULE_OF[lv]}\"><td>{esc(name)}</td><td>{esc(LEVEL_RU.get(lv, lv))}</td><td>{esc(label)}</td>"
+                           f"<td>{a['equivalent']}</td><td>{a['indistinguishable_equivalence_not_shown']}</td><td>{a['differs']}</td><td>{a['not_tested']}</td></tr>")
+    out = ""
+    if rows:
+        out += ('<h3>Воспроизведение различий (4a)</h3><div style="overflow-x:auto"><style>table.g4 td:nth-child(-n+3),table.g4 th:nth-child(-n+3){text-align:left}</style>'
+                '<table class="metrics g4"><thead><tr><th>Набор</th><th>Вкладка</th><th>Сравнение</th><th>Метрик</th><th>Значимо у реальных</th>'
+                '<th>Воспроизведено с тем же знаком</th><th>Противоположный знак</th><th>Лишних эффектов</th><th>Ранговая корреляция эффектов</th></tr></thead>'
+                f'<tbody>{"".join(rows)}</tbody></table></div>')
+    if eq_rows:
+        out += ('<h3 style="margin-top:18px">Реальные против сгенерированных внутри типа (4b)</h3><div style="overflow-x:auto">'
+                '<table class="metrics g4"><thead><tr><th>Набор</th><th>Вкладка</th><th>Страта</th><th>эквивалентно</th><th>различие не найдено, эквивалентность не доказана</th>'
+                f'<th>различается</th><th>не проверялось</th></tr></thead><tbody>{"".join(eq_rows)}</tbody></table></div>')
+    return out or '<p class="muted small">Нет проведённых проверок.</p>'
+
+
+def _generated_section(gen: Optional[Dict[str, Any]]) -> str:
+    if not gen or not gen["levels"]:
+        return section("Сгенерированные дендриты", "Соответствие сгенерированных данных этим правилам.",
+                       note(["Таблиц сгенерированных наборов в этой папке нет. Их добавляет build_global_tables.py с ключами --generated-tp (наборы generate_tp.py, модули T и P) и "
+                             "--generated-spines (таблица сгенерированных шипиков отчёта условной генерации, модуль S). Тогда здесь появятся две проверки: воспроизводят ли "
+                             "сгенерированные данные различия между типами, найденные у реальных, и неотличимы ли они от реальных внутри одного типа (эквивалентность с порогом "
+                             "из шумового пола). Подробности генерации: в отчёте условной генерации."],
+                            title="Статус раздела", tone="pink"), anchor="sec-generated")
+    inner = (card("Сгенерированные наборы и их реальные эталоны", _generated_sets_html(gen["sets"]))
+             + '<div style="height:14px"></div>' + card("Сводка по наборам для выбранной вкладки", _generated_summary_html(gen))
+             + '<div style="height:14px"></div><div class="row" style="margin-bottom:8px"><div style="min-width:320px"><label class="field">Набор</label><select id="sel-gen-set"></select></div></div>'
+             + card("4a. Воспроизводятся ли различия между типами",
+                    '<div class="row" style="margin-bottom:8px"><div style="min-width:360px"><label class="field">Сравнение</label><select id="sel-gen-cmp"></select></div></div>'
+                    '<div id="gen-repro-summary"></div><div id="plot-gen-repro" class="plot m"></div><div id="gen-repro-table"></div>')
+             + '<div style="height:14px"></div>'
+             + card("4b. Отличимы ли сгенерированные от реальных внутри одного типа", '<div class="legend" id="gen-eq-legend"></div><div id="plot-gen-eq" class="plot l"></div>',
+                    hint="столбец: страта, строка: метрика")
+             + note(["Каждый сгенерированный набор сравнивается со своим **реальным эталоном**. Для стволов и расположения шипиков эталон: ветви-источники запросов generate_tp.py: "
+                     "сгенерированная ветвь копирует условия и длину реальной ветви, поэтому обе стороны имеют один и тот же состав условий, а единица вывода с обеих сторон: "
+                     "нейрон-источник. Метрики ветвей считаются одной функцией по записи ствола (медианный радиус, сужение, извилистость, изгиб, длина) и по положениям шипиков. "
+                     "положения сгенерированных шипиков прореживаются до доли шипиков с положением у ветви-источника, как у реальных. Для шипиков эталон: реальные шипики "
+                     "того же датасета. У сгенерированного шипика нет нейрона (условие задаёт тип, а не нейрон), поэтому сгенерированные шипики одного условия случайно "
+                     "разбиты на псевдоединицы фиксированного размера. Их разброс: разброс самого генератора, стиля нейрона в нём нет.",
+                     "**4a.** Те же сравнения, что в разделе «Что различается», считаются отдельно по реальному эталону и по сгенерированному набору теми же функциями "
+                     "(медианы единиц, перестановка меток между единицами, бутстреп по единицам). Точка графика: метрика: по горизонтали эффект у реальных, по вертикали у "
+                     "сгенерированных, диагональ: одинаковый эффект. «Воспроизведено»: эффект значим с обеих сторон, знак один и разность эффектов не значима. "
+                     "«тот же знак, размер другой»: разность значима. «не воспроизведено»: значим только у реальных. «лишний эффект»: значим только у сгенерированных. "
+                     "Разность эффектов получает интервал из независимых бутстрепов двух сторон, что для общих нейронов-источников консервативно.",
+                     "**4b.** Внутри страты (все единицы, один тип клетки, один компартмент) для каждой метрики d: относительная (для долей и корреляций абсолютная) разность "
+                     "медианы медиан сгенерированных единиц и медианы медиан реальных. Интервал и стандартная ошибка: бутстреп по единицам (парный по нейронам-источникам, "
+                     "если каждая сгенерированная единица есть среди реальных). Порог эквивалентности: **шумовой пол**: 95 % квантиль |d| между двумя случайными "
+                     "непересекающимися половинами реальных единиц. «Эквивалентно»: тест двух односторонних гипотез отвергает |d| ≥ порога (q < 0,05). «различается»: "
+                     "интервал d не содержит 0 (q < 0,05). Иначе: «различие не найдено, эквивалентность не доказана»: это утверждение о мощности, а не о сходстве. "
+                     "При наведении виден наименьший порог, при котором эквивалентность была бы доказана."],
+                    title="Как читать", collapsible=True))
+    return section("Сгенерированные дендриты", "Воспроизводят ли сгенерированные шипики и ветви различия между типами и неотличимы ли они от реальных внутри типа.",
+                   inner, anchor="sec-generated")
+
+
 def build_payload(folder: Path) -> Dict[str, Any]:
     folder = Path(folder)
     info = json.loads((folder / "run_info.json").read_text(encoding="utf-8")) if (folder / "run_info.json").exists() else {}
@@ -308,7 +454,7 @@ def build_payload(folder: Path) -> Dict[str, Any]:
             part = _split_branch(br, name)
             if part["metrics"]:
                 levels[name] = part
-    return {"info": info, "levels": levels, "inventory": _inventory_counts(folder), "dataset_ru": {**DATASET_RU, **{f"{a} vs {b}": f"{SHORT[a]} и {SHORT[b]}" for a in SHORT for b in SHORT if a != b}}, "factor_ru": FACTOR_RU,
+    return {"info": info, "levels": levels, "generated": _generated_payload(folder), "inventory": _inventory_counts(folder), "dataset_ru": {**DATASET_RU, **{f"{a} vs {b}": f"{SHORT[a]} и {SHORT[b]}" for a in SHORT for b in SHORT if a != b}}, "factor_ru": FACTOR_RU,
             "label_ru": LABEL_RU, "level_ru": LEVEL_RU, "verdict_ru": VERDICT_RU}
 
 
@@ -390,9 +536,7 @@ def build_report(folder: Path, out: Optional[Path] = None) -> Path:
                                 "На графике точки — метрики с относительным эффектом (в процентах), диагональ — одинаковый эффект. Метрики с абсолютным эффектом (доли, g(r), корреляции) есть только в таблице. Вид совпадает с датасетом: различие эффектов означает, что фактор действует по-разному в двух датасетах, а не доказывает влияние вида."],
                                title="Как читать", collapsible=True), anchor="sec-consistency"))
 
-    body.append(section("Сгенерированные дендриты", "Соответствие сгенерированных данных этим правилам.",
-                        note(["Этот раздел ещё не построен. План: те же сравнения (тип клетки, компартмент) считаются по сгенерированным шипикам и ветвям с условиями каждого типа; для каждой метрики сопоставляются эффект реальных данных и эффект сгенерированных, а внутри одного типа реальные и сгенерированные единицы проверяются на эквивалентность с порогом из шумового пола. Подробности генерации — в отчёте условной генерации."],
-                             title="Статус раздела", tone="pink"), anchor="sec-generated"))
+    body.append(_generated_section(payload["generated"]))
 
     body.append(section("Методы и ограничения", "Формулы тестов и список допущений, которые нужно помнить при чтении результатов.",
                         note(["**Статистика между единицами.** Для единицы u и метрики x берётся медиана m_u по её шипикам (или по её ветвям). Статистика сравнения групп A и B — T = |median(m_u, u ∈ A) − median(m_u, u ∈ B)|; нулевое распределение получается 10 000 случайными перестановками меток группы между единицами; p = (1 + число T* ≥ T) / (1 + 10 000).",

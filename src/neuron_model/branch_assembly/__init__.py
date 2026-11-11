@@ -18,9 +18,12 @@ from .trunk import DenseTrunk, densify, trunk_mesh
 def load_tp_set(directory: Path) -> Tuple[pd.DataFrame, List[Dict[str, Any]], Dict[int, pd.DataFrame]]:
     """A ``generate_tp.py`` output directory -> (branches table, trunk records, {branch_index: placements})."""
     directory = Path(directory)
-    packed = np.load(directory / "trunks.npz")
+    # every ``NpzFile[k]`` re-reads and decompresses the whole array: read each one ONCE (per-branch access was
+    # quadratic and ran out of memory on 3000 branches)
+    with np.load(directory / "trunks.npz") as npz:
+        packed = {k: npz[k] for k in npz.files}
     offsets = packed["offsets"]
-    fields = [k for k in packed.files if k != "offsets"]
+    fields = [k for k in packed if k != "offsets"]
     trunks = []
     for i in range(len(offsets) - 1):
         rec = {k: packed[k][offsets[i]:offsets[i + 1]] for k in fields}

@@ -88,3 +88,75 @@ def held_out_rarity(neurons: pd.DataFrame, *, reference_split: str = "train", by
                      "reference_subsets_ratio_p05": float(np.exp(np.quantile(sub, 0.05))), "reference_subsets_ratio_p95": float(np.exp(np.quantile(sub, 0.95))),
                      "share_as_extreme": float(np.mean(np.abs(sub - centre) >= abs(value - centre)))})
     return pd.DataFrame(rows)
+
+
+# ---- branch level: where does the count model put too many / too few spines? (2026-11-11) --------------------------
+def _branch_classes(cov: Sequence[Any]) -> pd.DataFrame:
+    """Covariate classes of each branch (the factors of ``branch_calibration``)."""
+    r = np.array([b.mean_radius_nm for b in cov], dtype=float)
+    length = np.array([b.length_nm for b in cov], dtype=float) / 1e3
+    soma = np.array([np.nan if b.soma_distance_nm is None else b.soma_distance_nm for b in cov], dtype=float) / 1e3
+    cut = lambda v, edges, labels: pd.Series(pd.cut(v, edges, labels=labels, right=False)).astype(object).where(~np.isnan(v), "unknown")
+    return pd.DataFrame({
+        "all": "all",
+        "radius": cut(r, [0, 200, 300, 400, np.inf], ["< 200 nm", "200-300 nm", "300-400 nm", ">= 400 nm"]),
+        "length": cut(length, [0, 20, 50, np.inf], ["< 20 um", "20-50 um", ">= 50 um"]),
+        "soma_distance": cut(soma, [0, 100, 200, 400, np.inf], ["< 100 um", "100-200 um", "200-400 um", ">= 400 um"]),
+        "terminal": ["terminal" if b.is_terminal else "internal" for b in cov],
+        "compartment": [str(b.compartment) for b in cov],
+        "cell_type_binary": [str(b.cell_type_binary) for b in cov],
+    })
+
+
+def spine_weighted_density(counts: np.ndarray, length_um: np.ndarray) -> float:
+    """Sum N_b^2 / L_b over sum N_b: the density seen by a random SPINE (per-spine statistics such as the nearest
+    neighbour weight branches by their number of spines, so a heavier upper tail of N lowers them even when the mean
+    density per branch is right)."""
+    n = np.asarray(counts, dtype=float)
+    total = n.sum()
+    return float((n ** 2 / np.asarray(length_um, dtype=float)).sum() / total) if total > 0 else float("nan")
+
+
+def branch_calibration(model: CountModel, design: Any, cov: Sequence[Any], *, split: str, n_sim: int = 200, seed: int = 0) -> pd.DataFrame:
+    """Observed against simulated counts per covariate class, two kinds of simulation.
+
+    ``fresh``: a new effect for every neuron (what generation does); ``posterior``: the effect of each neuron drawn from
+    its posterior given its own observed counts (removes "these neurons are richer / poorer than the population").
+    A class that is off under ``posterior`` points to the branch-level part of the model (covariate shape, dispersion);
+    off only under ``fresh`` - the neuron level. Statistics: density (sum N / sum L), share of empty branches and the
+    spine-weighted density (``spine_weighted_density``), simulated mean and 5 / 95 % quantiles over ``n_sim`` draws.
+    The posterior shrinks a neuron's effect towards the population by roughly 1 / (1 + sigma^2 * expected spines of the
+    neuron): negligible for excitatory neurons (hundreds of spines), noticeable for sparse (inhibitory) ones, where the
+    ``posterior`` column stays biased towards the population."""
+    if not cov:
+        return pd.DataFrame()
+    data = build_count_data(design, cov, model.exposure)
+    classes = _branch_classes(cov)
+    y = np.array([b.n_spines for b in cov], dtype=float)
+    length = np.array([b.length_nm for b in cov], dtype=float) / 1e3
+    rng = np.random.default_rng(seed)
+    posterior = model.neuron_log_posterior(data)
+    sims = {"fresh": [], "posterior": []}
+    for _ in range(n_sim):
+        sims["fresh"].append(model.sample(data, rng))
+        sims["posterior"].append(model.sample(data, rng, neuron_effects=model.posterior_neuron_effects(data, rng, posterior=posterior)))
+    sims = {k: np.vstack(v).astype(float) for k, v in sims.items()}
+    rows = []
+    for factor in classes.columns:
+        for level, idx in classes.groupby(factor, sort=True).groups.items():
+            idx = np.asarray(list(idx))
+            row = {"split": split, "factor": factor, "level": level, "n_branches": len(idx),
+                   "n_neurons": len({cov[i].neuron for i in idx}),
+                   "obs_density": y[idx].sum() / length[idx].sum(), "obs_empty": float((y[idx] == 0).mean()),
+                   "obs_sw_density": spine_weighted_density(y[idx], length[idx])}
+            for kind, s in sims.items():
+                dens = s[:, idx].sum(1) / length[idx].sum()
+                empty = (s[:, idx] == 0).mean(1)
+                sw = np.array([spine_weighted_density(r, length[idx]) for r in s[:, idx]])
+                for name, v in (("density", dens), ("empty", empty), ("sw_density", sw)):
+                    v = v[np.isfinite(v)]
+                    row[f"{kind}_{name}"] = float(v.mean()) if len(v) else float("nan")
+                    row[f"{kind}_{name}_p05"] = float(np.quantile(v, 0.05)) if len(v) else float("nan")
+                    row[f"{kind}_{name}_p95"] = float(np.quantile(v, 0.95)) if len(v) else float("nan")
+            rows.append(row)
+    return pd.DataFrame(rows)

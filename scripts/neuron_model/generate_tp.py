@@ -11,6 +11,10 @@ P0 count model; ``real`` takes N = ``n_spines_in_range`` of the source branch (t
 with); ``real_positioned`` takes N = ``n_with_position`` (the spines that have a position, the ones the real
 nearest-neighbour distances are computed on and the ones the P1 Monte Carlo check of fit_p1.py conditions on).
 With a real count the pool is restricted to ``train_eligible_P`` branches (elsewhere the count is not reliable).
+``model_neuron`` (2026-11-11) samples N from the count model with the effect of each source neuron drawn from its
+posterior given the observed counts of ALL its ``train_eligible_P`` branches of ``--split`` (``CountModel.
+posterior_neuron_effects``): the ladder model -> model_neuron -> real separates the neuron level (the held-out neurons
+are richer / poorer than the population) from the branch level (covariate shape, dispersion) of the count model.
 Output (one folder, a few files - no file per branch): ``runs/analysis/neuron-model/tp_generation/<id>/``
 ``trunks.npz`` (flat node arrays + offsets), ``branches.parquet`` (one row per branch: request, checks, N,
 attempts), ``placements.parquet`` (one row per spine: s, u, theta, anchor, normal), ``generation_info.json``. CPU.
@@ -40,7 +44,7 @@ import torch  # noqa: F401,E402
 import numpy as np
 import pandas as pd
 
-from src.neuron_model.branch_data import _cond, branch_key, prepare_training_data, select, trunk_record
+from src.neuron_model.branch_data import _cond, branch_key, count_covariates, prepare_training_data, select, trunk_record
 from src.neuron_model.placement_generation.fit import load_p0_bundle
 from src.neuron_model.placement_generation.generate import covariates_from_trunk, generate_placements, pack_records
 from src.neuron_model.placement_generation.models.count import build_count_data
@@ -62,6 +66,23 @@ def real_counts(rows: pd.DataFrame, counts: str) -> np.ndarray:
     return values.to_numpy(dtype=np.int64)
 
 
+def posterior_counts(model, design, cov, observed_cov, rng: np.random.Generator):
+    """``--counts model_neuron``: N of each request from the count model, the effect of its neuron drawn from the
+    posterior given the observed counts ``observed_cov`` of that neuron (fresh from the prior when the neuron has no
+    observed branch). Returns (counts, summary)."""
+    data = build_count_data(design, cov, model.exposure)
+    obs_data = build_count_data(design, observed_cov, model.exposure)
+    observed_names = pd.unique(np.array([b.neuron for b in observed_cov], dtype=object))  # = neuron index order of obs_data
+    effect_of = dict(zip(observed_names, model.posterior_neuron_effects(obs_data, rng))) if len(observed_cov) else {}
+    order = pd.unique(np.array([b.neuron for b in cov], dtype=object))  # = neuron index order of data
+    sig = model.neuron_sigmas(data)
+    effects = np.array([effect_of[n] if n in effect_of else rng.normal(0.0, sig[i]) for i, n in enumerate(order)])
+    n_fresh = int(sum(n not in effect_of for n in order))
+    summary = {"n_posterior": len(order) - n_fresh, "n_fresh": n_fresh,
+               "mean": float(np.mean(effects)) if len(effects) else float("nan"), "sd": float(np.std(effects)) if len(effects) else float("nan")}
+    return model.sample(data, rng, neuron_effects=effects), summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--t0-run", type=Path)
@@ -73,7 +94,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--mode", choices=["generated", "real_t"], default="generated")
     parser.add_argument("--split", default="val")
-    parser.add_argument("--counts", choices=list(REAL_COUNT_COLUMNS) + ["model"], default="model",
+    parser.add_argument("--counts", choices=list(REAL_COUNT_COLUMNS) + ["model", "model_neuron"], default="model",
                         help="N per branch: from the P0 count model, or the real count of the source branch (diagnostic, see above)")
     parser.add_argument("--out-root", type=Path, default=REPO_ROOT / "runs/analysis/neuron-model/tp_generation")
     args = parser.parse_args()
@@ -85,7 +106,7 @@ def main() -> None:
     table, _, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None, io_threads=int(d["io_threads"]))
     eligible = "train_eligible_T" if args.mode == "generated" else "train_eligible_P"
     pool = select(table, eligible=eligible, splits=[args.split], exclude_compartments=d.get("exclude_compartments"))
-    if args.counts != "model" and eligible != "train_eligible_P":
+    if args.counts in REAL_COUNT_COLUMNS and eligible != "train_eligible_P":
         pool = pool[pool["train_eligible_P"].fillna(False).astype(bool)]
     pool = pool[[branch_key(r) in pack for r in pool.to_dict("records")]].reset_index(drop=True)
     rng = np.random.default_rng(args.seed)
@@ -116,6 +137,15 @@ def main() -> None:
         cov = [covariates_from_trunk(t, q, n) for t, q, n in zip(trunks, requests, neurons)]
         data = build_count_data(bundle["design"], cov, bundle["count_model"].exposure)
         counts = bundle["count_model"].sample(data, rng)
+    elif args.counts == "model_neuron":
+        names = [q["source_branch"].split("/")[1] for q in requests]
+        cov = [covariates_from_trunk(t, q, n) for t, q, n in zip(trunks, requests, names)]
+        observed = select(table, eligible="train_eligible_P", splits=[args.split], exclude_compartments=d.get("exclude_compartments"))
+        observed = observed[observed["neuron_id"].astype(str).isin(set(names))]
+        counts, effects_info = posterior_counts(bundle["count_model"], bundle["design"], cov, count_covariates(observed, pack), rng)
+        info.update(neuron_effects=effects_info)
+        print(f"[generate-tp] neuron effects from the posterior: {effects_info['n_posterior']} neurons (fresh for {effects_info['n_fresh']}), "
+              f"mean {effects_info['mean']:+.3f}, sd {effects_info['sd']:.3f}", flush=True)
     else:
         counts = real_counts(picked.iloc[keep], args.counts)
     placements = generate_placements(trunks, counts, bundle["position_model"], d_min_nm=bundle["d_min_nm"],

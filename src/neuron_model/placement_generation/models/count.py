@@ -267,6 +267,47 @@ class CountModel:
         out[positive] = np.maximum(draw[positive], 1)
         return out
 
+    # ---- neuron effect given the observed counts of the neuron (diagnostic) -------------------------------------------
+    def neuron_log_posterior(self, data: CountData, n_grid: int = 161, width: float = 6.0):
+        """Posterior of each neuron's effect given its observed counts ``data.y`` on a grid.
+
+        Returns ``(effects [n_neurons, G], log_post [n_neurons, G])``, effects b = sigma_n * x on the grid x in
+        [-width, width]; log_post is normalised over the grid (prior N(0, sigma_n^2) times the likelihood of the
+        neuron's branches). Without a random effect every neuron gets a point mass at 0."""
+        x = np.linspace(-width, width, n_grid)
+        sig = self.neuron_sigmas(data)
+        effects = sig[:, None] * x[None, :]
+        if not self.random_effect or data.n_neurons == 0:
+            log_post = np.full((data.n_neurons, n_grid), -np.inf)
+            log_post[:, n_grid // 2] = 0.0
+            return effects, log_post
+        f = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.float64)
+        eta = f(data.X @ self.beta + data.log_exposure)
+        k = torch.exp(f(self.kappa[0] + self.kappa[1] * data.z_log_length)).clamp(1e-3, 1e6)
+        logit = f(data.Z @ self.gamma) if self.family in ("zinb", "hurdle") else None
+        b = f(effects)[torch.as_tensor(data.neuron, dtype=torch.long)]  # [B, G]
+        mu = torch.exp(eta[:, None] + b).clamp(1e-10, 1e8)
+        lp = _log_pmf(self.family, f(data.y)[:, None], mu, k[:, None], None if logit is None else logit[:, None])
+        per_neuron = torch.zeros(data.n_neurons, n_grid, dtype=lp.dtype).index_add(0, torch.as_tensor(data.neuron, dtype=torch.long), lp).numpy()
+        log_post = per_neuron - 0.5 * x[None, :] ** 2
+        log_post -= np.logaddexp.reduce(log_post, axis=1, keepdims=True)
+        return effects, log_post
+
+    def posterior_neuron_effects(self, data: CountData, rng: Optional[np.random.Generator] = None, n_grid: int = 161,
+                                 posterior=None) -> np.ndarray:
+        """[n_neurons] effect of each neuron of ``data`` given its counts: a posterior draw (``rng``) or the posterior mean.
+        ``posterior`` = a precomputed ``neuron_log_posterior(data)`` (repeated draws)."""
+        effects, log_post = posterior if posterior is not None else self.neuron_log_posterior(data, n_grid=n_grid)
+        post = np.exp(log_post)
+        if rng is None:
+            return (post * effects).sum(axis=1)
+        out = np.empty(data.n_neurons)
+        step = effects[:, 1] - effects[:, 0] if effects.shape[1] > 1 else np.zeros(data.n_neurons)
+        for n in range(data.n_neurons):
+            j = rng.choice(effects.shape[1], p=post[n] / post[n].sum())
+            out[n] = effects[n, j] + (rng.random() - 0.5) * step[n]  # uniform inside the grid cell
+        return out
+
     def randomized_quantile_residuals(self, data: CountData, rng: np.random.Generator) -> np.ndarray:
         """Dunn-Smyth residuals under the fitted marginal (no neuron effect for the mean); ~N(0,1) when calibrated."""
         from scipy import stats

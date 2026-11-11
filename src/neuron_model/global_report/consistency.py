@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from ..spine_generation.evaluation.morphology_by_condition import bh_qvalues, neuron_medians
-from .factors import FACTORS, resolve_min_rows, valid_comparisons
+from .factors import FACTORS, Factor, resolve_min_rows, valid_comparisons
 from .significance import _with_level, unit_medians
 
 DEFAULT_FACTORS = ("cell_type_binary", "cell_class", "compartment")
@@ -86,26 +86,29 @@ def _spearman(x: np.ndarray, y: np.ndarray) -> float:
     return float(spearmanr(x[ok], y[ok]).correlation)
 
 
-def _verdict(present_m: bool, present_h: bool, em: float, eh: float, diff_sig: bool) -> str:
+def _verdict(present_m: bool, present_h: bool, em: float, eh: float, diff_sig: bool, names=PAIR) -> str:
     if present_m and present_h:
         if np.sign(em) != np.sign(eh):
             return "opposite"
         return "same_sign_different_size" if diff_sig else "consistent"
     if present_m:
-        return "minnie65_only"
+        return f"{names[0]}_only"
     if present_h:
-        return "h01_only"
+        return f"{names[1]}_only"
     return "neither"
 
 
 def consistency(frame: pd.DataFrame, metrics: Sequence[str], *, level: str = "spine", factors: Sequence[str] = DEFAULT_FACTORS,
                 datasets: Sequence[str] = PAIR, results: Optional[pd.DataFrame] = None, min_neurons: int = 10, min_spines=20,
-                min_paired: int = 5, abs_metrics: Sequence[str] = (), n_boot: int = 2000, alpha: float = 0.05, seed: int = 0) -> Dict[str, pd.DataFrame]:
-    """``pairs``: one row per (factor, a, b, metric); ``summary``: one row per (factor, a, b) over the metrics."""
+                min_paired: int = 5, abs_metrics: Sequence[str] = (), n_boot: int = 2000, alpha: float = 0.05, seed: int = 0,
+                factor_defs: Sequence[Factor] = FACTORS) -> Dict[str, pd.DataFrame]:
+    """``pairs``: one row per (factor, a, b, metric); ``summary``: one row per (factor, a, b) over the metrics.
+    ``datasets`` may be any two values of the ``dataset`` column (section 4: ``("real", "generated")``) when ``factor_defs``
+    declares the factors for them (``generated.generated_factors``)."""
     dm, dh = datasets
     frame = frame[frame["dataset"].isin(datasets)]
     metrics = [m for m in metrics if m in frame.columns and frame[m].notna().any()]
-    chosen = [f for f in FACTORS if f.name in factors and not f.cross and f.stratify is None]
+    chosen = [f for f in factor_defs if f.name in factors and not f.cross and f.stratify is None]
     comps = [c for c in valid_comparisons(frame, factors=chosen, min_neurons=min_neurons, min_spines=min_spines, min_paired=min_paired)
              if c["valid"] and c["stratum"] is None]
     by_key: Dict[Any, Dict[str, Dict[str, Any]]] = {}
@@ -157,7 +160,7 @@ def consistency(frame: pd.DataFrame, metrics: Sequence[str], *, level: str = "sp
         for r, qq in zip(part, q):
             r["q_difference"] = float(qq)
             r["difference_significant"] = bool(qq < alpha)
-            r["verdict"] = _verdict(r[f"present_{dm}"], r[f"present_{dh}"], r[f"effect_{dm}"], r[f"effect_{dh}"], r["difference_significant"])
+            r["verdict"] = _verdict(r[f"present_{dm}"], r[f"present_{dh}"], r[f"effect_{dm}"], r[f"effect_{dh}"], r["difference_significant"], (dm, dh))
         rows += part
         # over metrics: rank correlation of the two effect vectors (scale-free, mixes relative and absolute effects) + interval
         rho = _spearman(eff[dm], eff[dh])

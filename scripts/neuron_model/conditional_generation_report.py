@@ -15,6 +15,8 @@ the metadata tables (as morphology_by_condition.py); the neuron is the unit of i
 
 CPU, minutes (permutation tests, bootstraps, reference distributions). Writes ``runs/analysis/neuron-model/<time>_conditional-report/``
 {results.json, generated_metrics.parquet, run_info.json, *.csv, <date>_conditional-generation-report.html}.
+``generated_metrics.parquet`` (one row per generated spine: metrics, value, label, block, condition_<block>) is read by the
+global report, section 4 (build_global_tables.py --generated-spines <this folder>).
 """
 
 from __future__ import annotations
@@ -114,7 +116,11 @@ def main() -> None:
 
     out = args.out or REPO_ROOT / "runs/analysis/neuron-model" / f"{time.strftime('%Y-%m-%d_%H%M%S')}_conditional-report"
     out.mkdir(parents=True, exist_ok=True)
-    pd.concat([f.assign(value=v, label=lab) for (v, lab), f in gen_sets.items()], ignore_index=True).to_parquet(out / "generated_metrics.parquet", index=False)
+    # contract with the global report (section 4, global_report/generated.py): one row per generated spine, the 11 metrics,
+    # value / label, the condition block and condition_<block> (None for an unconditional set); no neuron_id: a conditional
+    # sample has no source neuron
+    pd.concat([f.assign(value=v, label=lab, block=args.block, **{f"condition_{args.block}": (None if v == "unconditional" else v)})
+               for (v, lab), f in gen_sets.items()], ignore_index=True).to_parquet(out / "generated_metrics.parquet", index=False)
     safe = lambda text: re.sub(r"[^0-9A-Za-z._@+-]+", "_", str(text))  # noqa: E731  (file names on Windows)
     for name, table in results.get("real_effects", {}).items():
         table.to_csv(out / f"real_effect_{safe(name)}.csv", index=False)
