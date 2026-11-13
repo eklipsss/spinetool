@@ -216,3 +216,35 @@ def test_component_report_names_the_detached_piece_and_nearest_spine():
     rep = component_report(mesh, rows)
     assert len(rep) == 1 and rep[0]["nearest_spine_index"] == 1 and rep[0]["nearest_spine_key"] == "b"
     assert rep[0]["nearest_spine_distance_nm"] < 100.0 and rep[0]["n_faces"] < len(main.faces) and rep[0]["watertight"]
+
+
+def test_assemble_script_takes_the_pool_of_the_branch_cell_type(tmp_path):
+    """assemble_branches.py --spines-by-type: excitatory branches from one pool, inhibitory from another, the rest default."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import pandas as pd
+
+    repo = Path(__file__).resolve().parents[2]
+    tp = tmp_path / "tp"
+    tp.mkdir()
+    trunks = [_trunk(), _trunk(), _trunk()]
+    np.savez_compressed(tp / "trunks.npz", **pack_records(trunks))
+    pd.DataFrame({"branch_index": [0, 1, 2], "length_nm": 6000.0, "cell_type_binary": ["excitatory", "inhibitory", None]}).to_parquet(tp / "branches.parquet")
+    pd.DataFrame({"branch_index": [0, 0, 1, 2], "spine_index": [0, 1, 0, 0], "s": [1500.0, 4000.0, 3000.0, 3000.0], "theta": [0.0, 2.0, 1.0, -1.0]}).to_parquet(tp / "placements.parquet")
+    for name, spine in (("default", _spine()), ("exc", _spine(neck_r=70, neck_len=700)), ("inh", _spine(neck_r=90, neck_len=400, head_r=180))):
+        (tmp_path / name).mkdir()
+        spine.export(tmp_path / name / f"{name}_spine.off")
+    out = tmp_path / "asm"
+    r = subprocess.run([sys.executable, str(repo / "scripts/neuron_model/assemble_branches.py"), "--tp-dir", str(tp), "--spines", str(tmp_path / "default"),
+                        "--spines-by-type", f"excitatory={tmp_path / 'exc'}", f"inhibitory={tmp_path / 'inh'}", "--n-branches", "0", "--out", str(out)],
+                       capture_output=True, text=True, cwd=repo)
+    assert r.returncode == 0, r.stderr[-2000:]
+    bt = pd.read_parquet(out / "assembly_branches.parquet").set_index("branch_index")
+    assert bt["spine_pool"].to_dict() == {0: "excitatory", 1: "inhibitory", 2: "default"}
+    st = pd.read_parquet(out / "assembly_spines.parquet")
+    placed = st[st["status"] == "placed"]
+    used = placed.groupby("branch_index")["spine_key"].agg(set).to_dict()
+    assert used == {0: {"exc_spine.off"}, 1: {"inh_spine.off"}, 2: {"default_spine.off"}}
+    assert (bt["status"] == "ok").all()

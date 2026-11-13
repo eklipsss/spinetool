@@ -8,8 +8,10 @@ Windows (local disk only, CPU, ~seconds per branch):
         --n-branches 20 --seed 1
 
 ``--spines``: a directory with spine meshes in the local spine frame: ``**/generated_mesh_postprocessed.off`` (the
-layout of generate_vae.py / generate_mogen.py) or any *.off / *.ply. Spines are drawn from the pool at random (no
-conditioning yet). Options of the algorithm: ``configs/neuron-model/assembly/default.yaml`` (+ ``key=value`` overrides).
+layout of generate_vae.py / generate_mogen.py) or any *.off / *.ply. Spines are drawn from the pool at random, or by the
+trunk radius at the placement (``--context-spines``). ``--spines-by-type excitatory=<dir> inhibitory=<dir>`` (2026-11-14):
+each branch takes its spines from the pool of its cell type (e.g. a generator conditioned on the type), branches of
+other / unknown types from ``--spines``. Options of the algorithm: ``configs/neuron-model/assembly/default.yaml`` (+ ``key=value`` overrides).
 
 Writes ``<tp-dir>/assembly_<date>/``: ``meshes/branch_<i>.ply`` (one closed surface per branch), ``assembly_branches.parquet``
 (checks per branch), ``assembly_spines.parquet`` (per placement: spine used, immersion depth, attempts, reasons),
@@ -45,7 +47,11 @@ from src.neuron_model.spine_generation.experiment.config import load_config
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tp-dir", type=Path, required=True, help="output directory of generate_tp.py")
-    parser.add_argument("--spines", type=Path, required=True, help="directory with spine meshes (local spine frame)")
+    parser.add_argument("--spines", type=Path, required=True, help="directory with spine meshes (local spine frame); the pool of branches "
+                        "whose cell type has no --spines-by-type pool")
+    parser.add_argument("--spines-by-type", nargs="*", default=[], metavar="TYPE=DIR",
+                        help="own pool per cell_type_binary of the branch, e.g. excitatory=<dir> inhibitory=<dir> (meshes of a generator "
+                             "conditioned on that type); the type comes from branches.parquet of the set")
     parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/neuron-model/assembly/default.yaml")
     parser.add_argument("--n-branches", type=int, default=20, help="first N branches of the set (0 = all)")
     parser.add_argument("--max-pool", type=int, default=0, help="use at most this many spine meshes (0 = all)")
@@ -62,25 +68,38 @@ def main() -> None:
         cfg.seed = args.seed
     from tqdm.auto import tqdm
 
-    files = find_mesh_files(args.spines, limit=args.max_pool or None)
-    if not files:
-        raise SystemExit(f"no spine meshes under {args.spines}")
-    t0 = time.perf_counter()
-    pool = SpinePool.from_paths(files, base_band_nm=cfg.base_band_nm, keys=[str(p.relative_to(args.spines)) for p in files])
-    print(f"[assembly] spine pool: {len(pool)} of {len(files)} meshes usable ({time.perf_counter() - t0:.1f}s); rejected: "
-          f"{pd.Series([r['reason'] for r in pool.rejected]).value_counts().to_dict() if pool.rejected else {}}", flush=True)
-    if not len(pool):
-        raise SystemExit("no usable spine mesh")
-
     selector = None
     if args.context_spines is not None:
         selector = ContextSelector.fit(pd.read_parquet(args.context_spines))
-        n_base = int(np.isfinite([sp.base_radius_nm for sp in pool.spines]).sum())
         print(f"[assembly] context selection: log base radius = {selector.a:.3f} + {selector.c:.3f} log(r / 300 nm) +- {selector.s:.3f} "
-              f"(real spines {selector.info['n']}, corr {selector.info['corr_log_r_log_b']:.2f}); pool spines with a base area {n_base} of {len(pool)}", flush=True)
-    chooser = SpineChooser(pool, selector)
+              f"(real spines {selector.info['n']}, corr {selector.info['corr_log_r_log_b']:.2f})", flush=True)
+
+    def build_pool(directory: Path, name: str):
+        files = find_mesh_files(directory, limit=args.max_pool or None)
+        if not files:
+            raise SystemExit(f"no spine meshes under {directory}")
+        t0 = time.perf_counter()
+        pool = SpinePool.from_paths(files, base_band_nm=cfg.base_band_nm, keys=[str(p.relative_to(directory)) for p in files])
+        print(f"[assembly] spine pool {name}: {len(pool)} of {len(files)} meshes usable ({time.perf_counter() - t0:.1f}s); rejected: "
+              f"{pd.Series([r['reason'] for r in pool.rejected]).value_counts().to_dict() if pool.rejected else {}}", flush=True)
+        if not len(pool):
+            raise SystemExit(f"no usable spine mesh under {directory}")
+        if selector is not None:
+            print(f"[assembly] pool {name}: spines with a base area {int(np.isfinite([sp.base_radius_nm for sp in pool.spines]).sum())} of {len(pool)}", flush=True)
+        return pool, SpineChooser(pool, selector)
+
+    pools = {"default": build_pool(args.spines, "default")}
+    pool_dirs = {"default": str(args.spines)}
+    for item in args.spines_by_type:
+        typ, _, directory = item.partition("=")
+        if not directory:
+            parser.error(f"--spines-by-type {item!r}: TYPE=DIR")
+        pools[typ] = build_pool(Path(directory), typ)
+        pool_dirs[typ] = directory
 
     branches, trunks, placements = load_tp_set(args.tp_dir)
+    type_of = (branches.set_index("branch_index")["cell_type_binary"].astype(object).to_dict()
+               if len(branches) and "cell_type_binary" in branches.columns else {})
     n = len(trunks) if args.n_branches <= 0 else min(args.n_branches, len(trunks))
     out = args.out or args.tp_dir / f"assembly_{_dt.datetime.now():%Y-%m-%d_%H%M%S}"
     (out / "meshes").mkdir(parents=True, exist_ok=True)
@@ -93,18 +112,20 @@ def main() -> None:
         s = p["s"].to_numpy(float) if p is not None else np.zeros(0)
         th = p["theta"].to_numpy(float) if p is not None else np.zeros(0)
         started = time.perf_counter()
+        pool_name = type_of.get(i) if type_of.get(i) in pools else "default"
+        pool, chooser = pools[pool_name]
         try:
             res = assemble_branch(trunks[i], s, th, pool, cfg, rng, chooser=chooser)
         except Exception as exc:  # one broken branch must not stop the set
-            brows.append({"branch_index": i, "status": "failed", "reason": repr(exc)[:300]})
+            brows.append({"branch_index": i, "status": "failed", "reason": repr(exc)[:300], "spine_pool": pool_name})
             continue
-        row = {"branch_index": i, **res.branch, "seconds": round(time.perf_counter() - started, 2)}
+        row = {"branch_index": i, **res.branch, "spine_pool": pool_name, "seconds": round(time.perf_counter() - started, 2)}
         if res.vertices is not None:
             path = out / "meshes" / f"branch_{i:05d}.ply"
             trimesh.Trimesh(res.vertices, res.faces, process=False).export(path)
             row["mesh_path"] = str(path.relative_to(out))
         brows.append(row)
-        srows.extend({"branch_index": i, **r} for r in res.spines)
+        srows.extend({"branch_index": i, "spine_pool": pool_name, **r} for r in res.spines)
 
     bt = pd.DataFrame(brows)
     if len(branches):
@@ -112,8 +133,11 @@ def main() -> None:
     bt.to_parquet(out / "assembly_branches.parquet", index=False)
     st = pd.DataFrame(srows)
     st.to_parquet(out / "assembly_spines.parquet", index=False)
-    pd.DataFrame(pool.rejected or [], columns=["key", "reason"]).to_parquet(out / "spine_pool_rejected.parquet", index=False)
-    info = {"tp_dir": str(args.tp_dir), "spines": str(args.spines), "n_branches": n, "pool_size": len(pool), "pool_rejected": len(pool.rejected),
+    pd.DataFrame([{"pool": name, **r} for name, (p, _) in pools.items() for r in (p.rejected or [])], columns=["pool", "key", "reason"]).to_parquet(
+        out / "spine_pool_rejected.parquet", index=False)
+    info = {"tp_dir": str(args.tp_dir), "spines": str(args.spines), "spine_pools": pool_dirs, "n_branches": n,
+            "pool_size": {name: len(p) for name, (p, _) in pools.items()}, "pool_rejected": {name: len(p.rejected) for name, (p, _) in pools.items()},
+            "branches_per_pool": bt["spine_pool"].value_counts().to_dict() if "spine_pool" in bt.columns else {},
             "config": cfg.__dict__, "status_counts": bt["status"].value_counts().to_dict(),
             "spine_selection": selector.to_dict() if selector is not None else "uniform",
             "context_spines": str(args.context_spines) if args.context_spines else None}
