@@ -1,7 +1,9 @@
 """Fitting and validation of P0 (p-module-technical-spec.md, sections 4-6, 8).
 
 ``fit_p0`` fits every count variant of the grid (family x exposure x neuron effect) on the train branches, scores
-them by the held-out negative log-likelihood and calibration on the validation branches, fits the positional
+them by the held-out negative log-likelihood and calibration on the validation branches; then (``subtype_prior_sds``)
+refits the chosen variant with the detailed cell type columns for every prior sd tau and keeps the subtypes only when
+the validation NLL improves (two stages: the full grid x tau would be ~4x longer); fits the positional
 density (full covariate set + one ablation per covariate) and estimates d_min from the observed spines.
 Returns a JSON-serialisable report and the chosen models. Units: nm.
 """
@@ -89,6 +91,8 @@ def fit_p0(
     exposures: Sequence[str] = ("length", "area"),
     random_effects: Sequence[bool] = (False, True),
     sigma_by_cell_type: Sequence[bool] = (False,),
+    subtype_prior_sds: Sequence[float] = (),
+    subtype_min_neurons: int = 3,
     position_use: Sequence[str] = ("radius", "kappa", "soma", "end"),
     n_basis: int = 5,
     smooth_penalty: float = 1.0,
@@ -120,6 +124,33 @@ def fit_p0(
         if best is None or nll < best[0]:
             best = (nll, model, row)
     _, count_model, chosen = best
+    chosen = dict(chosen, subtype_prior_sd=None)
+    subtype_rows = []
+    if subtype_prior_sds:
+        sub_design = CountDesign(n_basis, subtypes=True, subtype_min_neurons=subtype_min_neurons).fit(train_cov)
+        log(f"[p0-subtype] detailed types with >= {subtype_min_neurons} training neurons: {sub_design.subtypes}")
+        if sub_design.n_subtype:
+            fam, exp_, re = chosen["family"], chosen["exposure"], chosen["random_effect"]
+            sg = 2 if chosen.get("sigma_by_cell_type") else 1
+            dtr, dva_s = build_count_data(sub_design, train_cov, exp_), build_count_data(sub_design, val_cov, exp_)
+            base_nll = best[0]
+            for tau in subtype_prior_sds:
+                m = CountModel(fam, exp_, re, n_basis=n_basis, smooth_penalty=smooth_penalty, sigma_groups=sg, subtype_prior_sd=float(tau)).fit(dtr, max_iter=max_iter)
+                nll = m.neg_loglik(dva_s) / max(len(val_cov), 1)
+                coef = dict(zip(sub_design.subtypes, m.fit_info["subtype_coefficients"]))
+                row = {"subtype_prior_sd": float(tau), "val_nll_per_branch": float(nll), "val_nll_gain": float(base_nll - nll),
+                       "train_nll_per_branch": float(m.fit_info["nll"] / max(len(train_cov), 1)), "sigma_b_by_group": m.fit_info.get("sigma_b_by_group"),
+                       "subtype_coefficients": coef}
+                subtype_rows.append(row)
+                log(f"[p0-subtype] tau {tau:<5g} val NLL/branch {nll:.4f} (without subtypes {base_nll:.4f}); "
+                    f"sigma_b {'/'.join(f'{v:.2f}' for v in m.fit_info['sigma_b_by_group'].values())}; "
+                    + ", ".join(f"{k} {v:+.2f}" for k, v in coef.items()))
+                if nll < best[0]:
+                    best = (nll, m, row)
+                    count_model, design = m, sub_design
+                    chosen = {**chosen, "val_nll_per_branch": float(nll), "subtype_prior_sd": float(tau), "subtypes": list(sub_design.subtypes),
+                              "sigma_b_by_group": m.fit_info.get("sigma_b_by_group")}
+            log(f"[p0-subtype] chosen: {'tau ' + str(chosen['subtype_prior_sd']) if chosen['subtype_prior_sd'] is not None else 'no subtypes'}")
     dva = build_count_data(design, val_cov, count_model.exposure)
     calibration = zero_fraction_by_length(count_model, dva, lengths_val, rng)
 
@@ -140,7 +171,7 @@ def fit_p0(
     report = {
         "n_train_branches": len(train_cov), "n_val_branches": len(val_cov),
         "n_train_positions": int(sum(len(b.positions) for b in train_pos if b.positions is not None)), "n_val_positions": int(n_val_pos),
-        "count_variants": variants, "count_chosen": chosen, "count_calibration_val": calibration,
+        "count_variants": variants, "count_chosen": chosen, "subtype_variants": subtype_rows, "count_calibration_val": calibration,
         "dispersion_index_train": dispersion_index(np.array([b.n_spines for b in train_cov], dtype=float), np.array([b.length_nm for b in train_cov])),
         "position_variants": pos_rows, "position_coefficients": dict(zip(full.names, map(float, full.beta))),
     }

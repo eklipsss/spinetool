@@ -98,7 +98,7 @@ def covariates_from_trunk(trunk: Dict[str, Any], request: Dict[str, Any], neuron
     chord = float(np.linalg.norm(gamma[-1] - gamma[0]))
     return BranchCovariates(neuron, -1, length, float(np.trapezoid(2 * np.pi * r, s)), float(np.trapezoid(r, s) / max(length, 1e-9)),
                             None if d0 is None else float(d0) + 0.5 * length, length / max(chord, 1e-9), bool(request.get("is_terminal", False)),
-                            request.get("species"), request.get("cell_type_binary"), request.get("compartment"))
+                            request.get("species"), request.get("cell_type_binary"), request.get("compartment"), request.get("cell_type"))
 
 
 def pack_records(trunks: Sequence[Dict[str, Any]], fields: Sequence[str] = ("s", "gamma", "radius", "normal", "binormal", "tangent")) -> Dict[str, np.ndarray]:

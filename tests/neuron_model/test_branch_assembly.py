@@ -218,6 +218,23 @@ def test_component_report_names_the_detached_piece_and_nearest_spine():
     assert rep[0]["nearest_spine_distance_nm"] < 100.0 and rep[0]["n_faces"] < len(main.faces) and rep[0]["watertight"]
 
 
+def test_drop_slivers_removes_debris_and_keeps_a_detached_spine():
+    """A tiny detached tetrahedron (debris) is removed, a detached spine-sized piece is kept, the main body untouched."""
+    import manifold3d as m3d
+    from src.neuron_model.branch_assembly.assemble import drop_slivers
+
+    main = m3d.Manifold.cylinder(6000.0, 300.0, 300.0, 48)
+    debris = m3d.Manifold.tetrahedron().scale([20.0, 20.0, 20.0]).translate([0.0, 330.0, 3000.0])
+    spine = m3d.Manifold.sphere(250.0, 32).translate([0.0, 1500.0, 1000.0])
+    out, info = drop_slivers(main + debris, 10000.0)
+    assert len(out.decompose()) == 1 and info["n_slivers_removed"] == 1 and 0 < info["sliver_area_removed_nm2"] < 10000.0
+    assert out.volume() == pytest.approx(main.volume())
+    out, info = drop_slivers(main + debris + spine, 10000.0)
+    assert len(out.decompose()) == 2 and info["n_slivers_removed"] == 1  # the detached spine stays -> still several components
+    out, info = drop_slivers(main + debris, 0.0)
+    assert len(out.decompose()) == 2 and info["n_slivers_removed"] == 0
+
+
 def test_assemble_script_takes_the_pool_of_the_branch_cell_type(tmp_path):
     """assemble_branches.py --spines-by-type: excitatory branches from one pool, inhibitory from another, the rest default."""
     import subprocess

@@ -59,10 +59,20 @@ DESCRIPTOR_COLUMNS = ["status", "split", "cell_type", "cell_type_binary", "compa
 
 
 def parse_variant(text: str) -> dict:
-    family, exposure, re, sg = text.split(":")
+    """``family:exposure:re|nore:sg1|sg2[:t<tau>]`` - the optional last part adds the detailed cell type columns with prior sd tau."""
+    parts = text.split(":")
+    if len(parts) not in (4, 5):
+        raise ValueError(f"variant {text!r}: family:exposure:re|nore:sg1|sg2[:t<tau>]")
+    family, exposure, re, sg = parts[:4]
+    tau = None
+    if len(parts) == 5:
+        if not parts[4].startswith("t"):
+            raise ValueError(f"variant {text!r}: the 5th part is t<tau>, e.g. t0.25")
+        tau = float(parts[4][1:])
     if re not in ("re", "nore") or sg not in ("sg1", "sg2"):
-        raise ValueError(f"variant {text!r}: family:exposure:re|nore:sg1|sg2")
-    return {"family": family, "exposure": exposure, "random_effect": re == "re", "sigma_groups": 2 if (sg == "sg2" and re == "re") else 1, "name": text}
+        raise ValueError(f"variant {text!r}: family:exposure:re|nore:sg1|sg2[:t<tau>]")
+    return {"family": family, "exposure": exposure, "random_effect": re == "re", "sigma_groups": 2 if (sg == "sg2" and re == "re") else 1,
+            "subtype_prior_sd": tau, "name": text}
 
 
 def run_p0(args, cfg, table, pack, folds_by_rep, cell_type, out, log):
@@ -78,11 +88,14 @@ def run_p0(args, cfg, table, pack, folds_by_rep, cell_type, out, log):
         for f in range(args.k):
             tr = [b for b, x in zip(cov_all, fold_of) if x != f]
             te = [b for b, x in zip(cov_all, fold_of) if x == f]
-            design = CountDesign(int(m["n_basis"])).fit(tr)
+            base_design = CountDesign(int(m["n_basis"])).fit(tr)
+            sub_design = (CountDesign(int(m["n_basis"]), subtypes=True, subtype_min_neurons=int(m.get("subtype_min_neurons", 3))).fit(tr)
+                          if any(v["subtype_prior_sd"] is not None for v in variants) else None)
             for vi, v in enumerate(variants):
                 started = time.perf_counter()
+                design = base_design if v["subtype_prior_sd"] is None else sub_design
                 model = CountModel(v["family"], v["exposure"], v["random_effect"], n_basis=int(m["n_basis"]), smooth_penalty=float(m["smooth_penalty"]),
-                                   sigma_groups=v["sigma_groups"]).fit(build_count_data(design, tr, v["exposure"]), max_iter=int(m["max_iter"]))
+                                   sigma_groups=v["sigma_groups"], subtype_prior_sd=v["subtype_prior_sd"]).fit(build_count_data(design, tr, v["exposure"]), max_iter=int(m["max_iter"]))
                 nll = model.neg_loglik(build_count_data(design, te, v["exposure"])) / max(len(te), 1)
                 sig = model.fit_info.get("sigma_b_by_group", {}) if v["random_effect"] else {}
                 fold_rows.append({"repeat": rep, "fold": f, "variant": v["name"], "n_train_branches": len(tr), "n_heldout_branches": len(te),
@@ -151,6 +164,7 @@ def run_t0(args, table, pack, folds, out, log):
         res = fit_t0(train, val, [_cond(r) for r in recs], [str(r["neuron_id"]) for r in recs], encoder=encoder, mean_models=[args.t0_mean],
                      shrinkage_std=float(m["shrinkage_std"]), max_iter=int(m["max_iter"]), length_bounds=tuple(m["length_bounds_nm"]), seed=int(cfg["seed"]),
                      direction=str(m.get("direction", "multiscale")), radius_residual=str(m.get("radius_residual", "multiscale")), train_conditions=None,
+                     direction_options=dict(m.get("direction_options") or {}),
                      log=lambda *a, **k: None)
         rep = res["report"]
         var = rep["variants"][args.t0_mean]

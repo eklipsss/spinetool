@@ -480,3 +480,53 @@ def test_t0_radius_follows_the_soma_distance_when_it_is_in_the_design():
         return float(np.median([np.exp(r["log_radius"]).mean() for r in model.sample(req, np.random.default_rng(1))]))
     near, far = median_radius(10000.0), median_radius(300000.0)
     assert far < 0.85 * near
+
+
+def test_within_neuron_amplitude_finds_the_compartment_offset_hidden_by_neuron_effects():
+    """Neurons with many apical branches bend more as a whole (neuron effect), apical branches bend less than basal ones of
+    the SAME neuron: the pooled residual offsets cancel, the within-neuron estimate recovers the difference and the slope."""
+    from src.neuron_model.trunk_generation.models.direction_ms import _pooled_amplitude, _within_neuron_amplitude
+
+    rng = np.random.default_rng(5)
+    y, x, n, groups, neurons = [], [], [], [], []
+    for k in range(120):
+        share_apical = 0.8 if k % 2 else 0.2
+        eff = 0.6 * (share_apical - 0.5) + rng.normal(0, 0.05)  # apical-rich neurons bend more overall
+        for _ in range(20):
+            apical = rng.random() < share_apical
+            xb = rng.normal(0, 0.3)
+            y.append(eff - 0.5 * xb + (-0.2 if apical else 0.0) + rng.normal(0, 0.05))
+            x.append(xb), n.append(50.0), groups.append("m|e|apical" if apical else "m|e|basal"), neurons.append(f"n{k}")
+    y, x, n, groups, neurons = map(np.asarray, (y, x, n, groups, neurons))
+    names = ["m|e|apical", "m|e|basal"]
+    _, pooled, _ = _pooled_amplitude(y, x, n, groups, names)
+    slope, offsets, _, info = _within_neuron_amplitude(y, x, n, groups, neurons.astype(object), names)
+    assert abs(pooled["m|e|apical"] - pooled["m|e|basal"]) < 0.08  # hidden by the neuron effects
+    assert offsets["m|e|apical"] - offsets["m|e|basal"] == pytest.approx(-0.2, abs=0.03)
+    assert slope == pytest.approx(-0.5, abs=0.05) and info["components"] == [names]
+
+
+def test_simulation_corrected_bending_fit_matches_the_generated_variograms():
+    """Large tilts (as on real branches): the linear curves are not the generated ones; after the corrections the
+    simulated branches reproduce the empirical semivariograms on the fitted lags better than the plain linear fit."""
+    from src.neuron_model.trunk_generation.models.direction import Amplitude
+    from src.neuron_model.trunk_generation.models.direction_ms import DirectionMultiScale
+
+    rng = np.random.default_rng(8)
+    true = DirectionMultiScale(sd_fast=0.3, length_fast_nm=2000.0, noise_sd=0.003, drive_std=2.0e-4, drive_length_nm=3300.0, restore_nm=3300.0,
+                               amplitude=Amplitude(0.0, beta=-0.9, tau=0.15))
+    enc = DesignEncoder.fit([5000.0, 100000.0])
+    branches = []
+    for i in range(200):
+        length = float(np.exp(rng.uniform(math.log(10000.0), math.log(80000.0))))
+        r = float(np.exp(rng.uniform(math.log(200.0), math.log(450.0))))
+        step = float(rng.choice([250.0, 300.0, 400.0]))
+        n = int(length // step) + 1
+        k1, k2 = true.sample_bending(n, step, "g", rng, radius_nm=r)
+        branches.append(T0Branch(k1, k2, np.full(n, math.log(r)), step, enc.row("mouse", "excitatory", "apical", length), "g", f"n{i // 4}"))
+    plain = DirectionMultiScale(simulation_corrections=0, tilt_min_lag_nm=0.0, n_simulated=200).fit(branches, min_group=10_000, n_bootstrap=100)
+    fixed = DirectionMultiScale(simulation_corrections=3, tilt_min_lag_nm=0.0, n_simulated=200).fit(branches, min_group=10_000, n_bootstrap=100)
+    e_plain = plain.info["variogram_generated"]["relative_rms_error_fitted_lags"]
+    e_fixed = fixed.info["variogram_generated"]["relative_rms_error_fitted_lags"]
+    assert e_fixed < 0.7 * e_plain and e_fixed < 0.08
+    assert len(fixed.info["correction_history"]) == 4 and fixed.amplitude_within_neuron and fixed.info["amplitude_within_neuron"]

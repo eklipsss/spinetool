@@ -157,6 +157,10 @@ def main() -> None:
         ok = bt[bt["status"].isin(["ok", "invalid"])]
         print(f"[assembly] watertight {ok['watertight'].mean():.0%}, one component {(ok['n_components'] == 1).mean():.0%}, "
               f"median {ok['seconds'].median():.1f} s/branch -> {out}", flush=True)
+        if "n_slivers_removed" in ok.columns:
+            ns = ok["n_slivers_removed"].fillna(0)
+            print(f"[assembly] boolean slivers removed: {int(ns.sum())} on {int((ns > 0).sum())} branches "
+                  f"(area {ok['sliver_area_removed_nm2'].fillna(0).sum():.0f} nm^2 in total)", flush=True)
 
 
 if __name__ == "__main__":

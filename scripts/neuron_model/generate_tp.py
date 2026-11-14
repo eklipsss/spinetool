@@ -157,7 +157,7 @@ def main() -> None:
     np.savez_compressed(out / "trunks.npz", **pack_records(trunks))
     brows, prows = [], []
     for i, (t, q, p) in enumerate(zip(trunks, requests, placements)):
-        brows.append({"branch_index": i, **{k: q[k] for k in ("species", "cell_type_binary", "compartment", "is_terminal", "soma_distance_start_nm", "source_branch")},
+        brows.append({"branch_index": i, **{k: q.get(k) for k in ("species", "cell_type_binary", "cell_type", "compartment", "is_terminal", "soma_distance_start_nm", "source_branch")},
                       "length_nm": float(t["length"]), "n_spines": p["n_spines"], "placement_attempts": p["attempts"], "d_min_satisfied": p["d_min_satisfied"],
                       "min_distance_nm": p["min_distance_nm"], "trunk_attempts": t.get("attempts")})
         for j in range(p["n_spines"]):

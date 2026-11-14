@@ -45,12 +45,30 @@ from src.neuron_model.spine_generation.experiment.config import load_config, res
 from src.neuron_model.spine_generation.experiment.run import open_run
 
 
+def filter_rows(frame: pd.DataFrame, where, ap=None) -> pd.DataFrame:
+    """Rows whose ``COLUMN`` equals ``VALUE`` for every ``COLUMN=VALUE`` (string comparison)."""
+    for item in where:
+        column, sep, value = item.partition("=")
+        if not sep or column not in frame.columns:
+            msg = f"--where {item!r}: expected COLUMN=VALUE with a manifest column (have e.g. {[c for c in frame.columns if 'cell' in c or 'compart' in c]})"
+            if ap is not None:
+                ap.error(msg)
+            raise ValueError(msg)
+        frame = frame[frame[column].astype(str) == value]
+    return frame
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", type=Path, nargs="+", required=True)
     ap.add_argument("--path-mode", default="relative", choices=["relative", "absolute"])
     ap.add_argument("--splits", type=Path, required=True, help="the split the evaluation will use (its test part)")
     ap.add_argument("--split", default="test")
+    ap.add_argument("--where", action="append", default=[], metavar="COLUMN=VALUE",
+                    help="keep only spines with this manifest value (repeatable), e.g. cell_type_binary=inhibitory or cell_type=4P: "
+                         "the chain floor per condition for conditional_generation_report.py (manifest with metadata: manifest_minnie65_meta)")
+    ap.add_argument("--metadata-root", type=Path, help="recompute cell_type / cell_type_binary / compartment for --where from the metadata "
+                    "tables (datasets/); the full-Minnie65 manifest has cell_type empty")
     ap.add_argument("--controls", nargs="+", default=list(CONTROLS), choices=CONTROLS)
     ap.add_argument("--n-samples", type=int, default=1000, help="spines per seed")
     ap.add_argument("--seeds", type=int, nargs="+", default=[1])
@@ -68,7 +86,16 @@ def main() -> None:
     index = load_spine_index(args.manifest, path_mode=args.path_mode, check_files=())
     index = index.with_split(load_splits(args.splits), args.split, drop_unassigned=True)
     frame = index.frame
-    print(f"{len(frame)} {args.split} spines of {frame['group_id'].nunique()} neurons in {args.splits.name}", flush=True)
+    if args.where and args.metadata_root is not None:
+        from src.neuron_model.spine_generation.conditioning import spine_conditions
+
+        conditions = spine_conditions(frame, args.metadata_root.resolve())
+        frame = frame.copy()
+        for column in {w.partition("=")[0] for w in args.where} & {"cell_type", "cell_type_binary", "compartment"}:
+            frame[column] = conditions[column].to_numpy()
+    frame = filter_rows(frame, args.where, ap)
+    print(f"{len(frame)} {args.split} spines of {frame['group_id'].nunique()} neurons in {args.splits.name}"
+          + (f" with {' & '.join(args.where)}" if args.where else ""), flush=True)
     picks = assign_samples(frame["spine_key"].tolist(), n_per_seed=args.n_samples, seeds=args.seeds, base_seed=args.base_seed)
     by_key = frame.set_index("spine_key", drop=False)
 
@@ -103,7 +130,7 @@ def main() -> None:
                 spine = {c: (str(row[c]) if c in row and pd.notna(row[c]) else None) for c in ("spine_key", "local_sealed_mesh_path", "pointcloud_8192_path")}
                 jobs.append({"control": control, "seed": seed, "spine": spine, "kwargs": kwargs[control],
                              "sample_dir": str(out / control / f"seed_{seed}" / f"sample_{i:05d}")})
-    write_json(out / "controls_config.json", {"splits": str(args.splits), "split": args.split, "n_samples": args.n_samples, "seeds": args.seeds,
+    write_json(out / "controls_config.json", {"splits": str(args.splits), "split": args.split, "where": args.where, "n_samples": args.n_samples, "seeds": args.seeds,
                                              "base_seed": args.base_seed, "controls": {c: kwargs[c] for c in args.controls},
                                              "n_test_spines": int(len(frame)), "n_test_neurons": int(frame["group_id"].nunique())})
     print(f"{len(jobs)} jobs ({', '.join(args.controls)} x seeds {args.seeds} x {args.n_samples}) -> {out}", flush=True)

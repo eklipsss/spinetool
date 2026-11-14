@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import functools
 
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -139,6 +139,7 @@ def fit_t0(
     length_bounds=(5000.0, 255500.0),
     direction: str = "multiscale",
     radius_residual: str = "multiscale",
+    direction_options: Optional[Dict[str, Any]] = None,
     train_conditions: Sequence[Dict[str, Any]] = None,
     seed: int = 0,
     log=functools.partial(print, flush=True),
@@ -167,7 +168,7 @@ def fit_t0(
     requests = [dict(c, length_nm=b.length, step_nm=b.step) for c, b in zip(val_conditions, val)]
     for mean in mean_models:
         log(f"[t0] variant {mean}: fitting ...")
-        model = T0Model(mean, length_bounds=length_bounds, direction=direction, radius_residual=radius_residual).fit(train, encoder=encoder, shrinkage_std=shrinkage_std, max_iter=max_iter, progress=log)
+        model = T0Model(mean, length_bounds=length_bounds, direction=direction, radius_residual=radius_residual, direction_options=direction_options).fit(train, encoder=encoder, shrinkage_std=shrinkage_std, max_iter=max_iter, progress=log)
         info = getattr(model.mean, "fit_info", None)
         if info:  # parabola_mix: chosen number of components, BIC per K, components (weight, r_L at the intercept, sd)
             log(f"[t0] variant {mean}: K = {info['chosen_k']}; BIC per K " + ", ".join(f"{k}: {v['bic']:.0f}" for k, v in info["per_k"].items())

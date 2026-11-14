@@ -40,6 +40,21 @@ from src.neuron_model.spine_generation.evaluation import conditional_tests as ct
 from src.neuron_model.spine_morphometrics import SCALAR_METRICS  # noqa: E402
 
 
+def source_neurons(folder: Path, frame: pd.DataFrame):
+    """Neuron id of every sample of a set of REAL spines (``generation_metadata.json`` with ``spine_key`` =
+    dataset/neuron/limb/branch/spine, written by make_real_controls.py), or None for a generated set."""
+    if "sample_id" not in frame.columns:
+        return None
+    out = []
+    for sample in frame["sample_id"].astype(str):
+        meta = Path(folder) / sample / "generation_metadata.json"
+        key = json.loads(meta.read_text(encoding="utf-8")).get("spine_key") if meta.exists() else None
+        if not key or len(str(key).split("/")) != 5:
+            return None
+        out.append(str(key).split("/")[1])
+    return out
+
+
 def load_set(value: str, label: str, source: Path, mesh_kind: str) -> tuple:
     """``(frame, info)`` of one generated set: a parquet / analysis folder (``generated_metrics.parquet``) or a set folder to measure."""
     source = Path(source)
@@ -58,6 +73,10 @@ def load_set(value: str, label: str, source: Path, mesh_kind: str) -> tuple:
         print(f"[cond-report] measuring {source} ...", flush=True)
         frame = generated_set_metrics(source, mesh_kind)
         folder = source
+        neurons = source_neurons(source, frame)
+        if neurons is not None:  # real spines through a surface chain (make_real_controls.py): the source neuron is the unit
+            frame["neuron_id"] = neurons
+            info["unit"] = "source neuron"
     summary = folder / "generation_summary.json" if folder is not None else None
     if summary is not None and summary.exists():
         cfg = json.loads(summary.read_text(encoding="utf-8")).get("inference_config", {})
@@ -117,8 +136,8 @@ def main() -> None:
     out = args.out or REPO_ROOT / "runs/analysis/neuron-model" / f"{time.strftime('%Y-%m-%d_%H%M%S')}_conditional-report"
     out.mkdir(parents=True, exist_ok=True)
     # contract with the global report (section 4, global_report/generated.py): one row per generated spine, the 11 metrics,
-    # value / label, the condition block and condition_<block> (None for an unconditional set); no neuron_id: a conditional
-    # sample has no source neuron
+    # value / label, the condition block and condition_<block> (None for an unconditional set); no neuron_id for a generated
+    # set (a conditional sample has no source neuron), neuron_id for a set of real spines through a chain (make_real_controls.py)
     pd.concat([f.assign(value=v, label=lab, block=args.block, **{f"condition_{args.block}": (None if v == "unconditional" else v)})
                for (v, lab), f in gen_sets.items()], ignore_index=True).to_parquet(out / "generated_metrics.parquet", index=False)
     safe = lambda text: re.sub(r"[^0-9A-Za-z._@+-]+", "_", str(text))  # noqa: E731  (file names on Windows)

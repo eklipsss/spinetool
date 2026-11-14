@@ -9,6 +9,11 @@ Families: Poisson, NB2, zero-inflated NB, hurdle NB. Mean: ``log mu_b = log E_b 
 a neuron = group of its branches. Reason (``calibrate_p0_counts.py`` on P0 2026-11-10_113713): the spread of the
 neuron effect of inhibitory neurons is ~0.6-0.7 against the single sigma_b 0.285 fitted mostly on excitatory neurons
 (0.30): the model generated inhibitory neurons that all look alike. Old models (one ``log_sigma_b``) read as one group.
+
+``subtype_prior_sd`` (2026-11-15): the last ``n_subtype`` columns of X are detailed cell types (``CountDesign(subtypes=True)``),
+deviations from the mean of the binary type; their coefficients get the Gaussian log prior -sum(beta^2) / (2 tau^2) (MAP,
+on the scale of the full likelihood), so a subtype seen on few neurons stays close to its binary type. tau is chosen by the
+validation NLL (fit_p0) / compared in neuron cross-validation (cv_tp_neurons.py, variant suffix ``:t<tau>``).
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ class CountData:
     neuron: np.ndarray  # [B] integer neuron index 0..n_neurons-1
     z_log_length: np.ndarray  # [B] standardised log-length (dispersion covariate)
     group: Optional[np.ndarray] = None  # [B] index into SIGMA_GROUPS (spread of the neuron effect)
+    n_subtype: int = 0  # detailed-type columns at the END of X (CountDesign.n_subtype)
 
     @property
     def n_neurons(self) -> int:
@@ -67,6 +73,7 @@ def build_count_data(design, branches: Sequence[Any], exposure: str = "length") 
         y=np.array([b.n_spines for b in branches], dtype=float), neuron=neuron,
         z_log_length=np.array([design.encoder.z_length(b.length_nm) for b in branches], dtype=float),
         group=np.array([sigma_group(getattr(b, "cell_type_binary", None)) for b in branches], dtype=int),
+        n_subtype=int(getattr(design, "n_subtype", 0)),
     )
 
 
@@ -93,7 +100,8 @@ def _log_pmf(family: str, y, mu, k, logit):
 
 class CountModel:
     def __init__(self, family: str = "nb", exposure: str = "length", random_effect: bool = True, n_quad: int = 15,
-                 n_basis: int = 5, smooth_penalty: float = 1.0, ridge: float = 1e-3, sigma_groups: int = 1) -> None:
+                 n_basis: int = 5, smooth_penalty: float = 1.0, ridge: float = 1e-3, sigma_groups: int = 1,
+                 subtype_prior_sd: Optional[float] = None) -> None:
         if family not in FAMILIES:
             raise ValueError(family)
         self.family, self.exposure, self.random_effect, self.n_quad = family, exposure, random_effect, n_quad
@@ -105,6 +113,8 @@ class CountModel:
             raise ValueError(sigma_groups)
         self.sigma_groups = sigma_groups
         self.log_sigma = np.full(sigma_groups, math.log(0.3))
+        self.subtype_prior_sd = None if subtype_prior_sd is None else float(subtype_prior_sd)
+        self.n_subtype = 0  # set by fit from the data
         self.fit_info: Dict[str, Any] = {}
 
     # ---- parameters <-> torch ---------------------------------------------------------------------------------
@@ -141,6 +151,10 @@ class CountModel:
             blk = beta[start:start + self.n_basis]
             d2 = blk[2:] - 2 * blk[1:-1] + blk[:-2]
             pen = pen + self.smooth_penalty * (d2 ** 2).sum()
+        if self.n_subtype:
+            if self.subtype_prior_sd is None:
+                raise ValueError("the design has detailed-type columns: give subtype_prior_sd")
+            pen = pen + (beta[p - self.n_subtype:p] ** 2).sum() / (2.0 * self.subtype_prior_sd ** 2)
         return pen
 
     def _tensors(self, data: CountData):
@@ -160,6 +174,7 @@ class CountModel:
     # ---- fit / predict ------------------------------------------------------------------------------------------
     def fit(self, data: CountData, max_iter: int = 300) -> "CountModel":
         p, q = data.X.shape[1], data.Z.shape[1]
+        self.n_subtype = int(data.n_subtype)
         t = self._tensors(data)
         beta0 = np.zeros(p)
         beta0[:self.n_basis] = math.log(max(data.y.sum() / np.exp(data.log_exposure).sum(), 1e-3)) / 1.0
@@ -196,6 +211,8 @@ class CountModel:
         self.log_sigma = th[p + q + 2:].numpy().copy()
         self.fit_info = {"nll": float(self._nll(th, t, p, q, penalty=False)), "n_branches": len(data.y), "n_neurons": data.n_neurons,
                          "sigma_b_by_group": dict(zip(SIGMA_GROUPS, map(float, np.exp(self.log_sigma))))}
+        if self.n_subtype:
+            self.fit_info["subtype_coefficients"] = [float(x) for x in self.beta[p - self.n_subtype:]]
         return self
 
     @property
@@ -326,11 +343,14 @@ class CountModel:
         return {"family": self.family, "exposure": self.exposure, "random_effect": self.random_effect, "n_quad": self.n_quad,
                 "n_basis": self.n_basis, "smooth_penalty": self.smooth_penalty, "ridge": self.ridge,
                 "beta": self.beta.tolist(), "gamma": self.gamma.tolist(), "kappa": self.kappa.tolist(),
-                "log_sigma_b": self.log_sigma_b, "sigma_groups": self.sigma_groups, "log_sigma": self.log_sigma.tolist(), "fit_info": self.fit_info}
+                "log_sigma_b": self.log_sigma_b, "sigma_groups": self.sigma_groups, "log_sigma": self.log_sigma.tolist(), "fit_info": self.fit_info,
+                "subtype_prior_sd": self.subtype_prior_sd, "n_subtype": self.n_subtype}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CountModel":
-        m = cls(d["family"], d["exposure"], d["random_effect"], d["n_quad"], d["n_basis"], d["smooth_penalty"], d["ridge"], int(d.get("sigma_groups", 1)))
+        m = cls(d["family"], d["exposure"], d["random_effect"], d["n_quad"], d["n_basis"], d["smooth_penalty"], d["ridge"], int(d.get("sigma_groups", 1)),
+                d.get("subtype_prior_sd"))
+        m.n_subtype = int(d.get("n_subtype", 0))
         m.beta, m.gamma = np.array(d["beta"]), np.array(d["gamma"])
         m.kappa, m.fit_info = np.array(d["kappa"]), d.get("fit_info", {})
         m.log_sigma = np.array(d["log_sigma"], dtype=float) if "log_sigma" in d else np.array([float(d["log_sigma_b"])])

@@ -195,6 +195,7 @@ def _cond(row: Any) -> Dict[str, Any]:
 
     d0, term = row.get("soma_distance_start_nm"), row.get("is_terminal")
     return {"species": clean(row.get("species")), "cell_type_binary": clean(row.get("cell_type_binary")), "compartment": clean(row.get("compartment")),
+            "cell_type": clean(row.get("cell_type")),
             "soma_distance_start_nm": None if d0 is None or not np.isfinite(d0) else float(d0),
             "is_terminal": None if term is None or (isinstance(term, float) and np.isnan(term)) else bool(term)}
 
@@ -221,7 +222,7 @@ def t0_training_branches(table: pd.DataFrame, pack: GeometryPack, encoder) -> Li
         soma_mid = None if c["soma_distance_start_nm"] is None else c["soma_distance_start_nm"] + 0.5 * length  # branch midpoint, as in P0
         out.append(T0Branch(g["kappa1"][:-1].astype(float), g["kappa2"][:-1].astype(float), np.log(g["radius"].astype(float)), step,
                             encoder.row(c["species"], c["cell_type_binary"], c["compartment"], length, soma_mid, c["is_terminal"]),
-                            group_key(c["species"], c["cell_type_binary"], c["compartment"])))
+                            group_key(c["species"], c["cell_type_binary"], c["compartment"]), str(row["neuron_id"])))
     return out
 
 
@@ -243,7 +244,8 @@ def count_covariates(table: pd.DataFrame, pack: GeometryPack) -> List[Any]:
             area = float(np.trapezoid(2 * np.pi * g["radius"], g["s"]))
         c = _cond(row)
         out.append(BranchCovariates(str(row["neuron_id"]), int(row["n_spines_in_range"]), length, float(area), _mean_radius(g), soma_mid,
-                                    float(row.get("tortuosity") or 1.0), bool(row.get("is_terminal")), c["species"], c["cell_type_binary"], c["compartment"]))
+                                    float(row.get("tortuosity") or 1.0), bool(row.get("is_terminal")), c["species"], c["cell_type_binary"], c["compartment"],
+                                    c["cell_type"]))
     return out
 
 
@@ -290,7 +292,7 @@ def trunk_record(geom: Dict[str, np.ndarray]) -> Dict[str, Any]:
 
 TABLE_COLUMNS = [
     "status", "split", "train_eligible_T", "train_eligible_P", "config_hash", "species", "health", "cell_type_binary", "compartment",
-    "length_nm", "is_terminal", "tortuosity", "area_shaft_nm2", "soma_distance_start_nm", "radius_median_nm",
+    "cell_type", "length_nm", "is_terminal", "tortuosity", "area_shaft_nm2", "soma_distance_start_nm", "radius_median_nm",
     "n_spines_in_range", "n_with_position", "unknown_fraction", "step_nm",
 ]
 SPINE_COLUMNS = ["status", "has_position", "s", "u", "theta", "radius_at_s", "attachment_cap_area", "projects_to_end", "position_outlier"]

@@ -28,6 +28,24 @@ parametric bootstrap (the noise of a short branch is subtracted); the intercept 
 fit already carries the mean square amplitude). Generation: tangents = normalize((tilt, 1)), kappa1, kappa2 by
 ``direction.bending_from_tangents`` - the same convention as the other direction model, the rest of T0 is unchanged.
 Units: nm.
+
+Simulation-corrected fit (2026-11-15, ``simulation_corrections``): the model curves of the fit are LINEAR in the tilt
+(kappa = tilt'), but the tilt is a tangent (component / cos to the chord) and the bending is computed from the normalised
+tangents, so at tilts of 0.5-1 the generated bending is only ~0.77 of the linear curve at >= 1 um and the generated tilt
+differs too (simulation of the fitted chain-T model: kappa generated / linear 0.99 / 0.92 / 0.72 / 0.77 / 0.76 / 0.77 /
+0.77 at 0.25 ... 16 um). The optimiser therefore fitted curves that are not the generated ones (printed "kappa model 1.32
+x empirical" at >= 2 um was in fact ~1.0, while the generated bending at 0.5-1 um was 0.75-0.89 of the real one and the
+long-lag tilt 1.08: too tortuous). Now: fit -> amplitudes -> simulate the training branches (their steps, lengths,
+radii, groups) -> per-lag ratio generated / linear -> refit to empirical / ratio; the reported curves
+(``variogram_generated``) are the simulated ones. ``tilt_min_lag_nm`` (default 2 um): the short tilt lags are left to
+the bending curve (the tangent inflates the real short-lag tilt increments by 1 / cos^2, which the model cannot follow;
+on the chain-T curves: bending at 0.5-1 um 0.90-0.95 of real, at >= 2 um 1.04-1.08, tilt at >= 8 um 1.02).
+
+Within-neuron amplitude (``amplitude_within_neuron``, needs ``branch.neuron``): the radius slope and the group
+(compartment) offsets of log m_b are estimated from branches of the SAME neuron (neuron fixed effects), the level of a
+group of groups that never meet in one neuron from all its branches. Reason: chain T printed offsets apical -0.00 /
+basal +0.01 from the pooled residuals, while the real apical branches of a neuron bend 21 % less than its basal ones
+(section 4 of the global report, paired by neuron) and the generated ones 5 % less.
 """
 
 from __future__ import annotations
@@ -127,6 +145,10 @@ class DirectionMultiScale:
     amplitude: Optional[Amplitude] = None
     info: Dict[str, Any] = field(default_factory=dict)
     kind: str = "multiscale"
+    tilt_min_lag_nm: float = 2000.0       # fit settings (see the module docstring)
+    simulation_corrections: int = 3
+    amplitude_within_neuron: bool = True
+    n_simulated: int = 600
 
     # ------------------------------------------------------------------ pieces
     @property
@@ -191,37 +213,21 @@ class DirectionMultiScale:
         return 0.5 * math.log(max(ms, 1e-300) / cache[key])
 
     # --------------------------------------------------------------------- fit
-    def fit(self, branches: Sequence[Any], *, min_group: int = 50, n_bootstrap: int = 400, seed: int = 0) -> "DirectionMultiScale":
-        """``branches``: T0Branch-like (kappa1, kappa2, log_radius, step, length, group)."""
-        use = [b for b in branches if b.n_nodes >= MIN_DRIVES + 1]
-        if not use:
-            raise ValueError(f"no branch with at least {MIN_DRIVES + 1} nodes")
-        steps = [float(b.step) for b in use]
-        lengths = [float(b.length) for b in use]
-        tilts = []
-        for b in use:
-            gamma, t = node_tangents(b.kappa1, b.kappa2, b.step)
-            tilts.append(tilt_series(gamma, t))
-        kappa_data = kappa_variogram([b.kappa1 for b in use], [b.kappa2 for b in use], steps)
-        tilt_data = tilt_variogram(tilts, steps, lengths)
-        self.info = {"n_branches": len(use)}
-        self._fit_global(kappa_data, tilt_data, steps)
-        # amplitude of each branch: ratio of its mean square bending to the model one
-        cache: Dict[float, float] = {}
+    def _fit_amplitude(self, use: Sequence[Any], cache: Dict[float, float], min_group: int, n_bootstrap: int, seed: int) -> None:
+        """log m_b ~ alpha + beta log(r_b / 300 nm) + group offset, spread tau (sampling noise of a branch subtracted)."""
         y = np.array([self._log_scale(b.kappa1, b.kappa2, self.theta, b.step, cache) for b in use])
         n = np.array([len(b.kappa1) for b in use], dtype=float)
         x = np.log(np.array([float(np.median(np.exp(b.log_radius))) for b in use]) / R_REF_NM)
-        w = n / n.sum()
-        design = np.column_stack([np.ones_like(x), x])
-        coef = np.linalg.lstsq(design * np.sqrt(w)[:, None], y * np.sqrt(w), rcond=None)[0]
-        resid = y - design @ coef
         groups_arr = np.asarray([b.group for b in use])
-        offsets: Dict[str, float] = {}
-        for name in np.unique(groups_arr):
-            m = groups_arr == name
-            if m.sum() >= min_group:
-                offsets[str(name)] = float(np.average(resid[m], weights=n[m]))
-                resid[m] -= offsets[str(name)]
+        names = [str(g) for g in np.unique(groups_arr) if (groups_arr == g).sum() >= min_group]
+        pooled_slope, pooled_offsets, pooled_alpha = _pooled_amplitude(y, x, n, groups_arr, names)
+        neurons = [getattr(b, "neuron", None) for b in use]
+        within = self.amplitude_within_neuron and all(v is not None for v in neurons)
+        if within:
+            slope, offsets, alpha_reg, w_info = _within_neuron_amplitude(y, x, n, groups_arr, np.asarray(neurons, dtype=object), names)
+        else:
+            slope, offsets, alpha_reg, w_info = pooled_slope, pooled_offsets, pooled_alpha, {}
+        resid = y - alpha_reg - slope * x - np.array([offsets.get(str(g), 0.0) for g in groups_arr])
         var_real = float(np.average(resid**2, weights=n))
         # sampling noise of the log ratio of a branch (its length, step): parametric bootstrap at m = 1
         rng = np.random.default_rng(seed)
@@ -237,10 +243,71 @@ class DirectionMultiScale:
         var_noise = float(np.average((y_sim - np.average(y_sim, weights=n_sim)) ** 2, weights=n_sim))
         tau = math.sqrt(max(var_real - var_noise, 0.0025))
         # E m^2 = 1: the pooled fit carries the mean square amplitude
-        fixed = np.log(np.average(np.exp(2.0 * (coef[1] * x + np.array([offsets.get(g, 0.0) for g in groups_arr]))), weights=n))
+        fixed = np.log(np.average(np.exp(2.0 * (slope * x + np.array([offsets.get(str(g), 0.0) for g in groups_arr]))), weights=n))
         alpha = -tau**2 - 0.5 * float(fixed)
-        self.amplitude = Amplitude(float(alpha), float(coef[1]), float(tau), offsets)
-        self.info.update({"tau_raw_spread": math.sqrt(var_real), "tau_noise": math.sqrt(var_noise), "alpha_regression": float(coef[0])})
+        self.amplitude = Amplitude(float(alpha), float(slope), float(tau), offsets)
+        self.info.update({"tau_raw_spread": math.sqrt(var_real), "tau_noise": math.sqrt(var_noise), "alpha_regression": float(alpha_reg),
+                          "amplitude_within_neuron": bool(within), "amplitude_pooled": {"slope": float(pooled_slope), "offsets": pooled_offsets},
+                          **({"amplitude_within": w_info} if within else {})})
+
+    def _linear_curves(self, steps: Sequence[float]) -> Tuple[np.ndarray, np.ndarray]:
+        spec = spectrum(self.theta)
+        return (semivariance(LAGS_NM, spec * bending_filter(steps)) + noise_kappa_semivariance(LAGS_NM, steps, self.noise_sd),
+                semivariance(LAGS_NM, spec) + self.noise_sd**2)
+
+    def _simulated_curves(self, branches: Sequence[Any], seed: int) -> Tuple[Dict[float, Optional[float]], Dict[float, Optional[float]]]:
+        """Pooled semivariograms of bending and tilt of one generated chain per branch (its step, length, radius, group)."""
+        rng = np.random.default_rng(seed)
+        k1s, k2s, tilts, steps, lengths = [], [], [], [], []
+        for b in branches:
+            k1, k2 = self.sample_bending(len(b.kappa1) + 1, float(b.step), b.group, rng, radius_nm=float(np.median(np.exp(b.log_radius))))
+            gamma, t = node_tangents(k1, k2, b.step)
+            k1s.append(k1), k2s.append(k2), tilts.append(tilt_series(gamma, t)), steps.append(float(b.step)), lengths.append(float(b.length))
+        return kappa_variogram(k1s, k2s, steps), tilt_variogram(tilts, steps, lengths)
+
+    def fit(self, branches: Sequence[Any], *, min_group: int = 50, n_bootstrap: int = 400, seed: int = 0) -> "DirectionMultiScale":
+        """``branches``: T0Branch-like (kappa1, kappa2, log_radius, step, length, group[, neuron])."""
+        use = [b for b in branches if b.n_nodes >= MIN_DRIVES + 1]
+        if not use:
+            raise ValueError(f"no branch with at least {MIN_DRIVES + 1} nodes")
+        steps = [float(b.step) for b in use]
+        lengths = [float(b.length) for b in use]
+        tilts = []
+        for b in use:
+            gamma, t = node_tangents(b.kappa1, b.kappa2, b.step)
+            tilts.append(tilt_series(gamma, t))
+        kappa_data = kappa_variogram([b.kappa1 for b in use], [b.kappa2 for b in use], steps)
+        tilt_data = tilt_variogram(tilts, steps, lengths)
+        tilt_fit = {h: (v if h >= self.tilt_min_lag_nm else None) for h, v in tilt_data.items()}
+        self.info = {"n_branches": len(use), "tilt_min_lag_nm": self.tilt_min_lag_nm, "simulation_corrections": int(self.simulation_corrections)}
+        rng = np.random.default_rng(seed + 7)
+        sim_set = [use[i] for i in rng.choice(len(use), size=min(self.n_simulated, len(use)), replace=False)]
+        ck = {h: 1.0 for h in LAGS_NM}
+        ct = {h: 1.0 for h in LAGS_NM}
+        history = []
+        cache: Dict[float, float] = {}
+        for it in range(int(self.simulation_corrections) + 1):
+            self._fit_global({h: (None if v is None else v / ck[h]) for h, v in kappa_data.items()},
+                             {h: (None if v is None else v / ct[h]) for h, v in tilt_fit.items()}, steps)
+            cache = {}
+            self._fit_amplitude(use, cache, min_group, n_bootstrap, seed)
+            sim_k, sim_t = self._simulated_curves(sim_set, seed + 11)  # common random numbers across the iterations
+            lin_k, lin_t = self._linear_curves(steps)
+            ratio = lambda d, e: [None if (d.get(h) is None or e.get(h) is None) else float(math.sqrt(d[h] / e[h])) for h in LAGS_NM]  # noqa: E731
+            history.append({"iteration": it, "theta": list(self.theta), "linear_fit_error": self.info["variogram_fit"]["relative_rms_error"],
+                            "kappa_generated_over_empirical": ratio(sim_k, kappa_data), "tilt_generated_over_empirical": ratio(sim_t, tilt_data)})
+            for j, h in enumerate(LAGS_NM):
+                if sim_k.get(h) and lin_k[j] > 0:
+                    ck[h] = sim_k[h] / lin_k[j]
+                if sim_t.get(h) and lin_t[j] > 0:
+                    ct[h] = sim_t[h] / lin_t[j]
+        fitted = [h for h in LAGS_NM if kappa_data.get(h)] , [h for h in LAGS_NM if tilt_fit.get(h)]
+        errs = [math.log(sim_k[h] / kappa_data[h]) / 2 for h in fitted[0] if sim_k.get(h)] + [math.log(sim_t[h] / tilt_data[h]) / 2 for h in fitted[1] if sim_t.get(h)]
+        self.info["variogram_generated"] = {
+            "lags_nm": list(LAGS_NM), "kappa_empirical": [kappa_data.get(h) for h in LAGS_NM], "kappa_generated": [sim_k.get(h) for h in LAGS_NM],
+            "tilt_empirical": [tilt_data.get(h) for h in LAGS_NM], "tilt_generated": [sim_t.get(h) for h in LAGS_NM],
+            "relative_rms_error_fitted_lags": float(np.sqrt(np.mean(np.square(errs)))) if errs else None}
+        self.info["correction_history"] = history
         return self
 
     # -------------------------------------------------------------- generation
@@ -277,14 +344,88 @@ class DirectionMultiScale:
     # ------------------------------------------------------------- persistence
     def to_dict(self) -> Dict[str, Any]:
         return {"kind": self.kind, "sd_fast": self.sd_fast, "length_fast_nm": self.length_fast_nm, "noise_sd": self.noise_sd, "drive_std": self.drive_std,
-                "drive_length_nm": self.drive_length_nm, "restore_nm": self.restore_nm,
+                "drive_length_nm": self.drive_length_nm, "restore_nm": self.restore_nm, "tilt_min_lag_nm": self.tilt_min_lag_nm,
+                "simulation_corrections": self.simulation_corrections, "amplitude_within_neuron": self.amplitude_within_neuron,
                 "amplitude": self.amplitude.to_dict() if self.amplitude else None, "groups": dict(self.groups), "info": self.info}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DirectionMultiScale":
         amp = d.get("amplitude")
         return cls(float(d["sd_fast"]), float(d["length_fast_nm"]), float(d.get("noise_sd", 0.0)), float(d["drive_std"]), float(d["drive_length_nm"]),
-                   float(d["restore_nm"]), Amplitude.from_dict(amp) if amp else None, dict(d.get("info", {})))
+                   float(d["restore_nm"]), Amplitude.from_dict(amp) if amp else None, dict(d.get("info", {})),
+                   tilt_min_lag_nm=float(d.get("tilt_min_lag_nm", 0.0)), simulation_corrections=int(d.get("simulation_corrections", 0)),
+                   amplitude_within_neuron=bool(d.get("amplitude_within_neuron", False)))
+
+
+def _pooled_amplitude(y, x, n, groups, names):
+    """The original estimate: WLS of y on (1, x), then group offsets = weighted mean residual of the group."""
+    design = np.column_stack([np.ones_like(x), x])
+    sw = np.sqrt(n / n.sum())
+    coef = np.linalg.lstsq(design * sw[:, None], y * sw, rcond=None)[0]
+    resid = y - design @ coef
+    offsets = {g: float(np.average(resid[groups == g], weights=n[groups == g])) for g in names}
+    return float(coef[1]), offsets, float(coef[0])
+
+
+def _within_neuron_amplitude(y, x, n, groups, neurons, names):
+    """Radius slope and group offsets from the contrasts between branches of one neuron (neuron fixed effects, WLS on the
+    neuron-demeaned data). Groups that meet in a neuron form a component: their within differences are kept, the component
+    level is the weighted mean of all its branches; a group that never meets another one gets its overall level. Returns
+    (slope, offsets relative to the intercept, intercept, info)."""
+    gi = {g: k for k, g in enumerate(names)}
+    D = np.zeros((len(y), len(names)))
+    for b, g in enumerate(groups):
+        if str(g) in gi:
+            D[b, gi[str(g)]] = 1.0
+    A = np.column_stack([x, D])
+    codes, uniq = pd_factorize(neurons)
+    wsum = np.bincount(codes, weights=n)
+    mean_of = lambda v: (np.bincount(codes, weights=n * v) / np.maximum(wsum, 1e-300))[codes]  # noqa: E731
+    Ad = np.column_stack([A[:, j] - mean_of(A[:, j]) for j in range(A.shape[1])])
+    yd = y - mean_of(y)
+    sw = np.sqrt(n / n.sum())
+    coef = np.linalg.lstsq(Ad * sw[:, None], yd * sw, rcond=None)[0]
+    slope = float(coef[0])
+    w_g = coef[1:]
+    # components: groups that share a neuron
+    parent = list(range(len(names)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for c in range(len(uniq)):
+        present = np.flatnonzero(D[codes == c].sum(axis=0) > 0)
+        for a in present[1:]:
+            parent[find(a)] = find(present[0])
+    comp = np.array([find(k) for k in range(len(names))])
+    r = y - slope * x
+    in_group = D.sum(axis=1) > 0
+    level = {}
+    for c in np.unique(comp):
+        members = np.flatnonzero(comp == c)
+        rows = D[:, members].sum(axis=1) > 0
+        within_part = D[:, members] @ w_g[members] if len(members) > 1 else np.zeros(len(y))
+        base = float(np.average((r - within_part)[rows], weights=n[rows]))
+        for k in members:
+            level[names[k]] = base + (float(w_g[k]) if len(members) > 1 else 0.0)
+    if (~in_group).any():
+        intercept = float(np.average(r[~in_group], weights=n[~in_group]))
+    else:
+        intercept = float(np.average([level[str(g)] for g in groups], weights=n))
+    offsets = {g: float(v - intercept) for g, v in level.items()}
+    info = {"slope": slope, "offsets": offsets, "n_neurons": int(len(uniq)),
+            "components": [[names[k] for k in np.flatnonzero(comp == c)] for c in np.unique(comp)]}
+    return slope, offsets, intercept, info
+
+
+def pd_factorize(values):
+    import pandas as pd
+
+    codes, uniq = pd.factorize(pd.Series(values, dtype=object))
+    return codes, uniq
 
 
 def direction_model_from_dict(d: Dict[str, Any]):

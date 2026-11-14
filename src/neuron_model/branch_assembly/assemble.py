@@ -14,7 +14,8 @@ For every placement (s_i, theta_i) of P:
    placement is retried with another pool spine (``on_failure: resample``, up to ``max_tries``) or dropped (``drop``);
 4. the trunk and all accepted spines are united by one Manifold boolean (manifold3d): the immersed bases vanish inside
    the union, no explicit stitching of boundary loops;
-5. the result is checked: closed, consistently wound, one component, no degenerate faces, positive volume (Manifold
+5. detached pieces of the union smaller than ``sliver_max_area_nm2`` (boolean debris near spine bases) are removed;
+6. the result is checked: closed, consistently wound, one component, no degenerate faces, positive volume (Manifold
    output is free of self-intersections by construction).
 
 The seam is not remeshed (spec 8.1 step 6 is not implemented in this version): the junction keeps the triangles the
@@ -46,6 +47,7 @@ class AssemblyConfig:
     max_penetration_fraction: float = 0.0
     collision_volume_nm3: float = 1000.0  # overlap of two spines above this -> collides (10 nm cube)
     simplify_tolerance_nm: float = 0.1    # degenerate (zero-area) triangles after the union -> Manifold.simplify with this tolerance
+    sliver_max_area_nm2: float = 10000.0  # detached pieces of the union smaller than this (0.01 um^2) are boolean debris -> removed; 0 = keep
     on_failure: str = "resample"          # resample | drop
     max_tries: int = 5
     seed: int = 0
@@ -182,6 +184,33 @@ def component_report(mesh, spine_rows: Sequence[Dict[str, Any]], max_components:
     return out
 
 
+def drop_slivers(union, max_area_nm2: float) -> Tuple[Any, Dict[str, Any]]:
+    """Remove detached pieces of the boolean union smaller than ``max_area_nm2`` (debris where a spine surface nearly
+    touches the trunk or another spine: on real assemblies 4-60 faces, < 3000 nm^2, < 50 nm). The piece of largest
+    volume is always kept; larger detached pieces (a whole spine that does not touch the trunk) are kept as well, so the
+    branch still fails ``several_components``. Returns (manifold, info)."""
+    import manifold3d as m3d
+
+    info: Dict[str, Any] = {"n_slivers_removed": 0, "sliver_area_removed_nm2": 0.0}
+    if max_area_nm2 <= 0:
+        return union, info
+    parts = union.decompose()
+    if len(parts) < 2:
+        return union, info
+    main = int(np.argmax([abs(p.volume()) for p in parts]))
+    keep, removed_area = [], []
+    for k, p in enumerate(parts):
+        area = float(p.surface_area())
+        if k == main or area >= max_area_nm2:
+            keep.append(p)
+        else:
+            removed_area.append(area)
+    if not removed_area:
+        return union, info
+    info.update(n_slivers_removed=len(removed_area), sliver_area_removed_nm2=float(sum(removed_area)))
+    return (m3d.Manifold.compose(keep) if len(keep) > 1 else keep[0]), info
+
+
 def _boxes_overlap(a, b) -> bool:
     return all(a[k] <= b[k + 3] and b[k] <= a[k + 3] for k in range(3))
 
@@ -240,6 +269,8 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
         spine_rows.append(row)
 
     union = m3d.Manifold.batch_boolean([trunk_mf] + [m for m, _ in accepted], m3d.OpType.Add) if accepted else trunk_mf
+    union, sliver_info = drop_slivers(union, cfg.sliver_max_area_nm2)
+    branch.update(sliver_info)
 
     def export(mf):
         out = mf.to_mesh64()

@@ -166,3 +166,23 @@ def test_make_real_controls_cli_end_to_end(fake_dataset, tmp_path, monkeypatch):
     assert len(table) == 2 * 2 * 2 and table["error"].isna().all()
     assert set(table.groupby("seed")["spine_key"].nunique()) == {2}
     assert (out / "mc" / "seed_2" / "sample_00001" / "generated_mesh_postprocessed.off").exists()
+
+
+def test_where_filter_and_source_neurons_of_a_real_control(tmp_path):
+    """make_real_controls --where keeps one condition; the conditional report takes the source neuron of a real control as its unit."""
+    from scripts.neuron_model import conditional_generation_report as rep
+    from scripts.neuron_model import make_real_controls as cli
+
+    frame = pd.DataFrame({"spine_key": list("abcd"), "cell_type_binary": ["excitatory", "inhibitory", "inhibitory", None]})
+    assert cli.filter_rows(frame, ["cell_type_binary=inhibitory"])["spine_key"].tolist() == ["b", "c"]
+    with pytest.raises(ValueError):
+        cli.filter_rows(frame, ["no_such_column=x"])
+
+    for i, key in enumerate(["minnie65/111/0/2/5", "minnie65/222/1/0/3"]):
+        d = tmp_path / f"sample_{i:05d}"
+        d.mkdir()
+        (d / "generation_metadata.json").write_text(json.dumps({"model": "real_poisson", "spine_key": key}))
+    metrics = pd.DataFrame({"sample_id": ["sample_00000", "sample_00001"]})
+    assert rep.source_neurons(tmp_path, metrics) == ["111", "222"]
+    (tmp_path / "sample_00001" / "generation_metadata.json").write_text(json.dumps({"model": "mogen"}))  # a generated sample: no source
+    assert rep.source_neurons(tmp_path, metrics) is None

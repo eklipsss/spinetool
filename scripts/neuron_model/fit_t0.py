@@ -70,6 +70,7 @@ def main() -> None:
     result = fit_t0(train, val, [_cond(r) for r in rows], [str(r["neuron_id"]) for r in rows], encoder=encoder, mean_models=m["mean_models"],
                     shrinkage_std=float(m["shrinkage_std"]), max_iter=int(m["max_iter"]), length_bounds=tuple(m["length_bounds_nm"]), seed=int(cfg["seed"]),
                     direction=str(m.get("direction", "multiscale")), radius_residual=str(m.get("radius_residual", "branch")),
+                    direction_options=dict(m.get("direction_options") or {}),
                     train_conditions=[_cond(r) for r in tr.to_dict("records")])
     run = create_run(cfg, runs_root=resolve_path(cfg["runs_root"]), extra_info={"n_train": len(train), "n_val": len(val), "branches_root": str(d["branches_root"])})
     for name, model in result["models"].items():
@@ -86,8 +87,23 @@ def main() -> None:
               f"branch amplitude x exp({a.get('alpha', 0.0):.2f}) x r^{a.get('beta', 0.0):.2f}, spread between branches x/: {math.exp(a.get('tau', 0.0)):.2f} "
               f"(sampling noise x/: {math.exp(q.get('info', {}).get('tau_noise', 0.0)):.2f}); group offsets {({k: round(v, 2) for k, v in a.get('groups', {}).items()})}; "
               f"semivariogram fit error {vf.get('relative_rms_error', float('nan')):.3f}", flush=True)
+        info = q.get("info", {})
+        if info.get("amplitude_within_neuron"):
+            w, pl = info.get("amplitude_within", {}), info.get("amplitude_pooled", {})
+            print(f"       bending amplitude within neuron ({w.get('n_neurons')} neurons): r^{w.get('slope', float('nan')):.2f}, offsets "
+                  f"{({k: round(v, 3) for k, v in w.get('offsets', {}).items()})}; pooled estimate (before 2026-11-15): r^{pl.get('slope', float('nan')):.2f}, "
+                  f"offsets {({k: round(v, 3) for k, v in pl.get('offsets', {}).items()})}", flush=True)
+        vg = info.get("variogram_generated")
+        if vg:
+            fmt = lambda e, g: "-" if e is None or g is None else f"{math.sqrt(2 * e):.3g}/{math.sqrt(2 * g):.3g} ({math.sqrt(g / e):.2f})"  # noqa: E731
+            print(f"       GENERATED vs empirical (simulation of the training branches; tilt fitted from {info.get('tilt_min_lag_nm', 0) / 1000.0:g} um, "
+                  f"{info.get('simulation_corrections')} corrections, error on the fitted lags {vg.get('relative_rms_error_fitted_lags') or float('nan'):.3f}):", flush=True)
+            print("         bending sqrt(2 gamma), 1/nm (lag um: empirical / generated (ratio)): " + ", ".join(
+                f"{h / 1000.0:g}: {fmt(e, g)}" for h, e, g in zip(vg["lags_nm"], vg["kappa_empirical"], vg["kappa_generated"])), flush=True)
+            print("         tilt sqrt(2 gamma) (lag um: empirical / generated (ratio)): " + ", ".join(
+                f"{h / 1000.0:g}: {fmt(e, g)}" for h, e, g in zip(vg["lags_nm"], vg["tilt_empirical"], vg["tilt_generated"])), flush=True)
         if vf:
-            print("       bending semivariogram sqrt(2 gamma), 1/nm (lag um: empirical / model): " + ", ".join(
+            print("       bending semivariogram sqrt(2 gamma), 1/nm (lag um: empirical / LINEAR model curve of the fit target): " + ", ".join(
                 f"{h / 1000.0:g}: {math.sqrt(2 * e):.3g}/{math.sqrt(2 * mm):.3g}" for h, e, mm in zip(vf["kappa_lags_nm"], vf["kappa_empirical"], vf["kappa_model"])), flush=True)
             print("       tilt semivariogram sqrt(2 gamma) (lag um: empirical / model): " + ", ".join(
                 f"{h / 1000.0:g}: {math.sqrt(2 * e):.3g}/{math.sqrt(2 * mm):.3g}" for h, e, mm in zip(vf["tilt_lags_nm"], vf["tilt_empirical"], vf["tilt_model"])), flush=True)

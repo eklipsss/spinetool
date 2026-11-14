@@ -64,6 +64,7 @@ class T0Branch:
     step: float
     design: np.ndarray  # DesignEncoder.row(...)
     group: str
+    neuron: Optional[str] = None  # within-neuron estimate of the bending amplitude (direction_ms)
 
     @property
     def n_nodes(self) -> int:
@@ -488,7 +489,7 @@ class T0Model:
     """Statistical trunk model (see module docstring)."""
 
     def __init__(self, mean_model: str = "parabola", length_bounds: Tuple[float, float] = (5000.0, 255500.0), direction: str = "multiscale",
-                 radius_residual: str = "multiscale") -> None:
+                 radius_residual: str = "multiscale", direction_options: Optional[Dict[str, Any]] = None) -> None:
         if mean_model not in MEAN_MODELS:
             raise ValueError(f"mean_model must be one of {tuple(MEAN_MODELS)}")
         if direction not in ("multiscale", "tilt", "kappa"):
@@ -496,6 +497,7 @@ class T0Model:
         if radius_residual not in ("multiscale", "branch", "pooled"):
             raise ValueError("radius_residual must be 'multiscale', 'branch' or 'pooled'")
         self.direction_mode = direction
+        self.direction_options = dict(direction_options or {})  # DirectionMultiScale fit settings (tilt_min_lag_nm, simulation_corrections, ...)
         self.radius_mode = radius_residual
         self.radius = None  # RadiusMultiScale | RadiusResidualModel | None (pooled)
         self.direction: Optional[DirectionModel] = None
@@ -577,7 +579,7 @@ class T0Model:
         self.fit_info = {"nll_per_node": final, "n_branches": len(branches), "n_nodes": int(n_total), "groups": names, "shrinkage_std": shrinkage_std}
         say(f"[t0-fit] OU done ({time.time() - t_start:.0f} s, {evals[0]} evaluations); direction model ({self.direction_mode}) ...")
         if self.direction_mode in ("tilt", "multiscale"):
-            self.direction = (DirectionMultiScale() if self.direction_mode == "multiscale" else DirectionModel()).fit(branches, min_group=min_group)
+            self.direction = (DirectionMultiScale(**self.direction_options) if self.direction_mode == "multiscale" else DirectionModel()).fit(branches, min_group=min_group)
             self.fit_info["direction"] = self.direction.to_dict()
         say(f"[t0-fit] direction done ({time.time() - t_start:.0f} s); radius residual ({self.radius_mode}) ...")
         if self.radius_mode in ("branch", "multiscale"):

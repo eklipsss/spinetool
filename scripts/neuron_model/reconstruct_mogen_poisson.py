@@ -19,7 +19,8 @@ Re-meshing already generated samples with OTHER Poisson parameters without touch
         --out <run>/meshes_poisson_d8_pw4 --poisson-config configs/neuron-model/reconstruction/poisson_sweep/d8_pw4.yaml --workers 8
 
 copies every sample folder (point cloud, metadata) into ``--out/seed_<s>/`` and writes the new meshes there, so
-``evaluate_generators.py --model name=<out>`` reads it like any generated set.
+``evaluate_generators.py --model name=<out>`` reads it like any generated set. A conditional set (folder named by
+``generate_mogen.py --tag``) is taken with ``--set <folder name>`` instead of ``--seed``.
 """
 
 from __future__ import annotations
@@ -46,7 +47,9 @@ from src.neuron_model.spine_generation.reconstruction.screened_poisson import Po
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", type=Path, required=True, help="training run directory (same as generate_mogen.py --run)")
-    parser.add_argument("--seed", type=int, required=True, help="seed tag used by generate_mogen.py --seed")
+    parser.add_argument("--seed", type=int, help="seed tag used by generate_mogen.py --seed (sample folder seed_<s>)")
+    parser.add_argument("--set", dest="set_name", help="sample folder by name instead of seed_<s>, e.g. a conditional set "
+                        "cond_cell_type_binary-inhibitory_g1.25_seed_1_n500 (generate_mogen.py --tag); written under the same name in --out")
     parser.add_argument("--poisson-config", type=Path, default=REPO_ROOT / "configs/neuron-model/reconstruction/poisson.yaml")
     parser.add_argument("--check-self-intersections", action="store_true", help="off by default - CGAL subprocess per mesh is slow")
     parser.add_argument("--meshes-dir", type=Path, help="folder with seed_<s>/sample_* (default: the run's meshes folder)")
@@ -54,15 +57,18 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
 
+    if (args.seed is None) == (args.set_name is None):
+        parser.error("give exactly one of --seed and --set")
+    set_name = args.set_name or f"seed_{args.seed}"
     run = open_run(args.run)
-    src_seed_dir = (args.meshes_dir or run.meshes) / f"seed_{args.seed}"
+    src_seed_dir = (args.meshes_dir or run.meshes) / set_name
     rec_cfg = load_config(args.poisson_config)
     sample_dirs = sorted(src_seed_dir.glob("sample_*"), key=lambda p: int(p.name.split("_")[1]))
     if not sample_dirs:
         parser.error(f"no sample_* directories under {src_seed_dir} - run generate_mogen.py --no-mesh first")
     seed_dir = src_seed_dir
     if args.out is not None:
-        seed_dir = args.out / f"seed_{args.seed}"
+        seed_dir = args.out / set_name
         if seed_dir.resolve() == src_seed_dir.resolve():
             parser.error("--out must differ from the source meshes folder")
         for d in sample_dirs:
