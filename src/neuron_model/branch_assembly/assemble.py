@@ -292,6 +292,15 @@ def assemble_branch(trunk_record: Dict[str, Any], s: Sequence[float], theta: Seq
             areas = mesh.area_faces
             if not (areas < 1e-6).any():
                 break
+        # edge collapse pinches off new debris (chain Y, pw8 spine pool: 1153 of 1154 extra components were < 10000 nm^2,
+        # 6-16 faces, almost all at tolerance 5 nm) -> remove the slivers once more on the simplified mesh
+        union, after = drop_slivers(union, cfg.sliver_max_area_nm2)
+        branch["n_slivers_removed_after_simplify"] = after["n_slivers_removed"]
+        if after["n_slivers_removed"]:
+            branch["n_slivers_removed"] += after["n_slivers_removed"]
+            branch["sliver_area_removed_nm2"] += after["sliver_area_removed_nm2"]
+            verts, faces, mesh = export(union)
+            areas = mesh.area_faces
     n_flips = 0
     if (areas < 1e-6).any():
         # needles survive edge collapse: flip their longest edge (topology-preserving, keeps the surface closed)

@@ -123,9 +123,16 @@ def main() -> None:
         value, _, label = key.partition("@")
         label = label or "default"
         frame, info = load_set(value, label, Path(source), args.mesh_kind)
-        gen_sets[(value, label)] = frame
         infos[f"{value}@{label}"] = {**info, "n": int(len(frame))}
         print(f"[cond-report] {value}@{label}: {len(frame)} samples ({source})", flush=True)
+        if len(frame) == 0:
+            # an empty set would remove every metric from the tests (a metric must be measured in every set)
+            print(f"[cond-report] WARNING: {value}@{label} has no samples - left out of the report", flush=True)
+            infos[f"{value}@{label}"]["skipped"] = "no samples"
+            continue
+        gen_sets[(value, label)] = frame
+    if not gen_sets:
+        raise SystemExit("no generated set has samples")
 
     results = ct.run_conditional_tests(
         real, gen_sets, args.block, metrics=[m for m in SCALAR_METRICS if m in real.columns], min_spines=args.min_spines, n_permutations=args.n_permutations,

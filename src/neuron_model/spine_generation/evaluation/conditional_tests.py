@@ -884,6 +884,8 @@ def run_conditional_tests(real: pd.DataFrame, gen_sets: Dict[Tuple[str, str], pd
     against ``real`` (spines with ``neuron_id``, ``block`` column and the metrics). Returns a dict of tables / arrays."""
     metrics = list(metrics or [m for m in SCALAR_METRICS if m in real.columns])
     metrics = [m for m in metrics if all(m in g.columns and np.isfinite(g[m].to_numpy(float)).any() for g in gen_sets.values())]
+    if not metrics:
+        raise ValueError("no metric is measured in every generated set (an empty or unmeasured set?)")
     out: Dict[str, Any] = {"metrics": metrics, "block": block, "settings": {
         "min_spines": min_spines, "n_permutations": n_permutations, "n_boot": n_boot, "n_reference": n_reference, "n_reference_classifier": n_reference_classifier,
         "weighting": weighting, "only_valid": only_valid, "seed": seed, "tost_margin_sd": tost_margin_sd, "n_real_draw": n_real_draw}}

@@ -153,7 +153,12 @@ def main() -> None:
     for control, g in table.groupby("control"):
         print(f"{control:8s}: errors {g['error'].notna().sum()}/{len(g)}, valid raw {g.get('raw_valid', pd.Series(dtype=float)).mean():.2f}, "
               f"valid postprocessed {g.get('post_valid', pd.Series(dtype=float)).mean():.2f}, {g['seconds'].median():.1f} s/spine")
+        errors = g["error"].dropna()
+        for message, count in errors.str.slice(0, 300).value_counts().head(3).items():
+            print(f"    {count} x {message}")
     print(f"-> {out}")
+    if len(table) and table["error"].notna().all():
+        raise SystemExit("every job failed (messages above): no control was written")
 
 
 if __name__ == "__main__":
