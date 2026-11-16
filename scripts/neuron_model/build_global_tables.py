@@ -69,6 +69,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--spines", nargs="*", help="<dataset>=<stage-8 morphometrics table>")
     ap.add_argument("--branches", nargs="*", help="<dataset>=<branch preprocessing output root>")
+    ap.add_argument("--extra-branches", nargs="*", default=[], help="<dataset>=<root> ADDED to the branches of --from-run (e.g. labid)")
+    ap.add_argument("--extra-spines", nargs="*", default=[], help="<dataset>=<table> ADDED to the spines of --from-run")
     ap.add_argument("--compartment-table", nargs="*", help="<dataset>=<limb compartments parquet> instead of the default")
     ap.add_argument("--from-run", type=Path, help="earlier global-tables folder: take --spines / --branches / --compartment-table from its "
                     "run_info.json (arguments given explicitly win)")
@@ -108,6 +110,11 @@ def main() -> None:
         for arg, key in (("spines", "spines"), ("branches", "branches"), ("compartment_table", "compartment_tables")):
             if not getattr(args, arg) and prev.get(key):
                 setattr(args, arg, [f"{k}={v}" for k, v in prev[key].items()])
+    if args.extra_branches or args.extra_spines:
+        drop = lambda items, extra: [i for i in (items or []) if i.partition("=")[0] not in {e.partition("=")[0] for e in extra}]  # noqa: E731
+        args.branches = drop(args.branches, args.extra_branches) + list(args.extra_branches)
+        args.spines = drop(args.spines, args.extra_spines) + list(args.extra_spines)
+    if args.from_run is not None:
         print(f"from {args.from_run}: spines {args.spines}, branches {args.branches}, compartments {args.compartment_table}", flush=True)
     t0 = time.time()
     comp = _pairs(args.compartment_table)

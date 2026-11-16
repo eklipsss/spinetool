@@ -1,0 +1,20 @@
+# Confocal forward model (src/neuron_model/confocal_imaging.py, docs/neuron-model/confocal-imaging-model.md).
+# Units nm. Known: LabID voxel 25 x 25 x 100 nm (laboratory, 2026-10-28). UNKNOWN until the laboratory answers: objective NA,
+# excitation / emission wavelengths, immersion medium, pinhole, deconvolution, threshold of the surface software. The PSF
+# below is a placeholder of a high-NA oil objective (NA 1.4, n 1.515, ex 488 / em 520 nm -> confocal Gaussian approximation
+# sigma_xy ~ 55 nm, sigma_z ~ 180 nm; wide field ~ 78 / 260 nm); use make_real_controls.py --confocal-param to sweep.
+imaging:
+  voxel_nm: [25.0, 25.0, 100.0]
+  sigma_xy_nm: 90.0
+  sigma_z_nm: 270.0
+  threshold: 0.5
+  work_nm: 25.0
+  supersample: 2
+  noise_sd: 0.0
+  optical_axis_angle: null   # null = uniform random around the dendrite (optical axis perpendicular to the dendrite)
+  random_phase: true
+  keep: largest
+  trunk_radius_nm: 300.0     # spine imaged with a trunk cylinder (median Minnie65 radius ~290 nm); null = isolated spine
+  attached_max_gap_nm: 150.0 # the imaged spine starts higher above the trunk surface -> neck invisible, "detached head"
+postprocess:
+  min_component_area_fraction: 0.01

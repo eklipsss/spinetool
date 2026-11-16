@@ -149,6 +149,9 @@ class DirectionMultiScale:
     simulation_corrections: int = 3
     amplitude_within_neuron: bool = True
     n_simulated: int = 600
+    fit_target: str = "variogram"         # "functionals": then refit to the per-branch functional distributions (direction_functional.py)
+    functional_maxfev: int = 400
+    functional_n_branches: int = 800
 
     # ------------------------------------------------------------------ pieces
     @property
@@ -308,6 +311,14 @@ class DirectionMultiScale:
             "tilt_empirical": [tilt_data.get(h) for h in LAGS_NM], "tilt_generated": [sim_t.get(h) for h in LAGS_NM],
             "relative_rms_error_fitted_lags": float(np.sqrt(np.mean(np.square(errs)))) if errs else None}
         self.info["correction_history"] = history
+        if self.fit_target == "functionals":
+            from .direction_functional import fit_to_functionals
+
+            self.info["variogram_estimate"] = {"theta": list(self.theta), "amplitude": self.amplitude.to_dict() if self.amplitude else None}
+            self.info["functional_fit"] = fit_to_functionals(self, use, n_branches=self.functional_n_branches, maxfev=self.functional_maxfev, seed=seed,
+                                                             log=lambda text: print(text, flush=True))
+        elif self.fit_target != "variogram":
+            raise ValueError(f"unknown fit_target {self.fit_target!r} (variogram | functionals)")
         return self
 
     # -------------------------------------------------------------- generation
@@ -346,6 +357,7 @@ class DirectionMultiScale:
         return {"kind": self.kind, "sd_fast": self.sd_fast, "length_fast_nm": self.length_fast_nm, "noise_sd": self.noise_sd, "drive_std": self.drive_std,
                 "drive_length_nm": self.drive_length_nm, "restore_nm": self.restore_nm, "tilt_min_lag_nm": self.tilt_min_lag_nm,
                 "simulation_corrections": self.simulation_corrections, "amplitude_within_neuron": self.amplitude_within_neuron,
+                "fit_target": self.fit_target,
                 "amplitude": self.amplitude.to_dict() if self.amplitude else None, "groups": dict(self.groups), "info": self.info}
 
     @classmethod
@@ -354,7 +366,7 @@ class DirectionMultiScale:
         return cls(float(d["sd_fast"]), float(d["length_fast_nm"]), float(d.get("noise_sd", 0.0)), float(d["drive_std"]), float(d["drive_length_nm"]),
                    float(d["restore_nm"]), Amplitude.from_dict(amp) if amp else None, dict(d.get("info", {})),
                    tilt_min_lag_nm=float(d.get("tilt_min_lag_nm", 0.0)), simulation_corrections=int(d.get("simulation_corrections", 0)),
-                   amplitude_within_neuron=bool(d.get("amplitude_within_neuron", False)))
+                   amplitude_within_neuron=bool(d.get("amplitude_within_neuron", False)), fit_target=str(d.get("fit_target", "variogram")))
 
 
 def _pooled_amplitude(y, x, n, groups, names):

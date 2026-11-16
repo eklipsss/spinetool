@@ -46,8 +46,18 @@ from src.neuron_model.spine_generation.experiment.run import open_run
 
 
 def filter_rows(frame: pd.DataFrame, where, ap=None) -> pd.DataFrame:
-    """Rows whose ``COLUMN`` equals ``VALUE`` for every ``COLUMN=VALUE`` (string comparison)."""
+    """Rows whose ``COLUMN`` equals ``VALUE`` for every ``COLUMN=VALUE`` (string comparison), or matches the regular expression
+    for ``COLUMN~REGEX`` (e.g. ``neuron_id~^Wt_[0-9]`` = LabID group Wt without Wt_old / Wt+9009)."""
     for item in where:
+        if "~" in item and ("=" not in item or item.index("~") < item.index("=")):
+            column, _, pattern = item.partition("~")
+            if column not in frame.columns:
+                msg = f"--where {item!r}: no manifest column {column!r}"
+                if ap is not None:
+                    ap.error(msg)
+                raise ValueError(msg)
+            frame = frame[frame[column].astype(str).str.contains(pattern, regex=True)]
+            continue
         column, sep, value = item.partition("=")
         if not sep or column not in frame.columns:
             msg = f"--where {item!r}: expected COLUMN=VALUE with a manifest column (have e.g. {[c for c in frame.columns if 'cell' in c or 'compart' in c]})"
@@ -62,10 +72,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", type=Path, nargs="+", required=True)
     ap.add_argument("--path-mode", default="relative", choices=["relative", "absolute"])
-    ap.add_argument("--splits", type=Path, required=True, help="the split the evaluation will use (its test part)")
+    ap.add_argument("--splits", type=Path, help="the split the evaluation will use (its test part); omit = every spine of the manifest "
+                    "(e.g. LabID, which has no split)")
     ap.add_argument("--split", default="test")
-    ap.add_argument("--where", action="append", default=[], metavar="COLUMN=VALUE",
-                    help="keep only spines with this manifest value (repeatable), e.g. cell_type_binary=inhibitory or cell_type=4P: "
+    ap.add_argument("--where", action="append", default=[], metavar="COLUMN=VALUE|COLUMN~REGEX",
+                    help="keep only spines with this manifest value or matching this regex (repeatable), e.g. cell_type_binary=inhibitory or cell_type=4P: "
                          "the chain floor per condition for conditional_generation_report.py (manifest with metadata: manifest_minnie65_meta)")
     ap.add_argument("--metadata-root", type=Path, help="recompute cell_type / cell_type_binary / compartment for --where from the metadata "
                     "tables (datasets/); the full-Minnie65 manifest has cell_type empty")
@@ -78,23 +89,30 @@ def main() -> None:
     ap.add_argument("--resolution", type=int, default=128, help="mc grid resolution = that of the compared VAE generation")
     ap.add_argument("--poisson-config", type=Path, default=REPO_ROOT / "configs/neuron-model/reconstruction/poisson.yaml")
     ap.add_argument("--mc-config", type=Path, default=REPO_ROOT / "configs/neuron-model/reconstruction/marching_cubes.yaml")
+    ap.add_argument("--confocal-config", type=Path, default=REPO_ROOT / "configs/neuron-model/imaging/confocal.yaml",
+                    help="confocal control: imaging parameters (confocal_imaging.ConfocalParams) and postprocess")
+    ap.add_argument("--confocal-param", action="append", default=[], metavar="KEY=VALUE",
+                    help="override one imaging parameter, e.g. sigma_z_nm=400 or threshold=0.3 (repeatable)")
     ap.add_argument("--check-self-intersections", action="store_true", help="off by default (CGAL subprocess per mesh), as in the generation")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--out", type=Path, help="default runs/analysis/neuron-model/<date>_real-controls")
     args = ap.parse_args()
 
     index = load_spine_index(args.manifest, path_mode=args.path_mode, check_files=())
-    index = index.with_split(load_splits(args.splits), args.split, drop_unassigned=True)
+    if args.splits is not None:
+        index = index.with_split(load_splits(args.splits), args.split, drop_unassigned=True)
     frame = index.frame
+    if "group_id" not in frame.columns:
+        frame = frame.assign(group_id=frame["neuron_id"].astype(str))
     if args.where and args.metadata_root is not None:
         from src.neuron_model.spine_generation.conditioning import spine_conditions
 
         conditions = spine_conditions(frame, args.metadata_root.resolve())
         frame = frame.copy()
-        for column in {w.partition("=")[0] for w in args.where} & {"cell_type", "cell_type_binary", "compartment"}:
+        for column in {w.partition("=")[0] for w in args.where if "=" in w} & {"cell_type", "cell_type_binary", "compartment"}:
             frame[column] = conditions[column].to_numpy()
     frame = filter_rows(frame, args.where, ap)
-    print(f"{len(frame)} {args.split} spines of {frame['group_id'].nunique()} neurons in {args.splits.name}"
+    print(f"{len(frame)} {args.split if args.splits else 'all'} spines of {frame['group_id'].nunique()} neurons in {args.splits.name if args.splits else 'the manifest'}"
           + (f" with {' & '.join(args.where)}" if args.where else ""), flush=True)
     picks = assign_samples(frame["spine_key"].tolist(), n_per_seed=args.n_samples, seeds=args.seeds, base_seed=args.base_seed)
     by_key = frame.set_index("spine_key", drop=False)
@@ -107,6 +125,18 @@ def main() -> None:
         pc = load_config(args.poisson_config)
         kwargs["poisson"] = {"k_normal": int(pc["normals"]["k_normal"]), "poisson": dict(pc["poisson"]), "postprocess_cfg": dict(pc["postprocess"]),
                              "check_self_intersections": check}
+    if "confocal" in args.controls:
+        import yaml
+
+        from src.neuron_model.confocal_imaging import ConfocalParams
+
+        cc = load_config(args.confocal_config)
+        params = dict(cc.get("imaging", {}))
+        for item in args.confocal_param:
+            key, _, value = item.partition("=")
+            params[key] = yaml.safe_load(value)
+        kwargs["confocal"] = {"params": ConfocalParams.from_mapping(params).to_dict(), "postprocess_cfg": dict(cc.get("postprocess", {})),
+                              "check_self_intersections": check}
     if "mc" in args.controls:
         mc_path = args.mc_config
         if args.bbox:
@@ -130,7 +160,7 @@ def main() -> None:
                 spine = {c: (str(row[c]) if c in row and pd.notna(row[c]) else None) for c in ("spine_key", "local_sealed_mesh_path", "pointcloud_8192_path")}
                 jobs.append({"control": control, "seed": seed, "spine": spine, "kwargs": kwargs[control],
                              "sample_dir": str(out / control / f"seed_{seed}" / f"sample_{i:05d}")})
-    write_json(out / "controls_config.json", {"splits": str(args.splits), "split": args.split, "where": args.where, "n_samples": args.n_samples, "seeds": args.seeds,
+    write_json(out / "controls_config.json", {"splits": str(args.splits) if args.splits else None, "split": args.split, "where": args.where, "n_samples": args.n_samples, "seeds": args.seeds,
                                              "base_seed": args.base_seed, "controls": {c: kwargs[c] for c in args.controls},
                                              "n_test_spines": int(len(frame)), "n_test_neurons": int(frame["group_id"].nunique())})
     print(f"{len(jobs)} jobs ({', '.join(args.controls)} x seeds {args.seeds} x {args.n_samples}) -> {out}", flush=True)

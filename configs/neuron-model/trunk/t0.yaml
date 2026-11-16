@@ -19,9 +19,12 @@ model:
   shrinkage_std: 0.3
   direction_options:               # 2026-11-15, DirectionMultiScale fit (direction_ms.py docstring)
     tilt_min_lag_nm: 2000.0        # tilt semivariogram only from this lag (short lags: the tangent inflates the real increments, left to the bending curve)
-    simulation_corrections: 3      # refits with the curves corrected by simulating the training branches (the linear curves were not the generated ones); 0 = old fit
+    simulation_corrections: 0      # refits with the curves corrected by simulating the training branches (chain Y: 3 corrections, 3 h, per-branch functionals not better); 0 = linear fit, only the start of the functional fit
     amplitude_within_neuron: true  # radius slope and compartment offsets of the bending amplitude from branches of the same neuron
     n_simulated: 600
+    fit_target: functionals        # 2026-11-17: refit to the per-branch distributions of kappa rms, tortuosity, kappa autocorrelation (quantiles per length x radius stratum, direction_functional.py); variogram = the semivariogram fit only
+    functional_maxfev: 400         # Nelder-Mead evaluations (each simulates functional_n_branches chains)
+    functional_n_branches: 800
   direction: multiscale            # multiscale: smooth Gaussian wiggle of the heading + slow turning relaxing to the axis; tilt: the slow part alone; kappa: OU on the bending (old, tortuosity grows with L)
   radius_residual: multiscale      # multiscale: two AR(1) scales + noise fitted to the semivariogram, amplitude = random effect of the branch (default since 2026-10-28; full-data diagnose_radius.py: one scale lost the 0.5-8 um variation); branch: ONE AR(1) with the branch amplitude; pooled: the joint OU (old)
   use_soma_distance: true          # the design of the mean radius profile gets log(1 + soma distance of the branch midpoint), its unknown-indicator and the terminal flag (2026-10-29: distal branches are thin and spine-free, T0 without it gave every branch a typical radius)

@@ -12,7 +12,10 @@ distribution distance can separate "real" from "generated" even for a perfect ge
 - ``poisson``: real 8192-point surface cloud (preprocessing, variant 1) -> estimated normals -> Screened Poisson -> postprocess,
   with the frozen parameters of ``reconstruction/poisson.yaml`` = exactly the MoGen chain -> MoGen floor;
 - ``mc``: exact SDF of the real mesh on the frozen-bbox grid (resolution of the VAE generation) -> Marching Cubes ->
-  postprocess = the VAE chain with a perfect decoder -> VAE floor.
+  postprocess = the VAE chain with a perfect decoder -> VAE floor;
+- ``confocal``: the real mesh as a confocal microscope would show it (``src/neuron_model/confocal_imaging.py``: fill, PSF blur,
+  confocal voxels, threshold, Marching Cubes) -> the EM spine in the imaging domain of LabID (not a generator floor: the
+  imaging model of the domain shift, docs/neuron-model/confocal-imaging-model.md).
 
 The outputs use the generator layout (``<root>/<control>/seed_<s>/sample_<i>/generated_mesh_{raw,postprocessed}.off`` +
 ``mesh_validation_*.json``), so ``evaluate_generators.py --model real_poisson=<root>/poisson`` evaluates them with the very
@@ -27,7 +30,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
-CONTROLS = ("asis", "poisson", "mc")
+CONTROLS = ("asis", "poisson", "mc", "confocal")
 
 
 def _reports(raw, *, postprocess_cfg: Optional[Mapping[str, Any]], bbox, check_self_intersections: bool) -> Dict[str, Any]:
@@ -105,6 +108,23 @@ def control_mc(spine: Mapping[str, Any], *, bbox_low: Sequence[float], bbox_high
                     check_self_intersections=check_self_intersections)
 
 
+def control_confocal(spine: Mapping[str, Any], *, params: Mapping[str, Any], seed: int = 0, postprocess_cfg=None,
+                     check_self_intersections: bool = False) -> Dict[str, Any]:
+    """The real ``local_sealed`` mesh imaged by the confocal forward model; random optical-axis angle and sampling phase per
+    spine (stable: seeded by the spine key and the seed). Not detected (invisible at this threshold) -> no mesh."""
+    import trimesh
+
+    from ...confocal_imaging import ConfocalParams, image_mesh, spine_seed
+    from ...spine_geometry import load_trimesh
+
+    mesh = load_trimesh(spine["local_sealed_mesh_path"], process=False)
+    out = image_mesh(mesh.vertices, mesh.faces, ConfocalParams.from_mapping(dict(params)), np.random.default_rng(spine_seed(spine["spine_key"], seed)))
+    raw = trimesh.Trimesh(out["vertices"], out["faces"], process=False) if out["detected"] else None
+    result = _reports(raw, postprocess_cfg=postprocess_cfg, bbox=None, check_self_intersections=check_self_intersections)
+    result["validation_raw"]["confocal"] = {**out["info"], "detected": bool(out["detected"])}
+    return result
+
+
 def run_control(job: Mapping[str, Any]) -> Dict[str, Any]:
     """One (control, spine) job -> files in the generator layout; returns a status row. Never raises (a failure is a row)."""
     from ..experiment.artifacts import write_json, write_mesh_off
@@ -119,6 +139,8 @@ def run_control(job: Mapping[str, Any]) -> Dict[str, Any]:
             result = control_poisson(spine, **job["kwargs"])
         elif control == "mc":
             result = control_mc(spine, **job["kwargs"])
+        elif control == "confocal":
+            result = control_confocal(spine, seed=int(job["seed"]), **job["kwargs"])
         else:
             raise ValueError(f"unknown control {control!r}")
         out_dir.mkdir(parents=True, exist_ok=True)
