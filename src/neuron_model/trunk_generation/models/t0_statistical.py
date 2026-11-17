@@ -551,7 +551,9 @@ class T0Model:
         theta0[6], theta0[7], theta0[8] = chol0[1, 0], chol0[2, 0], chol0[2, 1]
         theta0[9], theta0[10] = z[:, 0].mean(), z[:, 1].mean()
         pooled = theta0.clone().requires_grad_(True)
-        delta = torch.zeros(len(names), N_PARAMS, dtype=torch.float64, requires_grad=True)
+        # at least one row: with no group of >= min_group branches delta[group_of.clamp_min(0)] still indexes row 0 (masked
+        # out by torch.where, it stays 0 under the shrinkage prior); an empty tensor raised IndexError
+        delta = torch.zeros(max(len(names), 1), N_PARAMS, dtype=torch.float64, requires_grad=True)
         n_total = float(mask.sum())
 
         def branch_theta():

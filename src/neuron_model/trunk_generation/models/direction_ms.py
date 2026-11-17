@@ -152,11 +152,22 @@ class DirectionMultiScale:
     fit_target: str = "variogram"         # "functionals": then refit to the per-branch functional distributions (direction_functional.py)
     functional_maxfev: int = 400
     functional_n_branches: int = 800
+    # Radius dependence of the Gaussian wiggle scale: l_w(r) = l_w (r / 300 nm)^gamma (2026-11-17). Chain AA: the real kappa
+    # autocorrelation at 1 um rises with the radius (thin 0.16-0.29, thick 0.52-0.60) while the model's memory scale was
+    # shared; the centre line is smoothed with a width ~2 r (branch preprocessing), so the correlation length of the
+    # bending is expected to grow with r. gamma = 0 is the previous model (old files); it is fitted only in the functional
+    # fit (``functional_fit_length_radius``), the semivariogram stage keeps gamma = 0.
+    length_fast_radius_exponent: float = 0.0
+    functional_fit_length_radius: bool = False
 
     # ------------------------------------------------------------------ pieces
     @property
     def theta(self) -> List[float]:
         return [self.sd_fast, self.length_fast_nm, self.drive_std, self.drive_length_nm, self.restore_nm, self.noise_sd]
+
+    def length_fast_at(self, radius_nm: Optional[float]) -> float:
+        """Gaussian wiggle scale of a branch of median radius ``radius_nm`` (the shared scale when unknown or gamma = 0)."""
+        return length_fast_for(self.length_fast_nm, self.length_fast_radius_exponent, radius_nm)
 
     @property
     def groups(self) -> Dict[str, float]:
@@ -282,6 +293,7 @@ class DirectionMultiScale:
         kappa_data = kappa_variogram([b.kappa1 for b in use], [b.kappa2 for b in use], steps)
         tilt_data = tilt_variogram(tilts, steps, lengths)
         tilt_fit = {h: (v if h >= self.tilt_min_lag_nm else None) for h, v in tilt_data.items()}
+        self.length_fast_radius_exponent = 0.0  # the semivariogram stage has a shared scale; the functional fit may free it
         self.info = {"n_branches": len(use), "tilt_min_lag_nm": self.tilt_min_lag_nm, "simulation_corrections": int(self.simulation_corrections)}
         rng = np.random.default_rng(seed + 7)
         sim_set = [use[i] for i in rng.choice(len(use), size=min(self.n_simulated, len(use)), replace=False)]
@@ -316,14 +328,15 @@ class DirectionMultiScale:
 
             self.info["variogram_estimate"] = {"theta": list(self.theta), "amplitude": self.amplitude.to_dict() if self.amplitude else None}
             self.info["functional_fit"] = fit_to_functionals(self, use, n_branches=self.functional_n_branches, maxfev=self.functional_maxfev, seed=seed,
+                                                             fit_length_radius=self.functional_fit_length_radius,
                                                              log=lambda text: print(text, flush=True))
         elif self.fit_target != "variogram":
             raise ValueError(f"unknown fit_target {self.fit_target!r} (variogram | functionals)")
         return self
 
     # -------------------------------------------------------------- generation
-    def sample_tilt(self, n_nodes: int, step: float, m: float, rng: np.random.Generator) -> np.ndarray:
-        """[n_nodes, 2] tilt: slow part (burn-in from the stationary regime) + the smooth Gaussian wiggle."""
+    def sample_tilt(self, n_nodes: int, step: float, m: float, rng: np.random.Generator, radius_nm: Optional[float] = None) -> np.ndarray:
+        """[n_nodes, 2] tilt: slow part (burn-in from the stationary regime) + the smooth Gaussian wiggle (its scale from the radius)."""
         a = math.exp(-step / self.restore_nm)
         phi = math.exp(-step / self.drive_length_nm)
         s_b = self.drive_std * m
@@ -336,7 +349,8 @@ class DirectionMultiScale:
         for j in range(total - 1):
             tilt[j + 1] = a * tilt[j] + step * g
             g = phi * g + eps[j]
-        fast = np.column_stack([_gauss_process(n_nodes, step, self.sd_fast * m, self.length_fast_nm, rng) for _ in range(2)])
+        l_w = self.length_fast_at(radius_nm)
+        fast = np.column_stack([_gauss_process(n_nodes, step, self.sd_fast * m, l_w, rng) for _ in range(2)])
         return tilt[burn:] + fast + rng.normal(0.0, self.noise_sd * m, (n_nodes, 2))
 
     def sample_bending(self, n_nodes: int, step: float, group: str, rng: np.random.Generator, radius_nm: Optional[float] = None,
@@ -347,7 +361,7 @@ class DirectionMultiScale:
             m = math.exp(amp.mean_log(group, radius_nm) + amp.tau * rng.standard_normal())
         else:
             m = float(amplitude)
-        tilt = self.sample_tilt(n_nodes, step, m, rng)
+        tilt = self.sample_tilt(n_nodes, step, m, rng, radius_nm=radius_nm)
         t = np.column_stack([tilt, np.ones(len(tilt))])
         t /= np.linalg.norm(t, axis=1, keepdims=True)
         return bending_from_tangents(t, step)
@@ -357,8 +371,9 @@ class DirectionMultiScale:
         return {"kind": self.kind, "sd_fast": self.sd_fast, "length_fast_nm": self.length_fast_nm, "noise_sd": self.noise_sd, "drive_std": self.drive_std,
                 "drive_length_nm": self.drive_length_nm, "restore_nm": self.restore_nm, "tilt_min_lag_nm": self.tilt_min_lag_nm,
                 "simulation_corrections": self.simulation_corrections, "amplitude_within_neuron": self.amplitude_within_neuron,
-                "fit_target": self.fit_target,
-                "amplitude": self.amplitude.to_dict() if self.amplitude else None, "groups": dict(self.groups), "info": self.info}
+                "fit_target": self.fit_target, "length_fast_radius_exponent": self.length_fast_radius_exponent,
+                "functional_fit_length_radius": self.functional_fit_length_radius,
+                "amplitude":self.amplitude.to_dict() if self.amplitude else None, "groups": dict(self.groups), "info": self.info}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DirectionMultiScale":
@@ -366,7 +381,19 @@ class DirectionMultiScale:
         return cls(float(d["sd_fast"]), float(d["length_fast_nm"]), float(d.get("noise_sd", 0.0)), float(d["drive_std"]), float(d["drive_length_nm"]),
                    float(d["restore_nm"]), Amplitude.from_dict(amp) if amp else None, dict(d.get("info", {})),
                    tilt_min_lag_nm=float(d.get("tilt_min_lag_nm", 0.0)), simulation_corrections=int(d.get("simulation_corrections", 0)),
-                   amplitude_within_neuron=bool(d.get("amplitude_within_neuron", False)), fit_target=str(d.get("fit_target", "variogram")))
+                   amplitude_within_neuron=bool(d.get("amplitude_within_neuron", False)), fit_target=str(d.get("fit_target", "variogram")),
+                   length_fast_radius_exponent=float(d.get("length_fast_radius_exponent", 0.0)),
+                   functional_fit_length_radius=bool(d.get("functional_fit_length_radius", False)))
+
+
+LENGTH_FAST_BOUNDS_NM = (50.0, 20000.0)
+
+
+def length_fast_for(length_nm: float, exponent: float, radius_nm: Optional[float]) -> float:
+    """l_w (r / R_REF)^gamma, clipped to a sane range; the shared scale when the radius is unknown or gamma = 0."""
+    if not exponent or radius_nm is None or not np.isfinite(radius_nm) or radius_nm <= 0:
+        return float(length_nm)
+    return float(np.clip(length_nm * (float(radius_nm) / R_REF_NM) ** float(exponent), *LENGTH_FAST_BOUNDS_NM))
 
 
 def _pooled_amplitude(y, x, n, groups, names):

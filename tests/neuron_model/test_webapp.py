@@ -22,40 +22,47 @@ from src.neuron_model.trunk_generation.constraints import TrunkLimits
 from src.neuron_model.trunk_generation.models.t0_statistical import T0Branch, T0Model
 from src.neuron_model.webapp import BranchGenerator, ModelBundle, RequestError, build_bundle
 from src.neuron_model.webapp import export, metrics
-from src.neuron_model.webapp.bundle import SpineLibrary, library_key_chain
+from src.neuron_model.webapp.bundle import SpineLibrary, available_cell_types, library_key_chain, library_key_parts
 
 GROUP = ("mouse", "excitatory", "apical")
+# trained condition groups of the synthetic bundle (one model for both species, interneurons with inhibitory_dendrite)
+# and the detailed cell type of each (Minnie65 types for mouse, H01 types for human)
+GROUPS = [GROUP, ("mouse", "inhibitory", "inhibitory_dendrite"), ("human", "excitatory", "apical")]
+SUBTYPE = {GROUP: "23P", GROUPS[1]: "BPC", GROUPS[2]: "PYRAMIDAL"}
 
 
-def _t0_branches(rng, n=60):
-    """Straight-ish trunks with a parabolic radius profile (as in test_t0._simulate, one group)."""
+def _t0_branches(rng, n=90):
+    """Straight-ish trunks with a parabolic radius profile (as in test_t0._simulate), the groups of ``GROUPS`` in turn."""
     enc = DesignEncoder.fit([6000.0, 30000.0])
     out = []
-    for _ in range(n):
+    for i in range(n):
+        group = GROUPS[i % len(GROUPS)]
         length = float(np.exp(rng.uniform(math.log(6000.0), math.log(30000.0))))
         m = max(int(math.ceil(length / 500.0)) + 1, 6)
         step = length / (m - 1)
         u = np.arange(m) / (m - 1)
         r_l = rng.uniform(220.0, 320.0)
         log_r = np.log(r_l * (1 - (1 - u) ** 2) + 1.3 * r_l * (1 - u) ** 2) + rng.normal(0, 0.03, m)
-        out.append(T0Branch(rng.normal(0, 3e-5, m - 1), rng.normal(0, 3e-5, m - 1), log_r, step, enc.row(*GROUP, length), group_key(*GROUP)))
+        out.append(T0Branch(rng.normal(0, 3e-5, m - 1), rng.normal(0, 3e-5, m - 1), log_r, step, enc.row(*group, length), group_key(*group)))
     return out, enc
 
 
 def _p0(rng):
     cov, pos = [], []
-    for i in range(120):
+    for i in range(180):
         length = float(rng.uniform(5000, 40000))
         radius = float(rng.uniform(200, 350))
-        c = BranchCovariates(f"n{i // 6}", -1, length, 2 * np.pi * radius * length, radius, float(rng.uniform(5000, 150000)), 1.05, bool(i % 3 == 0), *GROUP)
+        group = GROUPS[(i // 6) % len(GROUPS)]  # one neuron = 6 branches of one group, 10 neurons per detailed type
+        c = BranchCovariates(f"n{i // 6}", -1, length, 2 * np.pi * radius * length, radius, float(rng.uniform(5000, 150000)), 1.05, bool(i % 3 == 0),
+                             *group, cell_type=SUBTYPE[group])
         c.n_spines = int(rng.poisson(0.8 * length / 1000.0))
         cov.append(c)
         s = np.linspace(0, length, int(length / 500) + 1)
         b = PositionBranch(s, np.full(len(s), radius), np.full(len(s), 1e-4), c.soma_distance_nm)
         b.positions = np.sort(rng.uniform(0, length, c.n_spines))
         pos.append(b)
-    design = CountDesign().fit(cov)
-    count = CountModel("poisson", random_effect=False).fit(build_count_data(design, cov, "length"), max_iter=60)
+    design = CountDesign(subtypes=True).fit(cov)
+    count = CountModel("poisson", random_effect=False, subtype_prior_sd=0.5).fit(build_count_data(design, cov, "length"), max_iter=60)
     position = PositionModel(use=()).fit(pos)
     return {"design": design.to_dict(), "count_model": count.to_dict(), "position_model": position.to_dict(), "d_min_nm": 200.0}
 
@@ -102,12 +109,12 @@ def bundle_dir(tmp_path_factory):
     t0_run.mkdir()
     p0_run.mkdir()
     branches, enc = _t0_branches(rng)
-    T0Model("parabola", direction="kappa", radius_residual="pooled").fit(branches, encoder=enc, max_iter=30).save(t0_run / "t0_parabola.json")
+    T0Model("parabola", direction="kappa", radius_residual="pooled").fit(branches, encoder=enc, max_iter=30, min_group=20).save(t0_run / "t0_parabola.json")
     (t0_run / "limits.json").write_text(json.dumps(TrunkLimits().to_dict()))
     (t0_run / "report.json").write_text(json.dumps({"chosen": "parabola"}))
     (p0_run / "p0_bundle.json").write_text(json.dumps(_p0(rng)))
     spines = {"any": _write_spines(tmp / "spines_any", [(60, 600, 200), (70, 500, 180)]),
-              "mouse/excitatory/BPC": _write_spines(tmp / "spines_bpc", [(50, 700, 220)])}
+              "mouse/inhibitory/BPC": _write_spines(tmp / "spines_bpc", [(50, 700, 220)])}
     return build_bundle(tmp / "bundles", t0_run=t0_run, p0_run=p0_run, spines=spines, bundle_id="test", compute_morphometrics=False,
                         branches_reference=_branches_table(rng), limits={"max_length_nm": 20000.0}, log=lambda *_: None)
 
@@ -125,10 +132,12 @@ def test_bundle_round_trip(bundle_dir):
     b = ModelBundle.load(bundle_dir)
     man = b.manifest
     assert man["bundle_id"] == "test" and man["units"] == "nm"
-    assert man["categories"]["species"] == ["mouse"] and man["categories"]["spine_cell_type"] == ["BPC"]
-    assert man["spine_cell_type_binary"] == {"BPC": "excitatory"}
+    assert man["categories"]["species"] == ["mouse", "human"] and man["categories"]["cell_type_binary"] == ["excitatory", "inhibitory"]
+    assert man["categories"]["compartment"] == ["apical", "inhibitory_dendrite"]
     assert man["spine_library"]["any"]["n_spines"] == 2 and man["spine_library"]["any"]["n_rejected"] == 1
-    assert man["limits"]["max_length_nm"] == 20000.0 and man["trained_groups"] == ["mouse|excitatory|apical"]
+    assert man["limits"]["max_length_nm"] == 20000.0
+    assert sorted(man["trained_groups"]) == sorted(group_key(*g) for g in GROUPS)
+    assert man["models"]["p0"]["detailed_types"] == ["23P", "BPC", "PYRAMIDAL"]
     lib = b.library("any")
     assert len(lib) == 2 and np.isfinite(lib.base_radius_nm).all()
     # attachment centre of the synthetic spine: the flat base at y = -20 on the axis
@@ -141,8 +150,51 @@ def test_bundle_round_trip(bundle_dir):
 
 
 def test_library_key_chain():
-    assert library_key_chain("mouse", "excitatory", "BPC") == ["mouse/excitatory/BPC", "mouse/excitatory", "mouse", "any"]
+    assert library_key_chain("mouse", "inhibitory", "BPC") == ["mouse/inhibitory/BPC", "mouse/inhibitory", "mouse", "any"]
     assert library_key_chain("mouse", "excitatory", None) == ["mouse/excitatory", "mouse", "any"]
+
+
+def test_library_key_checks_the_detailed_type():
+    assert library_key_parts("human/excitatory/PYRAMIDAL")["cell_type"] == "PYRAMIDAL"
+    for bad in ("mouse/excitatory/BPC", "mouse/excitatory/PYRAMIDAL", "human/inhibitory/BC"):
+        with pytest.raises(ValueError):
+            library_key_parts(bad)
+
+
+def test_detailed_types_depend_on_the_species(generator):
+    types = generator.bundle.manifest["cell_types"]
+    as_tuples = {s: [(e["value"], e["cell_type_binary"], e["count_model"], e["spine_library"]) for e in v] for s, v in types.items()}
+    assert as_tuples == {"mouse": [("23P", "excitatory", True, False), ("BPC", "inhibitory", True, True)],
+                         "human": [("PYRAMIDAL", "excitatory", True, False)]}
+    # species not offered by the bundle and unknown detailed types are left out
+    cats = {"species": ["mouse"], "cell_type_binary": ["excitatory", "inhibitory"]}
+    assert available_cell_types(cats, ["any"], ["23P", "PYRAMIDAL", "Unknown-X"]) == {"mouse": [
+        {"value": "23P", "cell_type_binary": "excitatory", "count_model": True, "spine_library": False}]}
+
+
+def test_detailed_type_is_validated_against_species_and_binary_type(generator):
+    human = {**REQUEST, "species": "human"}
+    assert generator.normalize({**human, "cell_type": "PYRAMIDAL"})["cell_type"] == "PYRAMIDAL"
+    for bad in ({**REQUEST, "cell_type": "PYRAMIDAL"}, {**human, "cell_type": "23P"}, {**REQUEST, "cell_type": "BPC"},
+                {**REQUEST, "compartment": "inhibitory_dendrite"}):
+        with pytest.raises(RequestError) as err:
+            generator.normalize(bad)
+        assert {e["field"] for e in err.value.errors} & {"cell_type", "compartment"}
+    # the field had another name before 2026-11-17: old request.json files still work
+    assert generator.normalize({**REQUEST, "spine_cell_type": "23P"})["cell_type"] == "23P"
+
+
+def test_detailed_type_reaches_the_count_model(generator, monkeypatch):
+    from src.neuron_model.webapp import engine
+
+    seen = []
+    real = engine.build_count_data
+    monkeypatch.setattr(engine, "build_count_data", lambda design, cov, exposure: seen.append(cov) or real(design, cov, exposure))
+    res = generator.generate({**REQUEST, "species": "human", "cell_type": "PYRAMIDAL"})
+    assert seen[-1][0].cell_type == "PYRAMIDAL" and seen[-1][0].species == "human"
+    design = generator.bundle.p0["design"]
+    assert design.subtype_matrix(seen[-1])[0].tolist() == [0.0, 0.0, 1.0]
+    assert any("нет своей библиотеки шипиков" in w for w in res.warnings) and res.library["used_key"] == "any"
 
 
 def test_generation_is_deterministic_for_a_seed(generator):
@@ -168,9 +220,12 @@ def test_generated_branch_is_consistent(generator):
 
 def test_request_validation_collects_every_error(generator):
     with pytest.raises(RequestError) as err:
-        generator.generate({**REQUEST, "species": "rat", "length_nm": 1e9, "seed": -1, "spine_cell_type": "XYZ", "colour": "red"})
+        generator.generate({**REQUEST, "length_nm": 1e9, "seed": -1, "cell_type": "XYZ", "colour": "red"})
     fields = {e["field"] for e in err.value.errors}
-    assert {"species", "length_nm", "seed", "spine_cell_type", "colour"} <= fields
+    assert {"length_nm", "seed", "cell_type", "colour"} <= fields
+    with pytest.raises(RequestError) as err:
+        generator.generate({**REQUEST, "species": "rat"})
+    assert {e["field"] for e in err.value.errors} == {"species"}
     with pytest.raises(RequestError):
         generator.generate({**REQUEST, "is_terminal": "maybe"})
     with pytest.raises(RequestError):
@@ -183,9 +238,11 @@ def test_library_fallback_is_reported(generator):
     res = generator.generate(REQUEST)
     assert res.library["used_key"] == "any" and res.library["fallback"] and res.library["requested_keys"][0] == "mouse/excitatory"
     assert any("библиотеки шипиков" in w for w in res.warnings)
-    exact = generator.generate({**REQUEST, "spine_cell_type": "BPC"})
-    assert exact.library["used_key"] == "mouse/excitatory/BPC" and not exact.library["fallback"]
-    assert {r["library_key"] for r in exact.metrics["spines"] if r["status"] == "placed"} <= {"mouse/excitatory/BPC"}
+    inhibitory = {**REQUEST, "cell_type_binary": "inhibitory", "compartment": "inhibitory_dendrite", "cell_type": "BPC"}
+    exact = generator.generate(inhibitory)
+    assert exact.library["used_key"] == "mouse/inhibitory/BPC" and not exact.library["fallback"]
+    assert {r["library_key"] for r in exact.metrics["spines"] if r["status"] == "placed"} <= {"mouse/inhibitory/BPC"}
+    assert not any("отдельной группой" in w for w in exact.warnings)  # inhibitory_dendrite is a trained T0 group
 
 
 def test_metrics_keys_and_units(generator):
@@ -262,6 +319,9 @@ def test_server_endpoints(bundle_dir):
     assert client.get("/api/health").json()["status"] == "ok"
     opts = client.get("/api/options").json()
     assert opts["bundle"]["bundle_id"] == "test" and "species" in opts["categories"]
+    assert [e["value"] for e in opts["cell_types"]["human"]] == ["PYRAMIDAL"]
+    assert [e["value"] for e in client.get("/api/cell-types", params={"species": "mouse"}).json()["cell_types"]] == ["23P", "BPC"]
+    assert client.get("/api/cell-types", params={"species": "rat"}).status_code == 422
     bad = client.post("/api/generate", json={**REQUEST, "species": "rat"})
     assert bad.status_code == 422 and bad.json()["errors"][0]["field"] == "species"
     r = client.post("/api/generate", json=REQUEST).json()

@@ -1,21 +1,26 @@
 """Build the model bundle of the web application (docs/neuron-model/webapp-architecture.md): one self-contained folder.
 
-Windows (CPU; the spine morphometrics take ~0.5 s per spine - a library of a few thousand spines is under an hour):
+Windows (CPU; the spine morphometrics take ~0.5 s per spine - a library of a few thousand spines is under an hour). Step-by-step
+guide with the current run folders: docs/neuron-model/webapp-windows-deployment.md.
 
     python scripts/neuron_model/build_webapp_bundle.py \
-        --t0-run runs/training/neuron-model/<id>_t0 --p0-run runs/training/neuron-model/<id>_p0 \
-        --spines any=runs/training/neuron-model/<mogen_run>/meshes/cond_cell_type_binary-excitatory_g2_seed_1 \
-        --spines mouse/excitatory=runs/training/neuron-model/<mogen_run>/meshes/cond_cell_type_binary-excitatory_g2_seed_1 \
-        --spines mouse/inhibitory=runs/training/neuron-model/<mogen_run>/meshes/cond_cell_type_binary-inhibitory_g2_seed_1 \
+        --t0-run runs/training/neuron-model/<id>_t0 --p0-run runs/training/neuron-model/<id>_p1 --p0-bundle p1b2_bundle.json \
+        --spines any=runs/training/neuron-model/<mogen_run>/meshes_poisson_d8_pw8/cond_cell_type_binary-excitatory_g1.25_seed_1_n500 \
+        --spines mouse/excitatory=.../cond_cell_type_binary-excitatory_g1.25_seed_1_n500 \
+        --spines mouse/inhibitory=.../cond_cell_type_binary-inhibitory_g1.25_seed_1_n500 \
+        --spines mouse/inhibitory/BPC=.../cond_cell_type-BPC_g1.5_seed_1 \
         --context-spines C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches/branch_spines.parquet \
         --branches-reference C:/Users/Student/LipsEkaterina/data/minnie65/preprocessed_branches/branches.parquet \
         --max-spines-per-key 500
 
 ``--spines KEY=FOLDER`` (repeatable): spine meshes in the local spine frame (``**/generated_mesh_postprocessed.off`` of the
 generators, else any *.off / *.ply / *.obj). Keys: ``any`` (required, the last fallback), ``<species>``,
-``<species>/<cell_type_binary>``, ``<species>/<cell_type_binary>/<detailed cell type>`` (e.g. ``mouse/excitatory/BPC``).
+``<species>/<cell_type_binary>``, ``<species>/<cell_type_binary>/<detailed cell type>`` (e.g. ``mouse/inhibitory/BPC``,
+``human/excitatory/PYRAMIDAL``; a detailed type must match its species and binary type). The detailed types offered on the
+page for a species are those of the P0 count design (``subtype_*`` columns) plus those with a library key of their own.
 ``--context-spines``: REAL spines of the branch preprocessing -> the pool spine is matched to the trunk radius (default:
-uniform choice). ``--branches-reference``: real branches -> quantiles per condition for the comparison tab.
+uniform choice). ``--branches-reference``: real branches -> quantiles per condition for the comparison tab. Both take
+several files (Minnie65 and H01 preprocessing), they are concatenated.
 Writes ``models/webapp/<bundle-id>/`` (git-ignored); copy the folder to the serving machine.
 """
 
@@ -53,10 +58,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--t0-run", type=Path, required=True)
     parser.add_argument("--t0-model", default=None, help="parabola / gam / parabola_mix (default: the one chosen in report.json)")
-    parser.add_argument("--p0-run", type=Path, required=True)
+    parser.add_argument("--p0-run", type=Path, required=True, help="P0 run, or a P1 run (fit_p1.py) built on it")
+    parser.add_argument("--p0-bundle", default="p0_bundle.json",
+                        help="bundle file inside --p0-run (P1 runs: p0_bundle.json = the chosen model, or p1b2_bundle.json / p1b_bundle.json / p1a_bundle.json)")
     parser.add_argument("--spines", type=_key_value, action="append", required=True, metavar="KEY=FOLDER")
-    parser.add_argument("--context-spines", type=Path, default=None, help="branch_spines.parquet of REAL spines (base size given the trunk radius)")
-    parser.add_argument("--branches-reference", type=Path, default=None, help="branches.parquet (or its folder) of the branch preprocessing")
+    parser.add_argument("--context-spines", type=Path, nargs="+", default=None, help="branch_spines.parquet of REAL spines (base size given the trunk radius)")
+    parser.add_argument("--branches-reference", type=Path, nargs="+", default=None, help="branches.parquet (or its folder) of the branch preprocessing")
     parser.add_argument("--assembly-config", type=Path, default=REPO_ROOT / "configs/neuron-model/assembly/default.yaml")
     parser.add_argument("--max-spines-per-key", type=int, default=0, help="at most this many meshes per library key (0 = all)")
     parser.add_argument("--no-morphometrics", action="store_true", help="do not precompute the spine morphometrics (CGAL; ~0.5 s per spine)")
@@ -71,7 +78,9 @@ def main() -> None:
     if len(spines) != len(args.spines):
         parser.error("a --spines key is given twice")
     raw = load_config(args.assembly_config, []) if args.assembly_config.exists() else {}
-    root = build_bundle(args.out_root, t0_run=args.t0_run, p0_run=args.p0_run, spines=spines, bundle_id=args.bundle_id, t0_model=args.t0_model,
+    if not (args.p0_run / args.p0_bundle).exists():
+        parser.error(f"no {args.p0_bundle} in {args.p0_run}")
+    root = build_bundle(args.out_root, t0_run=args.t0_run, p0_run=args.p0_run, p0_bundle=args.p0_bundle, spines=spines, bundle_id=args.bundle_id, t0_model=args.t0_model,
                         context_spines=args.context_spines, branches_reference=args.branches_reference, assembly=raw.get("assembly", raw),
                         compute_morphometrics=not args.no_morphometrics, max_spines_per_key=args.max_spines_per_key,
                         limits={"max_length_nm": args.max_length_um * 1000.0, "max_spines": args.max_spines}, all_categories=args.all_categories)

@@ -82,7 +82,7 @@ def main() -> None:
         q = result["report"]["direction"]
         a = q.get("amplitude") or {}
         vf = q.get("info", {}).get("variogram_fit", {})
-        print(f"[t0] direction (multiscale): fast wiggle sd {q['sd_fast']:.3g} (tilt), Gaussian scale {q['length_fast_nm'] / 1000.0:.3g} um, node noise sd {q.get('noise_sd', 0.0):.3g}; slow turning: "
+        print(f"[t0] direction (multiscale): fast wiggle sd {q['sd_fast']:.3g} (tilt), Gaussian scale {q['length_fast_nm'] / 1000.0:.3g} um x (r / 300 nm)^{q.get('length_fast_radius_exponent', 0.0):.2f}, node noise sd {q.get('noise_sd', 0.0):.3g}; slow turning: "
               f"restoring L_d {q['restore_nm'] / 1000.0:.3g} um, rate memory {q['drive_length_nm'] / 1000.0:.3g} um, amplitude {q['drive_std'] * 1000.0:.3g} /um; "
               f"branch amplitude x exp({a.get('alpha', 0.0):.2f}) x r^{a.get('beta', 0.0):.2f}, spread between branches x/: {math.exp(a.get('tau', 0.0)):.2f} "
               f"(sampling noise x/: {math.exp(q.get('info', {}).get('tau_noise', 0.0)):.2f}); group offsets {({k: round(v, 2) for k, v in a.get('groups', {}).items()})}; "

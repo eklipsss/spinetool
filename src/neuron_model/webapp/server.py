@@ -1,7 +1,9 @@
 """HTTP API + static page of the branch generator (FastAPI; imported inside ``create_app`` so the core works without it).
 
     GET  /api/health                              status and bundle id
-    GET  /api/options                             categories with allowed values, defaults, limits, bundle description
+    GET  /api/options                             categories with allowed values, detailed cell types per species, defaults,
+                                                  limits, bundle description
+    GET  /api/cell-types?species=human            detailed cell types offered for one species (the page filters its list)
     POST /api/generate                            JSON request (engine.REQUEST_FIELDS) -> result id + metrics + spine rows
     GET  /api/results/{id}/branch.off             assembled branch surface
     GET  /api/results/{id}/trunk.off              trunk tube alone
@@ -34,7 +36,10 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 LABELS_RU = {
     "species": {"mouse": "мышь", "human": "человек"},
     "cell_type_binary": {"excitatory": "возбуждающая", "inhibitory": "тормозная"},
-    "compartment": {"apical": "апикальный", "basal": "базальный", "uncertain": "не определён", "inhibitory_dendrite": "дендрит тормозного нейрона"},
+    "compartment": {"apical": "апикальный", "basal": "базальный", "uncertain": "не определён", "inhibitory_dendrite": "дендрит тормозного нейрона",
+                    "unknown": "неизвестен"},
+    "cell_type": {"PYRAMIDAL": "пирамидная (PYRAMIDAL)", "SPINY_ATYPICAL": "шипиковая непирамидная (SPINY_ATYPICAL)",
+                  "INTERNEURON": "интернейрон (INTERNEURON)"},
 }
 _ID = re.compile(r"^[0-9a-f]{16}$")
 
@@ -87,8 +92,9 @@ def options_document(bundle: ModelBundle) -> Dict[str, Any]:
     return {
         "bundle": {"bundle_id": bundle.bundle_id, "created": man.get("created"), "units": man.get("units", "nm"), "models": man.get("models", {}),
                    "t0_run": Path(man["sources"]["t0_run"]).name, "p0_run": Path(man["sources"]["p0_run"]).name,
+                   "p0_bundle": man["sources"].get("p0_bundle", "p0_bundle.json"),
                    "spine_selection": man.get("spine_selection")},
-        "categories": man["categories"], "labels": LABELS_RU, "spine_cell_type_binary": man.get("spine_cell_type_binary", {}),
+        "categories": man["categories"], "labels": LABELS_RU, "cell_types": man["cell_types"],
         "trained_groups": man.get("trained_groups", []), "defaults": man["defaults"], "limits": man["limits"],
         "spine_library": {k: {"n_spines": v["n_spines"], "morphometrics": v.get("morphometrics", False)} for k, v in man.get("spine_library", {}).items()},
         "reference_available": bool(bundle.reference.get("trunk_placement")),
@@ -128,6 +134,12 @@ def create_app(bundle_path: Path, *, cache_size: int = 64, cache_dir: Optional[P
     @app.get("/api/options")
     def options() -> Response:
         return json_response(options_document(bundle))
+
+    @app.get("/api/cell-types")
+    def cell_types(species: str = Query(...)) -> Response:
+        if species not in bundle.manifest["categories"]["species"]:
+            raise HTTPException(422, f"вид {species!r} недоступен; допустимые: {', '.join(bundle.manifest['categories']['species'])}")
+        return json_response({"species": species, "cell_types": bundle.manifest["cell_types"].get(species, [])})
 
     @app.post("/api/generate")
     def generate(payload: Dict[str, Any] = Body(...)) -> Response:

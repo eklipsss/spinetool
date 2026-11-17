@@ -189,10 +189,13 @@ class FunctionalSimulator:
                                       rng.standard_normal((n, 2)), float(rng.standard_normal())))
         self.strata = np.array([stratum_of((r["n_nodes"] - 1) * r["step"], r["radius_nm"]) for r in requests])
 
-    def tangents(self, c: _Chain, theta: Sequence[float], amp: Amplitude) -> np.ndarray:
+    def tangents(self, c: _Chain, theta: Sequence[float], amp: Amplitude, length_exponent: float = 0.0) -> np.ndarray:
         from scipy.signal import lfilter
 
+        from .direction_ms import length_fast_for
+
         sd_w, l_w, s, l_g, restore, sd_n = (float(v) for v in theta)
+        l_w = length_fast_for(l_w, length_exponent, R_REF_NM * math.exp(c.x))
         m = math.exp(amp.mean_log(c.group, R_REF_NM * math.exp(c.x)) + amp.tau * c.z)
         a = math.exp(-c.step / restore)
         phi = math.exp(-c.step / l_g)
@@ -210,9 +213,9 @@ class FunctionalSimulator:
         t = np.column_stack([tilt, np.ones(c.n)])
         return t / np.linalg.norm(t, axis=1, keepdims=True)
 
-    def simulate(self, theta: Sequence[float], amp: Amplitude) -> np.ndarray:
+    def simulate(self, theta: Sequence[float], amp: Amplitude, length_exponent: float = 0.0) -> np.ndarray:
         """[n_branches, 3] functionals."""
-        return np.array([functionals_from_tangents(self.tangents(c, theta, amp), c.step) for c in self.chains])
+        return np.array([functionals_from_tangents(self.tangents(c, theta, amp, length_exponent), c.step) for c in self.chains])
 
 
 def quantile_targets(values: np.ndarray, strata: np.ndarray, neurons: np.ndarray, *, n_boot: int = 200, min_branches: int = 30,
@@ -264,10 +267,18 @@ def comparison_table(real: np.ndarray, real_strata: np.ndarray, sim: np.ndarray,
     return rows
 
 
+SIMPLEX_STEP = 0.3   # initial Nelder-Mead simplex: +0.3 on every coordinate (log scales: x1.35; alpha, beta, gamma: +0.3)
+
+
 def fit_to_functionals(model, branches: Sequence[Any], *, n_branches: int = 800, maxfev: int = 400, seed: int = 0,
-                       log=None) -> Dict[str, Any]:
+                       fit_length_radius: bool = False, log=None) -> Dict[str, Any]:
     """Refit ``model`` (a fitted ``DirectionMultiScale``) in place to the per-branch functional distributions of ``branches``
-    (T0Branch-like: kappa1, kappa2, log_radius, step, group, neuron). Returns the fit info (loss before / after, tables)."""
+    (T0Branch-like: kappa1, kappa2, log_radius, step, group, neuron). Returns the fit info (loss before / after, tables).
+
+    ``fit_length_radius``: a 10th parameter, the radius exponent gamma of the Gaussian wiggle scale
+    (``DirectionMultiScale.length_fast_radius_exponent``), started at the model's value. The initial simplex is explicit
+    (``SIMPLEX_STEP`` on every coordinate): scipy's default (5 % of each coordinate, 0.00025 for a zero) gave steps from
+    0.0003 (gamma = 0) to 0.6 (log of a 1e-5 noise sd)."""
     from scipy.optimize import minimize
 
     log = log or (lambda *_: None)
@@ -284,34 +295,45 @@ def fit_to_functionals(model, branches: Sequence[Any], *, n_branches: int = 800,
     sim = FunctionalSimulator(requests, seed=seed + 1)
     amp0 = model.amplitude or Amplitude(0.0)
     groups = dict(amp0.groups)
+    gamma0 = float(getattr(model, "length_fast_radius_exponent", 0.0) or 0.0)
     x0 = np.r_[np.log(np.maximum(model.theta, 1e-12)), amp0.alpha, amp0.beta, math.log(max(amp0.tau, 1e-3))]
     lo = np.r_[np.log([1e-4, 100.0, 1e-9, 300.0, 1000.0, 1e-5]), -6.0, -4.0, math.log(1e-3)]
     hi = np.r_[np.log([2.0, 5000.0, 1e-2, 5e4, MAX_RESTORE_NM, 1.0]), 6.0, 4.0, math.log(3.0)]
+    if fit_length_radius:
+        x0, lo, hi = np.r_[x0, gamma0], np.r_[lo, -2.0], np.r_[hi, 3.0]
+    x0 = np.clip(x0, lo + 1e-9, hi - 1e-9)
 
     def unpack(x):
         x = np.clip(x, lo, hi)
-        return np.exp(x[:6]), Amplitude(float(x[6]), float(x[7]), float(math.exp(x[8])), groups)
+        gamma = float(x[9]) if fit_length_radius else gamma0
+        return np.exp(x[:6]), Amplitude(float(x[6]), float(x[7]), float(math.exp(x[8])), groups), gamma
 
     calls = {"n": 0}
 
     def loss(x):
-        theta, amp = unpack(x)
+        theta, amp, gamma = unpack(x)
         calls["n"] += 1
-        value = quantile_loss(sim.simulate(theta, amp), sim.strata, targets)
+        value = quantile_loss(sim.simulate(theta, amp, gamma), sim.strata, targets)
         if calls["n"] % 25 == 0:
             log(f"[t0-direction] functional fit: evaluation {calls['n']}, loss {value:.1f}")
         return value
 
     start = loss(x0)
     sim_start = sim.simulate(*unpack(x0))
-    log(f"[t0-direction] functional fit: {len(use)} branches ({len(targets)} strata), {len(requests)} simulated; start loss {start:.1f}")
-    res = minimize(loss, x0, method="Nelder-Mead", options={"maxfev": int(maxfev), "xatol": 1e-3, "fatol": 1e-2, "adaptive": True})
-    theta, amp = unpack(res.x)
+    log(f"[t0-direction] functional fit: {len(use)} branches ({len(targets)} strata), {len(requests)} simulated, "
+        f"{len(x0)} parameters{' (with the radius exponent of the wiggle scale)' if fit_length_radius else ''}; start loss {start:.1f}")
+    simplex = np.vstack([x0] + [x0 + SIMPLEX_STEP * np.eye(len(x0))[k] for k in range(len(x0))])
+    res = minimize(loss, x0, method="Nelder-Mead", options={"maxfev": int(maxfev), "xatol": 1e-3, "fatol": 1e-2, "adaptive": True,
+                                                              "initial_simplex": simplex})
+    theta, amp, gamma = unpack(res.x)
     model.sd_fast, model.length_fast_nm, model.drive_std, model.drive_length_nm, model.restore_nm, model.noise_sd = (float(v) for v in theta)
     model.amplitude = amp
-    sim_end = sim.simulate(theta, amp)
+    model.length_fast_radius_exponent = float(gamma)
+    sim_end = sim.simulate(theta, amp, gamma)
     info = {"target": "functional_quantiles", "n_branches": len(use), "n_simulated": len(requests), "strata": {stratum_name(s): {"n": t["n"], "n_neurons": t["n_neurons"]} for s, t in targets.items()},
             "loss_start": float(start), "loss_end": float(res.fun), "n_evaluations": int(calls["n"]), "converged": bool(res.success),
+            "fit_length_radius": bool(fit_length_radius), "length_fast_radius_exponent": float(gamma),
             "table_start": comparison_table(real, strata, sim_start, sim.strata), "table_end": comparison_table(real, strata, sim_end, sim.strata)}
-    log(f"[t0-direction] functional fit: loss {start:.1f} -> {res.fun:.1f} after {calls['n']} evaluations")
+    log(f"[t0-direction] functional fit: loss {start:.1f} -> {res.fun:.1f} after {calls['n']} evaluations"
+        + (f"; wiggle scale {theta[1] / 1000:.3g} um x (r / 300 nm)^{gamma:.2f}" if fit_length_radius else ""))
     return info

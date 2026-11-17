@@ -49,7 +49,7 @@ def evaluate(direction, branches, seed: int):
     strata = np.array([stratum_of(b.length, r) for b, r in zip(branches, radius)])
     neurons = np.array([str(b.neuron) for b in branches])
     req = [{"n_nodes": b.n_nodes, "step": b.step, "group": b.group, "radius_nm": r} for b, r in zip(branches, radius)]
-    sim = FunctionalSimulator(req, seed=seed).simulate(direction.theta, direction.amplitude)
+    sim = FunctionalSimulator(req, seed=seed).simulate(direction.theta, direction.amplitude, getattr(direction, "length_fast_radius_exponent", 0.0))
     targets = quantile_targets(real, strata, neurons, seed=seed)
     return comparison_table(real, strata, sim, strata), quantile_loss(sim, strata, targets)
 
@@ -61,6 +61,8 @@ def main() -> None:
     ap.add_argument("--max-branches", type=int, default=3000, help="per split")
     ap.add_argument("--refit", action="store_true", help="refit the direction to the train functionals and evaluate on val")
     ap.add_argument("--maxfev", type=int, default=400)
+    ap.add_argument("--length-radius", action="store_true",
+                    help="refit also the radius exponent of the wiggle scale, l_w (r / 300 nm)^gamma (direction_ms.length_fast_radius_exponent)")
     ap.add_argument("--n-simulated", type=int, default=800)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("overrides", nargs="*")
@@ -102,11 +104,13 @@ def main() -> None:
     report("current", direction)
     if args.refit:
         new = copy.deepcopy(direction)
-        info = fit_to_functionals(new, sets["train"], n_branches=args.n_simulated, maxfev=args.maxfev, seed=args.seed, log=lambda s: print(s, flush=True))
-        (out / "direction_refit.json").write_text(json.dumps({"direction": new.to_dict(), "fit": info}, indent=2, default=float), encoding="utf-8")
-        report("refit", new)
+        info = fit_to_functionals(new, sets["train"], n_branches=args.n_simulated, maxfev=args.maxfev, seed=args.seed,
+                                  fit_length_radius=args.length_radius, log=lambda s: print(s, flush=True))
+        (out / f"direction_refit{'_length_radius' if args.length_radius else ''}.json").write_text(json.dumps({"direction": new.to_dict(), "fit": info}, indent=2, default=float), encoding="utf-8")
+        tag = "refit_length_radius" if args.length_radius else "refit"
+        report(tag, new)
         a = new.amplitude
-        print(f"\n[diag] refit: fast wiggle sd {new.sd_fast:.3g} / {new.length_fast_nm / 1000:.3g} um, node noise {new.noise_sd:.3g}, slow turning L_d {new.restore_nm / 1000:.3g} um, "
+        print(f"\n[diag] {tag}: fast wiggle sd {new.sd_fast:.3g} / {new.length_fast_nm / 1000:.3g} um x (r / 300 nm)^{new.length_fast_radius_exponent:.2f}, node noise {new.noise_sd:.3g}, slow turning L_d {new.restore_nm / 1000:.3g} um, "
               f"memory {new.drive_length_nm / 1000:.3g} um, amplitude {new.drive_std * 1000:.3g} /um; branch amplitude x exp({a.alpha:.2f}) x r^{a.beta:.2f}, spread x/ {np.exp(a.tau):.2f}", flush=True)
     (out / "summary.json").write_text(json.dumps(summary, indent=2, default=float), encoding="utf-8")
     print(f"-> {out}", flush=True)

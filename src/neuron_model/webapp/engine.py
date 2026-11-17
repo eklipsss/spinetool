@@ -4,7 +4,8 @@ The flow mirrors ``scripts/neuron_model/generate_tp.py`` (T + P) and ``scripts/n
 assembly) for a single request; nothing is re-implemented, the engine only wires the existing modules together:
 
 1. ``generate_trunks`` (T0 with the geometric checks of ``limits.json``; a trunk rejected ``max_attempts`` times is an error);
-2. ``covariates_from_trunk`` + ``CountModel.sample`` (one generated branch = its own neuron: the neuron effect is drawn);
+2. ``covariates_from_trunk`` + ``CountModel.sample`` (one generated branch = its own neuron: the neuron effect is drawn;
+   the detailed cell type enters the count design when P0 has a column for it);
 3. ``generate_placements`` (positions by the inverse CDF, uniform angles, d_min);
 4. a ``SpineSource`` gives the pool of spine meshes for the request: ``LibrarySpineSource`` takes the most specific key
    of the bundle's spine library (``<species>/<cell type>/<detailed type>`` -> ... -> ``any``) and reports the key used;
@@ -33,10 +34,13 @@ from ..placement_generation.models.count import build_count_data
 from ..trunk_generation.conditions import group_key
 from ..trunk_generation.generate import generate_trunks
 from . import metrics as M
-from .bundle import ModelBundle, library_key_chain
+from ..trunk_generation.conditions import NO_APICAL_COMPARTMENTS
+from .bundle import UNKNOWN, ModelBundle, library_key_chain
 
-REQUEST_FIELDS = ("species", "cell_type_binary", "compartment", "spine_cell_type", "length_nm", "soma_distance_start_nm", "is_terminal", "seed")
-FIELD_NAMES_RU = {"species": "вид", "cell_type_binary": "тип клетки", "compartment": "компартмент", "spine_cell_type": "подробный тип клетки шипиков",
+REQUEST_FIELDS = ("species", "cell_type_binary", "compartment", "cell_type", "length_nm", "soma_distance_start_nm", "is_terminal", "seed")
+# old name of ``cell_type`` (before 2026-11-17 the detailed type chose only the spine library): still accepted
+REQUEST_ALIASES = {"spine_cell_type": "cell_type"}
+FIELD_NAMES_RU = {"species": "вид", "cell_type_binary": "тип клетки", "compartment": "компартмент", "cell_type": "подробный тип клетки",
                   "length_nm": "длина", "soma_distance_start_nm": "расстояние до сомы", "is_terminal": "концевая ветвь", "seed": "зерно генератора"}
 
 
@@ -95,7 +99,7 @@ class LibrarySpineSource:
         return self._cache[key]
 
     def select(self, request: Mapping[str, Any]) -> SpineSelection:
-        chain = library_key_chain(request.get("species"), request.get("cell_type_binary"), request.get("spine_cell_type"))
+        chain = library_key_chain(request.get("species"), request.get("cell_type_binary"), request.get("cell_type"))
         available = set(self.bundle.library_keys)
         key = next((k for k in chain if k in available), None)
         if key is None:
@@ -189,8 +193,9 @@ class BranchGenerator:
         """Defaults filled in, types coerced, ranges checked; raises ``RequestError`` with every problem at once."""
         man = self.bundle.manifest
         cats, lim = man["categories"], man["limits"]
-        q = dict(man["defaults"])
-        q.update({k: v for k, v in dict(request).items() if k in REQUEST_FIELDS})
+        request = {REQUEST_ALIASES.get(k, k): v for k, v in dict(request).items()}
+        q = {REQUEST_ALIASES.get(k, k): v for k, v in man["defaults"].items()}
+        q.update({k: v for k, v in request.items() if k in REQUEST_FIELDS})
         errors: List[Dict[str, str]] = []
         unknown = sorted(set(request) - set(REQUEST_FIELDS))
         if unknown:
@@ -198,10 +203,18 @@ class BranchGenerator:
         for name in ("species", "cell_type_binary", "compartment"):
             if q.get(name) not in cats[name]:
                 errors.append({"field": name, "message": f"значение {q.get(name)!r} недопустимо; допустимые: {', '.join(cats[name])}"})
-        if q.get("spine_cell_type") in ("", "auto"):
-            q["spine_cell_type"] = None
-        if q.get("spine_cell_type") is not None and q["spine_cell_type"] not in cats.get("spine_cell_type", []):
-            errors.append({"field": "spine_cell_type", "message": f"значение {q['spine_cell_type']!r} недопустимо; допустимые: {', '.join(cats.get('spine_cell_type', [])) or 'нет'}"})
+        if q.get("compartment") in NO_APICAL_COMPARTMENTS and q.get("cell_type_binary") != "inhibitory":
+            errors.append({"field": "compartment", "message": f"компартмент {q['compartment']!r} бывает только у тормозных нейронов"})
+        if q.get("cell_type") in ("", "auto"):
+            q["cell_type"] = None
+        if q.get("cell_type") is not None and q.get("species") in cats["species"]:
+            entry = self.bundle.cell_type(q["species"], q["cell_type"])
+            offered = [e["value"] for e in man["cell_types"].get(q["species"], [])]
+            if entry is None:
+                errors.append({"field": "cell_type", "message": f"подробного типа {q['cell_type']!r} нет для вида {q['species']}; допустимые: {', '.join(offered) or 'нет'}"})
+            elif entry["cell_type_binary"] != q.get("cell_type_binary"):
+                errors.append({"field": "cell_type", "message": f"подробный тип {q['cell_type']} относится к типу клетки {entry['cell_type_binary']!r}, "
+                                                                f"а выбран {q.get('cell_type_binary')!r}"})
 
         def number(name: str, lo: float, hi: float, optional: bool = False) -> None:
             v = q.get(name)
@@ -239,13 +252,14 @@ class BranchGenerator:
         man = self.bundle.manifest
         out = []
         groups = man.get("trained_groups") or []
-        g = group_key(q["species"], q["cell_type_binary"], q["compartment"])
+        g = group_key(q["species"], q["cell_type_binary"], None if q["compartment"] == UNKNOWN else q["compartment"])
         if groups and g not in groups:
             out.append(f"сочетание условий {g} не было отдельной группой при обучении модели ствола: параметры взяты общие (объединённые по всем группам)")
-        ct = q.get("spine_cell_type")
-        binary_of = man.get("spine_cell_type_binary", {})
-        if ct and binary_of.get(ct) not in (None, q["cell_type_binary"]):
-            out.append(f"подробный тип {ct} относится к типу «{binary_of[ct]}», а ствол генерируется для «{q['cell_type_binary']}»")
+        entry = self.bundle.cell_type(q["species"], q.get("cell_type")) if q.get("cell_type") else None
+        if entry is not None and not entry["count_model"]:
+            out.append(f"у модели числа шипиков нет отдельного параметра для подробного типа {q['cell_type']}: число шипиков задано по типу клетки «{q['cell_type_binary']}»")
+        if entry is not None and not entry["spine_library"]:
+            out.append(f"для подробного типа {q['cell_type']} нет своей библиотеки шипиков: шипики взяты из более общей")
         return out
 
     # ---- generation ---------------------------------------------------------------------------------------------------
@@ -257,7 +271,9 @@ class BranchGenerator:
         started = time.perf_counter()
         seed_trunk, seed_count, seed_place, seed_assembly = (int(x) for x in np.random.SeedSequence(q["seed"]).generate_state(4))
 
-        t_req = {"species": q["species"], "cell_type_binary": q["cell_type_binary"], "compartment": q["compartment"], "length_nm": q["length_nm"],
+        # "unknown" compartment of the page = None for the models (the design's own "unknown" column / group)
+        compartment = None if q["compartment"] == UNKNOWN else q["compartment"]
+        t_req = {"species": q["species"], "cell_type_binary": q["cell_type_binary"], "compartment": compartment, "length_nm": q["length_nm"],
                  "step_nm": b.manifest["defaults"].get("step_nm"), "soma_distance_start_nm": q["soma_distance_start_nm"], "is_terminal": q["is_terminal"]}
         trunks, t_summary = generate_trunks(b.t0_model, [t_req], b.trunk_limits, seed=seed_trunk, model_id=f"t0-{b.manifest['sources'].get('t0_model')}")
         trunk = trunks[0]
@@ -268,7 +284,7 @@ class BranchGenerator:
 
         mark = time.perf_counter()
         p0 = b.p0
-        cov = [covariates_from_trunk(trunk, t_req, "gen0")]
+        cov = [covariates_from_trunk(trunk, {**t_req, "cell_type": q["cell_type"]}, "gen0")]
         data = build_count_data(p0["design"], cov, p0["count_model"].exposure)
         n_requested = int(p0["count_model"].sample(data, np.random.default_rng(seed_count))[0])
         n_used = n_requested

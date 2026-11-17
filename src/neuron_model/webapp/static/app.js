@@ -156,13 +156,13 @@ async function loadOptions() {
   const opt = await res.json();
   state.options = opt;
   const form = $("#request-form");
-  for (const field of ["species", "cell_type_binary", "compartment"]) {
+  for (const field of ["species", "cell_type_binary"]) {
     const sel = form.elements[field];
     sel.innerHTML = "";
     opt.categories[field].forEach((v) => sel.append(el("option", { value: v, text: label(field, v) })));
     sel.value = opt.defaults[field];
   }
-  fillSpineTypes();
+  fillDependent(opt.defaults.compartment);
   const lim = opt.limits;
   form.elements.length_um.min = lim.min_length_nm / 1000; form.elements.length_um.max = lim.max_length_nm / 1000;
   form.elements.length_um.value = opt.defaults.length_nm / 1000;
@@ -174,26 +174,43 @@ async function loadOptions() {
   $("#limits-hint").textContent = `Длина от ${fmt(lim.min_length_nm / 1000)} до ${fmt(lim.max_length_nm / 1000)} мкм; расстояние до сомы до ${fmt(lim.max_soma_distance_nm / 1000)} мкм; не больше ${lim.max_spines} шипиков на ветвь.`;
   const b = opt.bundle;
   $("#bundle-meta").innerHTML = "";
-  $("#bundle-meta").append(el("div", { text: `Набор моделей: ${b.bundle_id}` }), el("div", { text: `T0: ${b.t0_run} · P0: ${b.p0_run}` }),
+  $("#bundle-meta").append(el("div", { text: `Набор моделей: ${b.bundle_id}` }), el("div", { text: `T0: ${b.t0_run} · P: ${b.p0_run} (${b.p0_bundle})` }),
     el("div", { text: `шипики: ${Object.entries(opt.spine_library).map(([k, v]) => `${k} (${v.n_spines})`).join(", ")}` }));
   form.addEventListener("change", onFormChange);
   onFormChange();
   applyHashRequest();
 }
 
-function fillSpineTypes() {
-  const form = $("#request-form"), opt = state.options, sel = form.elements.spine_cell_type, keep = sel.value;
-  const binary = form.elements.cell_type_binary.value;
+// compartments trained for the chosen species and cell type (T0 groups species|type|compartment), else all offered ones
+function compartmentsFor(species, binary) {
+  const opt = state.options, all = opt.categories.compartment;
+  const trained = (opt.trained_groups || []).map((g) => g.split("|")).filter((p) => p[0] === species && p[1] === binary).map((p) => p[2]);
+  const list = all.filter((c) => trained.includes(c));
+  if (list.length) return list;
+  return all.filter((c) => binary === "inhibitory" || c !== "inhibitory_dendrite");
+}
+
+// compartment and detailed cell type depend on the species and the binary cell type
+function fillDependent(compartment) {
+  const form = $("#request-form"), opt = state.options;
+  const species = form.elements.species.value, binary = form.elements.cell_type_binary.value;
+  const comp = form.elements.compartment, keepComp = compartment ?? comp.value;
+  comp.innerHTML = "";
+  compartmentsFor(species, binary).forEach((v) => comp.append(el("option", { value: v, text: label("compartment", v) })));
+  comp.value = [...comp.options].some((o) => o.value === keepComp) ? keepComp : comp.options[0]?.value;
+  const sel = form.elements.cell_type, keep = sel.value;
   sel.innerHTML = "";
-  sel.append(el("option", { value: "", text: "по типу клетки (общая библиотека)" }));
-  (opt.categories.spine_cell_type || []).filter((t) => !opt.spine_cell_type_binary[t] || opt.spine_cell_type_binary[t] === binary)
-    .forEach((t) => sel.append(el("option", { value: t, text: t })));
+  sel.append(el("option", { value: "", text: "не задан (только тип клетки)" }));
+  ((opt.cell_types || {})[species] || []).filter((t) => t.cell_type_binary === binary).forEach((t) => {
+    const parts = [t.count_model ? null : "без своей модели числа шипиков", t.spine_library ? null : "без своей библиотеки шипиков"].filter(Boolean);
+    sel.append(el("option", { value: t.value, text: label("cell_type", t.value) + (parts.length ? ` — ${parts.join(", ")}` : "") }));
+  });
   sel.value = [...sel.options].some((o) => o.value === keep) ? keep : "";
 }
 
 function onFormChange(ev) {
   const form = $("#request-form");
-  if (!ev || ev.target.name === "cell_type_binary") fillSpineTypes();
+  if (ev && (ev.target.name === "species" || ev.target.name === "cell_type_binary")) fillDependent();
   form.elements.soma_um.disabled = form.elements.soma_unknown.checked;
   const g = `${form.elements.species.value}|${form.elements.cell_type_binary.value}|${form.elements.compartment.value}`;
   const groups = state.options.trained_groups || [];
@@ -205,7 +222,7 @@ function readRequest() {
   const f = $("#request-form").elements;
   return {
     species: f.species.value, cell_type_binary: f.cell_type_binary.value, compartment: f.compartment.value,
-    spine_cell_type: f.spine_cell_type.value || null,
+    cell_type: f.cell_type.value || null,
     length_nm: Math.round(parseFloat(f.length_um.value) * 1000),
     soma_distance_start_nm: f.soma_unknown.checked || f.soma_um.value === "" ? null : Math.round(parseFloat(f.soma_um.value) * 1000),
     is_terminal: f.is_terminal.checked, seed: parseInt(f.seed.value, 10),
@@ -218,9 +235,10 @@ function applyHashRequest() {
   try {
     const q = JSON.parse(decodeURIComponent(location.hash.slice(3)));
     const f = $("#request-form").elements;
-    for (const k of ["species", "cell_type_binary", "compartment"]) if (q[k]) f[k].value = q[k];
-    fillSpineTypes();
-    if (q.spine_cell_type) f.spine_cell_type.value = q.spine_cell_type;
+    for (const k of ["species", "cell_type_binary"]) if (q[k]) f[k].value = q[k];
+    fillDependent(q.compartment);
+    const ct = q.cell_type ?? q.spine_cell_type; // older links: spine_cell_type
+    if (ct) f.cell_type.value = ct;
     if (q.length_nm) f.length_um.value = q.length_nm / 1000;
     f.soma_unknown.checked = q.soma_distance_start_nm === null;
     if (q.soma_distance_start_nm !== null && q.soma_distance_start_nm !== undefined) f.soma_um.value = q.soma_distance_start_nm / 1000;
@@ -240,7 +258,7 @@ async function generate(ev) {
     const res = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
     const data = await res.json();
     if (!res.ok) {
-      const names = { length_nm: "длина", soma_distance_start_nm: "расстояние до сомы", seed: "зерно", species: "вид", cell_type_binary: "тип клетки", compartment: "компартмент", spine_cell_type: "подробный тип", generation: "генерация", server: "сервер" };
+      const names = { length_nm: "длина", soma_distance_start_nm: "расстояние до сомы", seed: "зерно", species: "вид", cell_type_binary: "тип клетки", compartment: "компартмент", cell_type: "подробный тип", generation: "генерация", server: "сервер" };
       showNotice($("#form-errors"), (data.errors || [{ field: "", message: data.detail || res.statusText }]).map((e) => `${names[e.field] || e.field}: ${e.message}`));
       return;
     }

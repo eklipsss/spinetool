@@ -23,7 +23,8 @@ model:
     amplitude_within_neuron: true  # radius slope and compartment offsets of the bending amplitude from branches of the same neuron
     n_simulated: 600
     fit_target: functionals        # 2026-11-17: refit to the per-branch distributions of kappa rms, tortuosity, kappa autocorrelation (quantiles per length x radius stratum, direction_functional.py); variogram = the semivariogram fit only
-    functional_maxfev: 400         # Nelder-Mead evaluations (each simulates functional_n_branches chains)
+    functional_maxfev: 800         # Nelder-Mead evaluations (each simulates functional_n_branches chains); chain AA: 400 did not converge
+    functional_fit_length_radius: true  # 2026-11-17: 10th parameter, the wiggle scale l_w (r / 300 nm)^gamma (AA: real kappa autocorrelation 0.16-0.29 thin vs 0.52-0.60 thick, shared scale in the model)
     functional_n_branches: 800
   direction: multiscale            # multiscale: smooth Gaussian wiggle of the heading + slow turning relaxing to the axis; tilt: the slow part alone; kappa: OU on the bending (old, tortuosity grows with L)
   radius_residual: multiscale      # multiscale: two AR(1) scales + noise fitted to the semivariogram, amplitude = random effect of the branch (default since 2026-10-28; full-data diagnose_radius.py: one scale lost the 0.5-8 um variation); branch: ONE AR(1) with the branch amplitude; pooled: the joint OU (old)

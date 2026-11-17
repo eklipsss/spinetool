@@ -16,7 +16,10 @@ Layout of ``models/webapp/<bundle_id>/`` (units: nm)::
 
 Spine library keys go from the most to the least specific: ``<species>/<cell_type_binary>/<cell_type>``,
 ``<species>/<cell_type_binary>``, ``<species>``, ``any``. A request takes the most specific key that exists (the engine
-reports which one). ``spines.npz``: ``vertices`` float32 [sum V, 3], ``faces`` int32 [sum F, 3], ``v_offsets`` /
+reports which one). A detailed cell type belongs to one dataset, hence to one species (Minnie65: 23P, 4P, ..., BC, BPC, MC,
+NGC -> mouse; H01: PYRAMIDAL, SPINY_ATYPICAL, INTERNEURON -> human); a key whose detailed type contradicts its species or
+binary type is refused. The detailed types offered per species (``manifest["cell_types"]``) are those with a column of the
+P0 count design (``CountDesign(subtypes=True)``) or with a spine library key of their own. ``spines.npz``: ``vertices`` float32 [sum V, 3], ``faces`` int32 [sum F, 3], ``v_offsets`` /
 ``f_offsets`` [n + 1], ``center`` [n, 3] (attachment centre found by ``DownFacingCapFinder``), ``cap_area_nm2``,
 ``loop_area_nm2``, ``base_radius_nm``, ``attachment_method``, ``source`` (path relative to the source folder) and
 ``metric_<name>`` for every scalar morphometric (NaN when not computed). Vertices are rounded to float32 BEFORE the
@@ -44,12 +47,29 @@ from ..trunk_generation.conditions import CATEGORIES, NO_APICAL_COMPARTMENTS
 
 FORMAT_VERSION = 1
 ANY_KEY = "any"
+UNKNOWN = "unknown"  # compartment value of the request = not known (the models get None)
 SEED_MAX = 2**31 - 1
 DEFAULT_LIMITS = {"max_length_nm": 100_000.0, "min_length_nm": 5_000.0, "max_soma_distance_nm": 600_000.0, "max_spines": 400}
 
 
+# H01 detailed types (h01_celltype.csv, see metadata.EXCITATORY_CELL_TYPES / INHIBITORY_CELL_TYPES); every other detailed
+# type of the project is a Minnie65 type (mouse)
+HUMAN_CELL_TYPES = ("PYRAMIDAL", "SPINY_ATYPICAL", "INTERNEURON")
+
+
+def cell_type_species(cell_type: str) -> str:
+    return "human" if cell_type in HUMAN_CELL_TYPES else "mouse"
+
+
+def known_cell_type_binary(cell_type: str) -> Optional[str]:
+    """Binary type of a detailed type known to the project (``metadata.cell_type_binary``), else None."""
+    from ..metadata import cell_type_binary
+
+    return cell_type_binary(cell_type)
+
+
 def library_key_parts(key: str) -> Dict[str, Optional[str]]:
-    """``mouse/excitatory/BPC`` -> {species, cell_type_binary, cell_type}; ``any`` -> all None. Raises on an invalid key."""
+    """``mouse/inhibitory/BPC`` -> {species, cell_type_binary, cell_type}; ``any`` -> all None. Raises on an invalid key."""
     if key == ANY_KEY:
         return {"species": None, "cell_type_binary": None, "cell_type": None}
     parts = key.split("/")
@@ -59,7 +79,39 @@ def library_key_parts(key: str) -> Dict[str, Optional[str]]:
         raise ValueError(f"spine library key {key!r}: unknown species {parts[0]!r} (allowed {CATEGORIES['species']})")
     if len(parts) >= 2 and parts[1] not in CATEGORIES["cell_type_binary"]:
         raise ValueError(f"spine library key {key!r}: unknown binary cell type {parts[1]!r} (allowed {CATEGORIES['cell_type_binary']})")
+    if len(parts) == 3:
+        binary = known_cell_type_binary(parts[2])
+        if binary is not None and (binary != parts[1] or cell_type_species(parts[2]) != parts[0]):
+            raise ValueError(f"spine library key {key!r}: {parts[2]} is a {cell_type_species(parts[2])} / {binary} type")
     return {"species": parts[0], "cell_type_binary": parts[1] if len(parts) >= 2 else None, "cell_type": parts[2] if len(parts) == 3 else None}
+
+
+def available_cell_types(categories: Mapping[str, Sequence[str]], library_keys: Sequence[str], p0_subtypes: Sequence[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Detailed cell types offered per species: ``{species: [{value, cell_type_binary, count_model, spine_library}]}``.
+
+    ``count_model``: the P0 count design has a column for the type (the number of spines depends on it);
+    ``spine_library``: a spine library key of its own. Only species / binary types offered by the bundle are kept."""
+    entries: Dict[tuple, Dict[str, Any]] = {}
+
+    def entry(species: str, value: str, binary: str) -> Dict[str, Any]:
+        return entries.setdefault((species, value), {"value": value, "cell_type_binary": binary, "count_model": False, "spine_library": False})
+
+    for t in p0_subtypes:
+        binary = known_cell_type_binary(t)
+        if binary is not None:  # a type the project does not know cannot be placed in a species
+            entry(cell_type_species(t), t, binary)["count_model"] = True
+    for key in library_keys:
+        parts = library_key_parts(key)
+        if parts["cell_type"]:
+            entry(parts["species"], parts["cell_type"], parts["cell_type_binary"])["spine_library"] = True
+    binaries = list(categories["cell_type_binary"])
+    out: Dict[str, List[Dict[str, Any]]] = {s: [] for s in categories["species"]}
+    for (species, _), e in entries.items():
+        if species in out and e["cell_type_binary"] in binaries:
+            out[species].append(e)
+    for values in out.values():
+        values.sort(key=lambda e: (binaries.index(e["cell_type_binary"]), e["value"]))
+    return out
 
 
 def library_key_chain(species: Optional[str], cell_type_binary: Optional[str], cell_type: Optional[str]) -> List[str]:
@@ -222,6 +274,10 @@ class ModelBundle:
     def library_keys(self) -> List[str]:
         return list(self.manifest.get("spine_library", {}))
 
+    def cell_type(self, species: Optional[str], value: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Entry of ``manifest["cell_types"]`` for a detailed type of a species (None when not offered)."""
+        return next((e for e in self.manifest["cell_types"].get(species or "", []) if e["value"] == value), None)
+
     def library(self, key: str) -> SpineLibrary:
         """Spines of one key, read on first use and kept (a public server keeps every key it has served in memory)."""
         if key not in self.manifest.get("spine_library", {}):
@@ -246,21 +302,46 @@ class ModelBundle:
         reference = {}
         for p in sorted((root / "reference").glob("*.json")) if (root / "reference").exists() else []:
             reference[p.stem] = json.loads(p.read_text(encoding="utf-8"))
+        p0 = load_p0_bundle(root / "p0_bundle.json")
+        if "cell_types" not in manifest:  # bundles written before 2026-11-17: detailed types only for the spine library
+            manifest["cell_types"] = available_cell_types(manifest["categories"], list(manifest.get("spine_library", {})), p0["design"].subtypes)
         return cls(root=root, manifest=manifest, t0_model=T0Model.load(root / "t0_model.json"),
                    trunk_limits=TrunkLimits(**json.loads((root / "limits.json").read_text(encoding="utf-8"))),
-                   p0=load_p0_bundle(root / "p0_bundle.json"), context_selector=selector,
-                   assembly=AssemblyConfig.from_mapping(manifest.get("assembly")), reference=reference)
+                   p0=p0, context_selector=selector, assembly=AssemblyConfig.from_mapping(manifest.get("assembly")), reference=reference)
 
 
 def _categories_from_groups(groups: Sequence[str]) -> Dict[str, List[str]]:
-    """Allowed values of the trunk conditions: those of the trained T0 groups (species|cell type|compartment), else all."""
+    """Allowed values of the trunk conditions: those of the trained T0 groups (species|cell type|compartment), else all.
+    The compartment also offers ``inhibitory_dendrite`` (interneurons) and ``unknown`` when a trained group has them."""
     out = {}
     for k, name in enumerate(CATEGORIES):
         seen = [g.split("|")[k] for g in groups if len(g.split("|")) == 3]
-        allowed = list(CATEGORIES[name]) + (list(NO_APICAL_COMPARTMENTS) if name == "compartment" else [])
+        allowed = list(CATEGORIES[name]) + (list(NO_APICAL_COMPARTMENTS) + [UNKNOWN] if name == "compartment" else [])
         values = [c for c in allowed if c in seen]
         out[name] = values or list(CATEGORIES[name])
     return out
+
+
+def _read_tables(value: Any, file_name: Optional[str] = None):
+    """A DataFrame, a parquet path / folder (``file_name`` inside), or several of them (concatenated: Minnie65 + H01)."""
+    import pandas as pd
+
+    if isinstance(value, pd.DataFrame):
+        return value
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+    frames = []
+    for item in items:
+        path = Path(item)
+        frames.append(pd.read_parquet(path / file_name if file_name and path.is_dir() else path))
+    return frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+
+
+def _source_text(value: Any) -> Any:
+    import pandas as pd
+
+    if value is None or isinstance(value, pd.DataFrame):
+        return None
+    return [str(v) for v in value] if isinstance(value, (list, tuple)) else str(value)
 
 
 def build_bundle(
@@ -269,6 +350,7 @@ def build_bundle(
     t0_run: Path,
     p0_run: Path,
     spines: Mapping[str, Path],
+    p0_bundle: str = "p0_bundle.json",
     bundle_id: Optional[str] = None,
     t0_model: Optional[str] = None,
     context_spines: Any = None,
@@ -283,13 +365,13 @@ def build_bundle(
 ) -> Path:
     """Write ``<out_root>/<bundle_id>/`` from a T0 run, a P0 run and spine mesh folders per library key.
 
-    ``context_spines``: ``branch_spines.parquet`` (path or DataFrame) of REAL spines -> ``context_selector.json``;
-    ``branches_reference``: ``branches.parquet`` of the branch preprocessing (path, folder with it, or DataFrame) ->
-    ``reference/trunk_placement.json``. ``spines`` keys: see the module docstring; an ``any`` key is required (the last fallback).
+    ``p0_bundle``: file inside ``p0_run`` (a P1 run: ``p0_bundle.json`` = its chosen model, or ``p1b2_bundle.json`` ...).
+    ``context_spines``: ``branch_spines.parquet`` (path, list of paths, or DataFrame) of REAL spines -> ``context_selector.json``;
+    ``branches_reference``: ``branches.parquet`` of the branch preprocessing (path, folder with it, list of them for several
+    datasets, or DataFrame) -> ``reference/trunk_placement.json``. ``spines`` keys: see the module docstring; an ``any`` key is required (the last fallback).
     The trunk conditions offered to the user are those of the trained T0 groups; ``all_categories`` offers every category
     (an untrained combination then gets the pooled T0 parameters, and the engine warns about it)."""
-    import pandas as pd
-
+    from ..placement_generation.covariates import CountDesign
     from .metrics import reference_from_branches
 
     t0_run, p0_run = Path(t0_run), Path(p0_run)
@@ -305,13 +387,13 @@ def build_bundle(
     root.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(t0_run / f"t0_{chosen}.json", root / "t0_model.json")
     shutil.copyfile(t0_run / "limits.json", root / "limits.json")
-    shutil.copyfile(p0_run / "p0_bundle.json", root / "p0_bundle.json")
+    shutil.copyfile(p0_run / p0_bundle, root / "p0_bundle.json")
     t0 = json.loads((root / "t0_model.json").read_text(encoding="utf-8"))
     p0 = json.loads((root / "p0_bundle.json").read_text(encoding="utf-8"))
 
     selection = "uniform"
     if context_spines is not None:
-        frame = context_spines if isinstance(context_spines, pd.DataFrame) else pd.read_parquet(context_spines)
+        frame = _read_tables(context_spines)
         selector = ContextSelector.fit(frame)
         (root / "context_selector.json").write_text(json.dumps(selector.to_dict(), indent=2), encoding="utf-8")
         selection = "context"
@@ -319,7 +401,6 @@ def build_bundle(
 
     cfg = AssemblyConfig.from_mapping(dict(assembly or {}))
     library_info: Dict[str, Any] = {}
-    cell_types: Dict[str, str] = {}
     for key, folder in spines.items():
         files = find_mesh_files(Path(folder), limit=max_spines_per_key or None)
         if not files:
@@ -333,18 +414,11 @@ def build_bundle(
             reasons[r["reason"]] = reasons.get(r["reason"], 0) + 1
         library_info[key] = {"n_spines": len(lib), "n_rejected": len(rejected), "rejected_reasons": reasons, "source": str(folder),
                              "morphometrics": bool(compute_morphometrics), "median_base_radius_nm": float(np.nanmedian(lib.base_radius_nm))}
-        parts = library_key_parts(key)
-        if parts["cell_type"]:
-            cell_types[parts["cell_type"]] = parts["cell_type_binary"]
         log(f"[webapp-bundle] library {key}: {len(lib)} spines ({len(rejected)} rejected {reasons})")
 
     reference_groups = None
     if branches_reference is not None:
-        if isinstance(branches_reference, pd.DataFrame):
-            table = branches_reference
-        else:
-            path = Path(branches_reference)
-            table = pd.read_parquet(path / "branches.parquet" if path.is_dir() else path)
+        table = _read_tables(branches_reference, "branches.parquet")
         ref = reference_from_branches(table)
         (root / "reference").mkdir(exist_ok=True)
         (root / "reference" / "trunk_placement.json").write_text(json.dumps(ref, indent=2, default=float), encoding="utf-8")
@@ -357,22 +431,27 @@ def build_bundle(
     lim["min_length_nm"] = max(float(lim["min_length_nm"]), length_bounds[0])
     lim["max_length_nm"] = min(float(lim["max_length_nm"]), length_bounds[1])
     categories = {k: list(v) for k, v in CATEGORIES.items()} if all_categories else _categories_from_groups(groups)
+    p0_subtypes = CountDesign.from_dict(p0["design"]).subtypes
+    cell_types = available_cell_types(categories, list(library_info), p0_subtypes)
     default_request = {"species": categories["species"][0], "cell_type_binary": categories["cell_type_binary"][0],
-                       "compartment": categories["compartment"][0], "spine_cell_type": None,
+                       "compartment": categories["compartment"][0], "cell_type": None,
                        "length_nm": float(min(max(20_000.0, lim["min_length_nm"]), lim["max_length_nm"])),
                        "soma_distance_start_nm": 50_000.0, "is_terminal": False, "seed": 1}
     default_request.update(dict(defaults or {}))
     manifest = {
         "bundle_id": bundle_id, "format_version": FORMAT_VERSION, "created": _dt.datetime.now().isoformat(timespec="seconds"), "units": "nm",
-        "sources": {"t0_run": str(t0_run), "t0_model": chosen, "p0_run": str(p0_run), "spines": {k: str(v) for k, v in spines.items()},
-                    "context_spines": None if context_spines is None or isinstance(context_spines, pd.DataFrame) else str(context_spines),
-                    "branches_reference": None if branches_reference is None or isinstance(branches_reference, pd.DataFrame) else str(branches_reference)},
+        "sources": {"t0_run": str(t0_run), "t0_model": chosen, "p0_run": str(p0_run), "p0_bundle": p0_bundle,
+                    "spines": {k: str(v) for k, v in spines.items()},
+                    "context_spines": _source_text(context_spines), "branches_reference": _source_text(branches_reference)},
         "models": {"t0": {"mean": t0.get("mean", {}).get("kind"), "direction": t0.get("direction_mode"), "radius_residual": t0.get("radius_mode"),
+                          "direction_fit_target": (t0.get("direction") or {}).get("fit_target"),
                           "uses_soma_distance": "soma_log_mean" in t0.get("encoder", {}), "length_bounds_nm": length_bounds},
                    "p0": {"count_family": p0["count_model"]["family"], "exposure": p0["count_model"]["exposure"],
-                          "neuron_effect": bool(p0["count_model"]["random_effect"]), "d_min_nm": float(p0["d_min_nm"])}},
-        "categories": {**categories, "spine_cell_type": sorted(cell_types)},
-        "spine_cell_type_binary": cell_types,
+                          "neuron_effect": bool(p0["count_model"]["random_effect"]), "sigma_groups": int(p0["count_model"].get("sigma_groups", 1)),
+                          "detailed_types": list(p0_subtypes), "position": (p0.get("interaction") or {}).get("kind", "p0"),
+                          "d_min_nm": float(p0["d_min_nm"])}},
+        "categories": categories,
+        "cell_types": cell_types,
         "trained_groups": groups,
         "defaults": default_request,
         "limits": {**lim, "seed_max": SEED_MAX},
