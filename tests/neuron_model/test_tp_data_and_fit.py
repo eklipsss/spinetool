@@ -108,3 +108,30 @@ def test_fit_t0_reports_functionals_against_noise_floor():
     # radius CV diagnostics on validation AND train branches; the branch radius residual is saved in the report
     assert v["radius_cv_by_radius"] and v["radius_cv_by_radius_train"]
     assert rep["radius_residual"]["kind"] == "multiscale" and min(rep["radius_residual"]["length_nm"]) > 0
+
+
+def test_two_branch_roots_are_read_as_one_table_and_pack(mini, tmp_path):
+    """Minnie65 + H01: several preprocessing roots joined by ';', keys carry the dataset, one pack per root."""
+    import pandas as pd
+
+    cfg = mini["cfg"]
+    run(cfg)
+    a = tmp_path / "minnie"
+    shutil.copytree(cfg.out_root, a)
+    b = tmp_path / "h01"
+    shutil.copytree(cfg.out_root, b)
+    for name in ("branches.parquet", "branch_spines.parquet"):
+        t = pd.read_parquet(b / name)
+        old = t["neuron_id"].astype(str).iloc[0]
+        t["dataset"] = "H01_Seg"
+        t["neuron_id"] = "neuron_" + t["neuron_id"].astype(str)
+        t.to_parquet(b / name, index=False)
+    (b / old).rename(b / f"neuron_{old}")
+    table, spines, pack = bd.prepare_training_data(f"{a};{b}", tmp_path / "pack", io_threads=2)
+    assert set(table["dataset"]) == {cfg.dataset, "H01_Seg"} and isinstance(pack, bd.MultiPack)
+    ok = bd.select(table, eligible="train_eligible_T")
+    assert len(ok) == 2 and all(bd.branch_key(r) in pack for r in ok.to_dict("records"))
+    assert (tmp_path / "pack_h01").exists()
+    g0, g1 = (pack.get(bd.branch_key(r)) for r in ok.to_dict("records"))
+    assert np.allclose(g0["s"], g1["s"])
+    assert len(bd.load_branches(f"{a};{b}", ["status"])) == 2 * len(bd.load_branches(a, ["status"]))

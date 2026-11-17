@@ -94,6 +94,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--mode", choices=["generated", "real_t"], default="generated")
     parser.add_argument("--split", default="val")
+    parser.add_argument("--dataset", default=None, help="only source branches of this dataset kind (minnie65 / h01) when P0 was fitted on several")
     parser.add_argument("--counts", choices=list(REAL_COUNT_COLUMNS) + ["model", "model_neuron"], default="model",
                         help="N per branch: from the P0 count model, or the real count of the source branch (diagnostic, see above)")
     parser.add_argument("--out-root", type=Path, default=REPO_ROOT / "runs/analysis/neuron-model/tp_generation")
@@ -106,6 +107,10 @@ def main() -> None:
     table, _, pack = prepare_training_data(resolve_path(d["branches_root"]), resolve_path(d["pack_dir"]), splits=resolve_path(d["splits"]) if d.get("splits") else None, io_threads=int(d["io_threads"]))
     eligible = "train_eligible_T" if args.mode == "generated" else "train_eligible_P"
     pool = select(table, eligible=eligible, splits=[args.split], exclude_compartments=d.get("exclude_compartments"))
+    if args.dataset:
+        from src.neuron_model.metadata import dataset_kind
+
+        pool = pool[pool["dataset"].astype(str).map(dataset_kind) == dataset_kind(args.dataset)]
     if args.counts in REAL_COUNT_COLUMNS and eligible != "train_eligible_P":
         pool = pool[pool["train_eligible_P"].fillna(False).astype(bool)]
     pool = pool[[branch_key(r) in pack for r in pool.to_dict("records")]].reset_index(drop=True)
@@ -117,7 +122,7 @@ def main() -> None:
                 for r in picked.to_dict("records")]
 
     info = {"mode": args.mode, "seed": args.seed, "n": args.n, "split": args.split, "p0_run": str(args.p0_run), "bundle": args.bundle,
-            "counts": args.counts, "t0_run": str(args.t0_run) if args.t0_run else None}
+            "counts": args.counts, "dataset": args.dataset, "t0_run": str(args.t0_run) if args.t0_run else None}
     if args.mode == "generated":
         t_run = open_run(args.t0_run)
         chosen = args.t0_model or json.loads((t_run.root / "report.json").read_text(encoding="utf-8"))["chosen"]

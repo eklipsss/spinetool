@@ -235,6 +235,21 @@ def test_expand_cond_dim_keeps_the_output_and_balance_weights():
     assert w[90:].sum() == pytest.approx(w[:90].sum())  # power 1: both values drawn equally often
     assert mod.balance_weights(DS, enc, None) is None
 
+    # two blocks (Minnie65 + H01): every (species, binary type) combination drawn equally often at power 1
+    class DS2:
+        cond = np.zeros((100, 22), dtype=np.float32)
+    enc2 = ConditionEncoder(enabled=["species", "cell_type_binary"])
+    sp, ct = enc2.slices()["species"], enc2.slices()["cell_type_binary"]
+    DS2.cond[:80, sp.start] = 1.0          # 80 mouse
+    DS2.cond[80:, sp.start + 1] = 1.0      # 20 human
+    DS2.cond[:72, ct.start] = 1.0          # mouse: 72 excitatory, 8 inhibitory
+    DS2.cond[72:80, ct.start + 1] = 1.0
+    DS2.cond[80:95, ct.start] = 1.0        # human: 15 excitatory, 5 inhibitory
+    DS2.cond[95:, ct.start + 1] = 1.0
+    w2 = mod.balance_weights(DS2, enc2, {"blocks": ["species", "cell_type_binary"], "power": 1.0})
+    cells = [slice(0, 72), slice(72, 80), slice(80, 95), slice(95, 100)]
+    assert all(w2[c].sum() == pytest.approx(w2[cells[0]].sum()) for c in cells)
+
 
 def test_condition_layer_learning_rate_multiplier():
     import torch

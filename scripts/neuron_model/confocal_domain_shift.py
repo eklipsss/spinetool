@@ -41,6 +41,8 @@ def measure(folder: Path, mesh_kind: str) -> tuple:
     """Metrics of one set + per-sample unit (neuron / folder of the source spine) + imaging diagnostics of a confocal set."""
     from src.neuron_model.spine_generation.evaluation.morphometrics import generated_set_metrics
 
+    if not Path(folder).is_dir() or not any(Path(folder).glob("sample_*")):
+        raise SystemExit(f"{folder}: no samples (did make_real_controls.py fail? see its error messages)")
     frame = generated_set_metrics(folder, mesh_kind)
     units, imaging = [], []
     for sample in frame["sample_id"].astype(str):

@@ -1,0 +1,16 @@
+# Group split of H01 (human, H01_Seg), the counterpart of splits_v1 (Minnie65) for training on both datasets (2026-11-17).
+# 88 neurons -> ~70 / 9 / 9, all spines of a neuron in one part, stratified by the H01 cell type (PYRAMIDAL / SPINY_ATYPICAL /
+# INTERNEURON; the stage-9 metadata of preprocessed_v2 carries it). The test part is read once, at the end.
+#   python scripts/neuron_model/build_splits.py --config configs/neuron-model/data/splits_h01_v1.yaml ^
+#       "manifests=[C:/Users/Student/LipsEkaterina/data/h01/preprocessed_v2/H01_Seg/manifest.parquet]"
+# then merge with splits_v1 (scripts/neuron_model/merge_splits.py) -> splits_v1_h01.parquet.
+version: splits_h01_v1
+seed: 20261117
+manifests: []
+path_mode: relative
+require_train_eligible: true
+group_level: neuron_id
+fractions: {train: 0.8, val: 0.1, test: 0.1}
+stratify: [cell_type]
+output: data/processed/neuron-model/splits/splits_h01_v1.parquet
+bbox: null                # the frozen bbox of the VAE stays that of splits_v1

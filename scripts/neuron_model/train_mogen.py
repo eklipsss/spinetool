@@ -81,24 +81,36 @@ def prepare_conditions(index, condition_cfg, cond_dim: int, *, resume_dir=None):
 
 
 def balance_weights(train_ds, encoder, balance_cfg):
-    """Sampling weights that up-weight rare values of one condition block: ``condition.balance: {block: cell_type_binary,
+    """Sampling weights that up-weight rare values of condition blocks: ``condition.balance: {block: cell_type_binary,
     power: 0.5}`` -> weight of a spine = (number of training spines with its value) ** -power (spines without a value
-    form their own group). power 0 = plain shuffling, 1 = every value equally often. Printed: the share of each value
-    before and after."""
-    if not balance_cfg or not balance_cfg.get("block") or float(balance_cfg.get("power", 0.0)) <= 0:
+    form their own group). Several blocks (``blocks: [species, cell_type_binary]``, 2026-11-17, Minnie65 + H01): the
+    count is that of the spine's COMBINATION of values, so e.g. human inhibitory spines are up-weighted as a cell of their
+    own. power 0 = plain shuffling, 1 = every value (combination) equally often. Printed: the share of each value before
+    and after."""
+    if not balance_cfg or float(balance_cfg.get("power", 0.0)) <= 0:
+        return None
+    blocks = balance_cfg.get("blocks") or ([balance_cfg["block"]] if balance_cfg.get("block") else [])
+    if not blocks:
         return None
     import numpy as np
 
-    block, power = str(balance_cfg["block"]), float(balance_cfg["power"])
-    sl = encoder.slices()[block]
-    onehot = np.asarray(train_ds.cond)[:, sl]
-    groups = np.where(onehot.max(axis=1) > 0, onehot.argmax(axis=1), -1)
-    values, counts = np.unique(groups, return_counts=True)
-    count_of = dict(zip(values.tolist(), counts.tolist()))
-    weights = np.array([count_of[g] ** -power for g in groups], dtype=float)
-    names = dict(encoder.blocks)[block]
-    share = {(names[v] if v >= 0 else "unknown"): (round(c / len(groups), 4), round(float(weights[groups == v].sum() / weights.sum()), 4)) for v, c in count_of.items()}
-    print(f"balance {block} power {power}: share of spines per value (data, sampled) {share}", flush=True)
+    power = float(balance_cfg["power"])
+    cond = np.asarray(train_ds.cond)
+    parts = []
+    for block in blocks:
+        onehot = cond[:, encoder.slices()[str(block)]]
+        parts.append(np.where(onehot.max(axis=1) > 0, onehot.argmax(axis=1), -1))
+    combo = np.stack(parts, axis=1)
+    _, groups, counts = np.unique(combo, axis=0, return_inverse=True, return_counts=True)
+    groups = groups.reshape(-1)
+    weights = counts[groups].astype(float) ** -power
+    names = {str(b): dict(encoder.blocks)[str(b)] for b in blocks}
+    share = {}
+    for g in np.unique(groups):
+        row = combo[np.flatnonzero(groups == g)[0]]
+        label = "/".join(names[str(b)][v] if v >= 0 else "unknown" for b, v in zip(blocks, row))
+        share[label] = (round(float((groups == g).mean()), 4), round(float(weights[groups == g].sum() / weights.sum()), 4))
+    print(f"balance {list(blocks)} power {power}: share of spines per value (data, sampled) {share}", flush=True)
     return weights
 
 

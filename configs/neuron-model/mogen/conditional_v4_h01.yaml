@@ -1,0 +1,26 @@
+# Conditional MoGen v4 (2026-11-17): v3 continued on Minnie65 (mouse) + H01 (human) with the species condition.
+# Decision of the user (2026-11-17): ONE model for both species (shared spine morphology, the species condition carries the
+# differences); H01 spines whose neck stayed in the trunk mesh (~21 %, detached_spine_keys.py) are not in the H01 cache;
+# binary type shared, detailed types of each dataset in the cell_type block (Minnie65 types, PYRAMIDAL / SPINY_ATYPICAL /
+# INTERNEURON). Species = dataset here (mouse only Minnie65, human only H01): the species condition also carries the brain
+# region and the segmentation of each dataset.
+#   python scripts/neuron_model/train_mogen.py --config configs/neuron-model/mogen/conditional_v4_h01.yaml ^
+#       "data.manifests=['cache/minnie65_v1_60k/manifest.parquet','cache/h01_v1/manifest.parquet']" ^
+#       data.splits=data/processed/neuron-model/splits/splits_v1_h01.parquet data.drop_unassigned=true "data.variants=[1,2]" "data.check_files=[]"
+defaults: [conditional_v3.yaml]
+name: mogen-conditional-v4-h01
+model:
+  init: run
+  init_run: runs/training/neuron-model/2026-11-03_015237_mogen-conditional-v3
+  init_checkpoint: latest
+  expand_cond_dim: null              # cond_dim 32 already (species block = columns 0-1, unused until now)
+optimizer:
+  cond_lr_mult: 100                  # the species columns must move from their pretrained values, as the cell-type columns in v3
+train:
+  max_steps: 20000
+  validate_every: 20000
+condition:
+  blocks: [species, cell_type_binary, cell_type]
+  p_block: {default: 0.15, species: 0.10, cell_type: 0.4}
+  p_all: 0.10
+  balance: {blocks: [species, cell_type_binary], power: 0.5}   # human and inhibitory spines drawn more often than their share

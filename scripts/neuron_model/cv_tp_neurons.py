@@ -197,7 +197,7 @@ def run_t0(args, table, pack, folds, out, log):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--branches-root", type=Path, required=True)
+    parser.add_argument("--branches-root", type=Path, required=True, help="one root, or several joined by ';' (Minnie65;H01)")
     parser.add_argument("--splits", type=Path, required=True, help="splits_*.parquet; only the --cv-splits neurons are used (the test part is never read)")
     parser.add_argument("--cv-splits", nargs="+", default=["train", "val"])
     parser.add_argument("--models", nargs="+", default=["p0", "t0"], choices=["p0", "t0"])
@@ -246,10 +246,16 @@ def main() -> None:
             "(medians, rank-sum p, descriptive):\n" + cmp_desc.to_string(index=False))
 
     # folds: stratified by cell_type_binary over the neurons that have P- or T-eligible branches
-    neurons = table[table["split"].astype(str).isin(set(args.cv_splits))][["neuron_id", "cell_type_binary", "split"]].drop_duplicates("neuron_id")
-    folds_by_rep = {r: neuron_folds(neurons, args.k, seed=args.seed + r, stratum="cell_type_binary") for r in range(args.repeats)}
+    neurons = table[table["split"].astype(str).isin(set(args.cv_splits))][["neuron_id", "dataset", "cell_type_binary", "split"]].drop_duplicates("neuron_id")
+    # several datasets (Minnie65 + H01): stratify by dataset x binary type; one dataset: by binary type (the folds of X2 / Y10)
+    if neurons["dataset"].nunique() > 1:
+        neurons = neurons.assign(stratum=neurons["dataset"].astype(str) + "|" + neurons["cell_type_binary"].astype(str))
+        stratum = "stratum"
+    else:
+        stratum = "cell_type_binary"
+    folds_by_rep = {r: neuron_folds(neurons, args.k, seed=args.seed + r, stratum=stratum) for r in range(args.repeats)}
     pd.concat([f.rename(f"fold_repeat_{r}") for r, f in folds_by_rep.items()], axis=1).rename_axis("neuron_id").reset_index().to_csv(out / "folds.csv", index=False)
-    counts = neurons.assign(fold=neurons["neuron_id"].map(folds_by_rep[0])).groupby(["fold", "cell_type_binary"], dropna=False).size().unstack(fill_value=0)
+    counts = neurons.assign(fold=neurons["neuron_id"].map(folds_by_rep[0])).groupby(["fold", stratum], dropna=False).size().unstack(fill_value=0)
     log(f"[cv] {len(neurons)} neurons ({', '.join(args.cv_splits)} of {args.splits.name}), {args.k} folds x {args.repeats} repetitions; neurons per fold (repetition 0):\n{counts}")
     (out / "run_info.json").write_text(json.dumps({"args": {k: str(v) for k, v in vars(args).items()}, "n_neurons": len(neurons),
                                                    "pack_dir": str(d["pack_dir"]), "exclude_compartments": d.get("exclude_compartments")}, indent=2), encoding="utf-8")

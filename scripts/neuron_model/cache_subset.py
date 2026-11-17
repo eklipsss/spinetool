@@ -103,11 +103,22 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260929)
     parser.add_argument("--threads", type=int, default=32)
     parser.add_argument("--manifest-every", type=int, default=2000)
+    parser.add_argument("--exclude-keys", type=Path, nargs="*", default=[],
+                        help="parquet / csv files with a spine_key column: these spines are never cached (e.g. H01 spines whose neck "
+                             "stayed in the trunk mesh, scripts/neuron_model/detached_spine_keys.py)")
     args = parser.parse_args()
 
     index = load_spine_index([args.manifest], check_files=(), path_mode="relative")
     index = index.with_split(load_splits(args.splits), drop_unassigned=True)
     frame = index.frame
+    if args.exclude_keys:
+        drop = set()
+        for path in args.exclude_keys:
+            t = pd.read_parquet(path) if str(path).endswith(".parquet") else pd.read_csv(path)
+            drop |= set(t["spine_key"].astype(str))
+        before = len(frame)
+        frame = frame[~frame["spine_key"].astype(str).isin(drop)]
+        print(f"excluded {before - len(frame)} of {before} spines listed in {', '.join(map(str, args.exclude_keys))}")
     pc_column = f"pointcloud_{args.n_points}_path"
     rng = np.random.default_rng(args.seed)
 

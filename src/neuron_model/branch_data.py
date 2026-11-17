@@ -41,16 +41,21 @@ def _read_parquet(path: Path, columns: Optional[Sequence[str]] = None) -> pd.Dat
     return frame
 
 
-def load_branches(root: Path, columns: Optional[Sequence[str]] = None) -> pd.DataFrame:
-    """Dataset-level ``branches.parquet`` (only ``columns`` if given; the keys are always read)."""
+def load_branches(root, columns: Optional[Sequence[str]] = None) -> pd.DataFrame:
+    """Dataset-level ``branches.parquet`` (only ``columns`` if given; the keys are always read). Several roots
+    (``branches_roots``): the tables are concatenated."""
     cols = None if columns is None else list(dict.fromkeys(BRANCH_KEYS + list(columns)))
-    return _read_parquet(Path(root) / "branches.parquet", cols)
+    frames = [_read_parquet(r / "branches.parquet", cols) for r in branches_roots(root)]
+    return frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
 
 
-def load_branch_spines(root: Path, columns: Optional[Sequence[str]] = None) -> pd.DataFrame:
+def load_branch_spines(root, columns: Optional[Sequence[str]] = None) -> pd.DataFrame:
     cols = None if columns is None else list(dict.fromkeys(BRANCH_KEYS + list(columns)))
-    path = Path(root) / "branch_spines.parquet"
-    return _read_parquet(path, cols) if path.exists() else pd.DataFrame(columns=cols or BRANCH_KEYS)
+    frames = []
+    for r in branches_roots(root):
+        path = r / "branch_spines.parquet"
+        frames.append(_read_parquet(path, cols) if path.exists() else pd.DataFrame(columns=cols or BRANCH_KEYS))
+    return frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
 
 
 def branch_key(row: Any) -> str:
@@ -298,11 +303,60 @@ TABLE_COLUMNS = [
 SPINE_COLUMNS = ["status", "has_position", "s", "u", "theta", "radius_at_s", "attachment_cap_area", "projects_to_end", "position_outlier"]
 
 
-def prepare_training_data(branches_root: Path, pack_dir: Path, *, splits: Optional[Path] = None, io_threads: int = 16, force_pack: bool = False):
+class MultiPack:
+    """Several ``GeometryPack`` (one per branch-preprocessing root, e.g. Minnie65 + H01) behind one lookup: the branch key
+    starts with the dataset, so a key is looked up in the pack of its own root."""
+
+    def __init__(self, packs: Sequence[GeometryPack]):
+        self.packs = list(packs)
+
+    def __contains__(self, key: str) -> bool:
+        return any(key in p for p in self.packs)
+
+    def get(self, key: str) -> Dict[str, np.ndarray]:
+        for p in self.packs:
+            if key in p:
+                return p.get(key)
+        raise KeyError(key)
+
+
+def branches_roots(branches_root) -> List[Path]:
+    """``data.branches_root``: one path, a list, or several paths joined by ';' (Windows command lines: lists with drive
+    letters do not survive the override parser), e.g. ``C:/.../minnie65/preprocessed_branches;C:/.../h01/preprocessed_branches``."""
+    from .spine_generation.experiment.config import resolve_path
+
+    if isinstance(branches_root, (list, tuple)):
+        items = [str(x) for x in branches_root]
+    else:
+        items = [x for x in str(branches_root).split(";")]
+    return [resolve_path(x.strip()) for x in items if x.strip()]
+
+
+def prepare_training_data(branches_root, pack_dir: Path, *, splits: Optional[Path] = None, io_threads: int = 16, force_pack: bool = False):
     """(branches table, spines table, geometry pack) for T and P.
 
     Reads only the needed columns; packs the geometry of the branches eligible for T or P (all splits) into the local
-    ``pack_dir`` once. ``splits``: a ``splits_*.parquet`` used when the preprocessing ran without one (``split`` empty)."""
+    ``pack_dir`` once. ``splits``: a ``splits_*.parquet`` used when the preprocessing ran without one (``split`` empty).
+    Several roots (``branches_roots``): the tables are concatenated (the keys carry the dataset), the first root packs into
+    ``pack_dir``, every further root into ``<pack_dir>_<dataset kind>``; the returned pack is a ``MultiPack``."""
+    roots = branches_roots(branches_root)
+    if len(roots) == 1:
+        return _prepare_one(roots[0], Path(pack_dir), splits, io_threads, force_pack)
+    tables, spine_tables, packs = [], [], []
+    for k, root in enumerate(roots):
+        if k == 0:
+            folder = Path(pack_dir)
+        else:
+            from .metadata import dataset_kind
+
+            kinds = sorted(set(load_branches(root, ["dataset"])["dataset"].astype(str).map(dataset_kind)))
+            folder = Path(f"{pack_dir}_{'_'.join(kinds) or k}")
+        t, sp, pk = _prepare_one(root, folder, splits, io_threads, force_pack)
+        tables.append(t), spine_tables.append(sp), packs.append(pk)
+    return pd.concat(tables, ignore_index=True), pd.concat(spine_tables, ignore_index=True), MultiPack(packs)
+
+
+def _prepare_one(branches_root: Path, pack_dir: Path, splits: Optional[Path], io_threads: int, force_pack: bool):
     branches_root = Path(branches_root)
     table = load_branches(branches_root, TABLE_COLUMNS)
     if splits is not None and ("split" not in table.columns or table["split"].isna().any()):
