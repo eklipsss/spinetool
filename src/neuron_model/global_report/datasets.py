@@ -17,10 +17,10 @@ import numpy as np
 import pandas as pd
 
 from ..compartments import layer_value
-from ..metadata import LABID_GROUPS, cell_type_binary, dataset_kind, labid_group, load_metadata_tables, species
+from ..metadata import LABID_GROUPS, cell_type_binary, dataset_kind, labid_group, labid_source_id, load_metadata_tables, species
 
 MODALITY = {"minnie65": "EM", "h01": "EM", "labid": "confocal"}
-UNIT_NAME = {"minnie65": "neuron", "h01": "neuron", "labid": "branch folder"}
+UNIT_NAME = {"minnie65": "neuron", "h01": "neuron", "labid": "source image"}
 SPINE_KEYS = ["dataset", "neuron_id", "limb_id", "branch_id", "spine_id"]
 MINNIE_INTERNEURONS = {"BC", "BPC", "MC", "NGC"}
 H01_CELL_CLASS = {"PYRAMIDAL": "pyramidal", "SPINY_ATYPICAL": "other_excitatory", "INTERNEURON": "interneuron"}
@@ -101,6 +101,8 @@ def tidy_spines(raw: pd.DataFrame, kind: str, meta: Dict[str, Any], metrics: Seq
     """``raw``: one row per spine with ``neuron_id`` (+ ``limb_id``, ``branch_id``, ``spine_id`` when present) and metrics."""
     kind = dataset_kind(kind)
     raw = raw.reset_index(drop=True)
+    if kind == "labid":   # the unit is the source image, not the folder (folders of one image are one cell)
+        raw = raw.assign(neuron_id=raw["neuron_id"].astype(str).map(labid_source_id))
     meta_cols = _unit_metadata(raw["neuron_id"], kind, meta)
     limb = _limb_number(raw["limb_id"]) if "limb_id" in raw.columns else pd.Series(np.nan, index=raw.index)
     comps = meta.get("compartments", {}).get(kind, {})
@@ -156,6 +158,8 @@ def tidy_branch_groups(branches: pd.DataFrame, spines: pd.DataFrame, kind: str, 
     kind = dataset_kind(kind)
     b = branches.copy()
     b["neuron_id"] = b["neuron_id"].astype(str)
+    if kind == "labid":   # unit = source image (see tidy_spines)
+        b["neuron_id"] = b["neuron_id"].map(labid_source_id)
     b["limb_id"] = _limb_number(b["limb_id"]).fillna(0).astype(int)
     comps = meta.get("compartments", {}).get(kind, {})
     types = meta.get("cell_types", {}).get(kind, {})
@@ -165,6 +169,8 @@ def tidy_branch_groups(branches: pd.DataFrame, spines: pd.DataFrame, kind: str, 
     b = b[b["compartment"] != "axon_like"]
     s = spines.copy()
     s["neuron_id"] = s["neuron_id"].astype(str)
+    if kind == "labid":
+        s["neuron_id"] = s["neuron_id"].map(labid_source_id)
     s["limb_id"] = _limb_number(s["limb_id"]).fillna(0).astype(int)
     groups = group_table(b, s, min_branches=min_branches, min_pairs=min_pairs)
     info = _unit_metadata(groups["neuron_id"], kind, meta)

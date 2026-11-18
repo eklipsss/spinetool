@@ -46,6 +46,11 @@ def choose_group_level(frame: pd.DataFrame, levels: Sequence[str] = GROUP_LEVELS
 
 def group_ids(frame: pd.DataFrame, level: str) -> pd.Series:
     """Group id including every coarser identifier, so equal ids in different datasets never collide."""
+    if level == "source_image":
+        # LabID: folders cut from one source image are one cell (metadata.labid_source_id); other datasets: the neuron
+        from ...metadata import labid_source_id
+        unit = frame["source_image"].astype(str) if "source_image" in frame.columns else frame["neuron_id"].astype(str).map(labid_source_id)
+        return frame["dataset"].astype(str) + "/" + unit
     parts = {"animal_id": ["dataset", "animal_id"], "sample_id": ["dataset", "sample_id"],
              "neuron_id": ["dataset", "neuron_id"], "branch_id": ["dataset", "neuron_id", "limb_id", "branch_id"]}[level]
     return frame[parts].astype(str).agg("/".join, axis=1)

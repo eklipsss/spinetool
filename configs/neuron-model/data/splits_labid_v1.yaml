@@ -1,0 +1,18 @@
+# Group split of LabID (confocal, mouse; Wt / Ab / Wt+9009 / Ab+9009), 2026-11-18. The UNIT is the SOURCE IMAGE (metadata.labid_source_id,
+# folders ``ab22-1`` and ``ab22-2`` are fragments of image 22 = one cell), NOT the branch folder: all spines of a source image stay in one
+# part. Wt_old (no source files and metadata) is left out of the training data, run the split on the manifest without it.
+# Stratified by group (health x treatment). Few units (about 18 per group), so the parts are small: use for the branch / domain-shift
+# analysis and for LabID adapters, the test part is read once, at the end.
+#   python scripts/neuron_model/build_splits.py --config configs/neuron-model/data/splits_labid_v1.yaml ^
+#       "manifests=[C:/Users/Student/LipsEkaterina/data/labid/labid_raw_z1/labid/preprocessed/manifest.parquet]"
+# Source images of the groups other than Ab: check data/interim/neuron-model/labid_acquisition.csv (labid_acquisition_metadata.py) first.
+version: splits_labid_v1
+seed: 20261118
+manifests: []
+path_mode: relative
+require_train_eligible: true
+group_level: source_image
+fractions: {train: 0.8, val: 0.1, test: 0.1}
+stratify: [health, treatment]
+output: data/processed/neuron-model/splits/splits_labid_v1.parquet
+bbox: null

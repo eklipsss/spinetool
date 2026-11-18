@@ -10,6 +10,10 @@ rem     tortuosity significant in AB5 / AA, check whether the new fit changes it
 rem AE3 MoGen v4 (AB6) generation: species x binary cell type, guidance 1.25, 300 samples each, then the d8_pw8 Poisson chain.
 rem     Evaluation of v4 (mouse against Minnie65 train spines of the same type, human against H01) needs the real controls and
 rem     the conditional report; do it after looking at these meshes (the condition effect on the losses was only 0.0008).
+rem AE4 size check of the CONDITIONAL v3 sets (the ones used by the webapp and the assembly): median generated / median real of the same cell
+rem     type per metric (compare_conditional_generation.py). AD showed that the UNCONDITIONAL v3 is ~44 % too large in volume; the conditional
+rem     sets were never checked for size through the d8_pw8 chain. The Poisson chain itself changes the median volume by ~+3 % (real_poisson p50/real
+rem     1.03), so the ratios are read directly. Real = all Minnie65 neurons of the table (population medians).
 rem Log: scripts\neuron_model\overnight\2026-11-20_AE_t0-two-datasets-v4-generation.bat > logs_AE.txt 2>&1
 
 set REPO=C:\Users\Student\LipsEkaterina\GitHub\spinetool
@@ -48,13 +52,23 @@ for %%k in (minnie65 h01) do (
 python scripts\neuron_model\cv_tp_neurons.py --branches-root "%ROOTS%" --splits %SPLITH% --k 5 --repeats 1 --models t0
 
 echo ===== [AE3] MoGen v4 generation (GPU) ===== %date% %time%
-if not exist %V4% (echo NO v4 RUN & goto :end)
+if not exist %V4% (echo NO v4 RUN & goto :end_v4)
 for %%s in (mouse human) do (
   for %%c in (excitatory inhibitory) do (
     python scripts\neuron_model\generate_mogen.py --run %V4% --checkpoint latest --condition species=%%s,cell_type_binary=%%c --guidance 1.25 --n-samples 300 --seed 1 --tag v4_%%s_%%c_g1.25_seed_1
     python scripts\neuron_model\reconstruct_mogen_poisson.py --run %V4% --set v4_%%s_%%c_g1.25_seed_1 --out %V4%\meshes_poisson_d8_pw8 --poisson-config %CFG%\d8_pw8.yaml --workers 8
   )
 )
+
+:end_v4
+echo ===== [AE4] size of the conditional v3 sets against real spines of the same type ===== %date% %time%
+set V3=%RUNS%\2026-11-03_015237_mogen-conditional-v3
+set MORPH=cache\morphometrics_minnie65_full.parquet
+set V3E=%V3%\meshes_poisson_d8_pw8\cond_cell_type_binary-excitatory_g1.25_seed_1_n500
+set V3I=%V3%\meshes_poisson_d8_pw8\cond_cell_type_binary-inhibitory_g1.25_seed_1_n500
+if not exist %V3E% (echo NO v3 conditional excitatory set & goto :end)
+if not exist %V3I% (echo NO v3 conditional inhibitory set & goto :end)
+python scripts\neuron_model\compare_conditional_generation.py --block cell_type_binary --gen excitatory@g1.25=%V3E% --gen inhibitory@g1.25=%V3I% --morphometrics-table %MORPH%
 
 :end
 echo ===== chain AE done ===== %date% %time%

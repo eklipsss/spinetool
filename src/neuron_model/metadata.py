@@ -47,11 +47,30 @@ _LABID_NAME = re.compile(r"^(?:ab)?(\d+)(?:-(\d+))?", re.IGNORECASE)
 
 def labid_unit_id(group: str, dendrite: str) -> str:
     """Id of a LabID branch = ``<group>_<folder name>`` (sanitised, ``_processed`` dropped). Every folder of a group is
-    a SEPARATE branch (user decision 2026-10-24: whether two folders come from one dendrite / cell is unknown); it is
-    also the grouping unit of the split (``neuron_id``). The numbers in the name are kept only as metadata
+    a SEPARATE branch (user decision 2026-10-24); it is the key of the processed tables (``neuron_id``). The grouping unit of the split and of
+    the statistics is the source image since 2026-11-18 (``labid_source_id``: folders of one image are one cell). The numbers in the name are kept only as metadata
     (``labid_name_numbers``)."""
     name = str(dendrite).replace("_processed", "")
     return re.sub(r"[^A-Za-z0-9+]+", "_", f"{group}_{name}").strip("_")
+
+
+_LABID_SOURCE = re.compile(r"^[A-Za-z]*?(\d+)(?=[^0-9]|$)")
+
+
+def labid_source_id(unit_id: str) -> str:
+    """Id of the SOURCE IMAGE a LabID branch folder was cut from: ``<group>_<number>`` (``Ab_ab18_1`` and ``Ab_ab18_2`` -> ``Ab_18``).
+
+    Several folders (dendrite fragments) of one source image come from one image of one cell, so they are NOT independent:
+    the unit of the split and of the statistics is the source image (decision 2026-11-18; the folder stays the key of every
+    processed table, ``labid_unit_id`` is unchanged). Verified for Ab (``Исходники/<N>`` holds the series of image N, see
+    ``scripts/neuron_model/labid_acquisition_metadata.py``); for the other groups the first number of the folder name is
+    assumed to be the image number until their source folders are checked. An id without a group prefix or a number is
+    returned unchanged (its own unit)."""
+    group = labid_group(unit_id)
+    if group is None:
+        return str(unit_id)
+    m = _LABID_SOURCE.match(str(unit_id)[len(group) + 1:])
+    return f"{group}_{int(m.group(1))}" if m else str(unit_id)
 
 
 def labid_name_numbers(dendrite: str) -> Tuple[Optional[int], Optional[int]]:
