@@ -10,7 +10,7 @@ rem The checkpoint of the old A set is printed at the start (checkpoint_id in th
 rem generate_mogen.py is best_val_loss.
 rem Log: scripts\neuron_model\overnight\2026-11-20_AF_modelA-n500-evaluation.bat > logs_AF.txt 2>&1
 
-set CK=best_val_loss
+set CK=latest
 set REPO=C:\Users\Student\LipsEkaterina\GitHub\spinetool
 set SPLITS=data\processed\neuron-model\splits
 set RUNS=runs\training\neuron-model
@@ -28,7 +28,10 @@ if not exist %CMP%\real\poisson (echo NO REAL CONTROLS - run AB1 first & goto :e
 if not exist %V3%\meshes_poisson_d8_pw8\seed_1 (echo NO v3 MESHES & goto :end)
 
 echo ===== [AF0] checkpoint of the existing A set (must equal CK=%CK%) =====
-findstr /i "checkpoint_id" %MA%\meshes\seed_1\sample_000\*.json
+echo checkpoints in the run:
+dir /b %MA%\checkpoints
+for /f "delims=" %%F in ('dir /s /b %MA%\meshes\seed_1\*.json 2^>nul') do (findstr /i "checkpoint_id" "%%F" & goto :ckdone)
+:ckdone
 
 echo ===== [AF1] MoGen A: 300 more clouds (500 in total), seed 1, tag seed_1_n500 ===== %date% %time%
 python scripts\neuron_model\generate_mogen.py --run %MA% --checkpoint %CK% --n-samples 500 --seed 1 --tag seed_1_n500 --no-mesh
