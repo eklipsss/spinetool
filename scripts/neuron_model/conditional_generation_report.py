@@ -89,7 +89,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gen", action="append", required=True, metavar="VALUE[@LABEL]=SOURCE", help="a generated set (repeatable)")
     parser.add_argument("--block", default="cell_type_binary", choices=("cell_type_binary", "cell_type"), help="condition block: binary cell type or detailed cell types (sets <type>@<label>)")
-    parser.add_argument("--morphometrics-table", type=Path, required=True)
+    parser.add_argument("--morphometrics-table", type=Path, nargs="+", required=True, help="stage-8 table(s), one per dataset listed in --datasets")
+    parser.add_argument("--datasets", nargs="+", default=["minnie65"], choices=("minnie65", "h01"),
+                        help="datasets whose real spines are the reference (default minnie65; human only: h01 with the H01 stage-8 table)")
+    parser.add_argument("--exclude-keys", type=Path, help="parquet with a spine_key column: real spines to leave out (H01 spines without a neck, h01_detached_spines.parquet)")
     parser.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
     parser.add_argument("--splits", type=Path, help="real spines only of the neurons of --split (default: all neurons)")
     parser.add_argument("--split")
@@ -113,7 +116,7 @@ def main() -> None:
     spec = importlib.util.spec_from_file_location("morphology_by_condition", REPO_ROOT / "scripts/neuron_model/morphology_by_condition.py")
     mbc = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mbc)
-    real = mbc.load_spines(args.morphometrics_table, args.metadata_root.resolve(), args.splits, args.split)
+    real = mbc.load_spines(args.morphometrics_table, args.metadata_root.resolve(), args.splits, args.split, datasets=args.datasets, exclude_keys=args.exclude_keys)
     known = real[real[args.block].notna()]
     print(f"[cond-report] real: {len(real)} spines, {real['neuron_id'].nunique()} neurons; {args.block} known for {len(known)} spines of {known['neuron_id'].nunique()} neurons", flush=True)
 
@@ -159,9 +162,9 @@ def main() -> None:
     for key, s in results["same_type"].items():
         for pool, r in s["by_pool"].items():
             r["table"].to_csv(out / f"same_type_{safe(key)}_vs_{safe(pool)}.csv", index=False)
-    info = {"created": time.strftime("%Y-%m-%d %H:%M"), "block": args.block, "morphometrics_table": str(args.morphometrics_table), "splits": str(args.splits) if args.splits else None,
+    info = {"created": time.strftime("%Y-%m-%d %H:%M"), "block": args.block, "datasets": args.datasets, "morphometrics_table": [str(t) for t in args.morphometrics_table], "splits": str(args.splits) if args.splits else None,
             "split": args.split, "mesh_kind": args.mesh_kind, "gen": args.gen, "sets": infos, "n_real_spines": int(len(known)), "n_real_neurons": int(known["neuron_id"].nunique()),
-            "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items() if k not in ("gen",)}}
+            "args": {k: ([str(x) for x in v] if k == "morphometrics_table" else str(v) if isinstance(v, Path) else v) for k, v in vars(args).items() if k not in ("gen",)}}
     (out / "run_info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "results.json").write_text(json.dumps(ct.to_jsonable(results), ensure_ascii=False), encoding="utf-8")
 

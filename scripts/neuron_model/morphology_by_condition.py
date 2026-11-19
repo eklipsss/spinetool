@@ -33,33 +33,49 @@ from src.neuron_model.spine_generation.evaluation.morphology_by_condition import
 from src.neuron_model.spine_morphometrics import SCALAR_METRICS  # noqa: E402
 
 
-def load_spines(table_path: Path, metadata_root: Path, splits=None, split=None, compartment_table=None) -> pd.DataFrame:
+def load_spines(table_path, metadata_root: Path, splits=None, split=None, compartment_table=None, datasets=("minnie65",), exclude_keys=None) -> pd.DataFrame:
+    """Real spines of one or more datasets (``datasets``: kinds minnie65 / h01) with the condition columns ``species`` (mouse / human),
+    ``cell_type``, ``cell_type_binary``, ``compartment`` (the last is None where no table exists, e.g. H01). ``table_path``: one
+    stage-8 table or a list of them (each may have ``<table>.parts``); a row belongs to the dataset kind of its ``dataset`` column.
+    ``exclude_keys``: parquet with a ``spine_key`` column (dataset/neuron/limb/branch/spine) of spines to leave out, e.g. the H01 spines
+    without a neck (h01_detached_spines.parquet), which MoGen v4 never saw."""
     import pyarrow.parquet as pq
 
-    paths = [table_path] + sorted(Path(f"{table_path}.parts").glob("*.parquet")) if Path(f"{table_path}.parts").exists() else [table_path]
+    tables = [Path(t) for t in (table_path if isinstance(table_path, (list, tuple)) else [table_path])]
+    kinds_wanted = {str(k).lower() for k in datasets}
     frames = []
-    for path in paths:
-        names = set(pq.read_schema(path).names)
-        cols = [c for c in KEYS + ["status"] + list(SCALAR_METRICS) if c in names]
-        frames.append(pq.read_table(path, columns=cols).to_pandas())
+    for table in tables:
+        paths = [table] + sorted(Path(f"{table}.parts").glob("*.parquet")) if Path(f"{table}.parts").exists() else [table]
+        for path in paths:
+            names = set(pq.read_schema(path).names)
+            cols = [c for c in KEYS + ["status"] + list(SCALAR_METRICS) if c in names]
+            frames.append(pq.read_table(path, columns=cols).to_pandas())
     frame = pd.concat(frames, ignore_index=True).drop_duplicates(subset=KEYS, keep="last")
     if "status" in frame.columns:
         frame = frame[frame["status"].astype(str) == "success"]
-    frame = frame[frame["dataset"].astype(str).map(dataset_kind) == "minnie65"].copy()
+    frame["_kind"] = frame["dataset"].astype(str).map(dataset_kind)
+    frame = frame[frame["_kind"].isin(kinds_wanted)].copy()
     for key in ("neuron_id", "limb_id"):
         frame[key] = frame[key].astype(str)
+    if exclude_keys is not None:
+        drop = set(pd.read_parquet(exclude_keys)["spine_key"].astype(str))
+        frame = frame[~frame[KEYS].astype(str).agg("/".join, axis=1).isin(drop)]
     if splits is not None:
-        s = pd.read_parquet(splits)
-        neuron_split = dict(zip(s["spine_key"].astype(str).str.split("/").str[1], s["split"].astype(str)))
+        sp = pd.read_parquet(splits)
+        neuron_split = dict(zip(sp["spine_key"].astype(str).str.split("/").str[1], sp["split"].astype(str)))
         frame["split"] = frame["neuron_id"].map(neuron_split)
         frame = frame[frame["split"] == split] if split else frame[frame["split"].notna()]
     meta = load_metadata_tables(metadata_root, compartment_table)
-    types = meta["cell_types"].get("minnie65", {})
-    comps = meta["compartments"].get("minnie65", {})
-    frame["cell_type"] = frame["neuron_id"].map(types)
-    frame["cell_type_binary"] = frame["cell_type"].map(lambda t: cell_type_binary(t) if isinstance(t, str) else None)
     limb = pd.to_numeric(frame["limb_id"], errors="coerce")
-    frame["compartment"] = [comps.get((n, int(l))) if np.isfinite(l) else None for n, l in zip(frame["neuron_id"], limb)]
+    frame["species"] = frame["_kind"].map({"minnie65": "mouse", "h01": "human"})
+    cell_type, compartment = [], []
+    for kind, neuron, l in zip(frame["_kind"], frame["neuron_id"], limb):
+        cell_type.append(meta["cell_types"].get(kind, {}).get(neuron))
+        compartment.append(meta["compartments"].get(kind, {}).get((neuron, int(l))) if np.isfinite(l) else None)
+    frame["cell_type"] = cell_type
+    frame["cell_type_binary"] = frame["cell_type"].map(lambda t: cell_type_binary(t) if isinstance(t, str) else None)
+    frame["compartment"] = compartment
+    frame = frame.drop(columns="_kind")
     for m in SCALAR_METRICS:
         frame[m] = pd.to_numeric(frame[m], errors="coerce")
     return frame

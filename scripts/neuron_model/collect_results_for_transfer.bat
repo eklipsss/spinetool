@@ -7,8 +7,9 @@ rem Afterwards read MISSING.txt in the destination folder: every line is a folde
 
 set REPO=C:\Users\Student\LipsEkaterina\GitHub\spinetool
 set DST=C:\Users\Student\LipsEkaterina\transfer_2026-11-19
-rem MANUAL 1: path of the LabID S manifest (labid_raw_z07\labid\preprocessed\manifest.parquet); leave empty to skip it
-set LABID_MANIFEST=
+rem LabID: the converted trees with the S outputs (z07 = z correction 0.7 for Wt and Ab, z1 = no correction); manifest and morphometrics are small
+set LABID07=C:\Users\Student\LipsEkaterina\data\labid\labid_raw_z07\labid\preprocessed
+set LABID1=C:\Users\Student\LipsEkaterina\data\labid\labid_raw_z1\labid\preprocessed
 
 set TRN=%REPO%\runs\training\neuron-model
 set ANA=%REPO%\runs\analysis\neuron-model
@@ -58,10 +59,8 @@ for %%R in (2026-11-01_061733_mogen-conditional-v1 2026-11-02_023219_mogen-condi
 )
 for /d %%D in ("%ANA%\*condition-use*") do robocopy "%%D" "%DST%\analysis\%%~nxD" /E /XF %HEAVY% /NFL /NDL /NJH /NJS /NP >nul
 
-echo ===== G. LabID manifest =====
-if defined LABID_MANIFEST (
-  if exist "%LABID_MANIFEST%" (copy /Y "%LABID_MANIFEST%" "%DST%\labid_manifest.parquet" >nul) else (echo LABID_MANIFEST not found: %LABID_MANIFEST% >> "%LOG%")
-) else (echo MANUAL: LabID S manifest was not copied, set LABID_MANIFEST at the top of the script >> "%LOG%")
+echo ===== G. LabID manifests and morphometrics (z07 and z1) =====
+for %%V in (07 1) do call :labid %%V
 
 echo ===== size of the result and zip =====
 powershell -NoProfile -Command "$s=(Get-ChildItem '%DST%' -Recurse -File | Measure-Object Length -Sum).Sum/1MB; Write-Host ('total size, MB: ' + [math]::Round($s,1)); Get-ChildItem '%DST%' -Recurse -File | Sort-Object Length -Descending | Select-Object -First 8 | ForEach-Object { Write-Host ([math]::Round($_.Length/1MB,1).ToString() + ' MB  ' + $_.FullName) }"
@@ -73,6 +72,16 @@ type "%LOG%"
 goto :end
 
 rem ---- helpers ---------------------------------------------------------------------------------------------------
+:labid
+rem %1 = 07 or 1; copies manifest.parquet and morphometrics.parquet of the LabID S outputs
+if "%1"=="07" (set LSRC=%LABID07%) else (set LSRC=%LABID1%)
+if not exist "%LSRC%" (echo MISSING LabID folder: %LSRC% >> "%LOG%" & goto :eof)
+if not exist "%DST%\labid_z%1" mkdir "%DST%\labid_z%1"
+for %%F in (manifest.parquet morphometrics.parquet metadata.parquet) do (
+  if exist "%LSRC%\%%F" (copy /Y "%LSRC%\%%F" "%DST%\labid_z%1\%%F" >nul) else (echo MISSING LabID file: %LSRC%\%%F >> "%LOG%")
+)
+goto :eof
+
 :run_small
 rem %1 = run folder name in runs\training\neuron-model; copies top-level json/yaml/yml/txt, logs\*.jsonl, *.log
 if not exist "%TRN%\%1" (echo MISSING run folder: %TRN%\%1 >> "%LOG%" & goto :eof)

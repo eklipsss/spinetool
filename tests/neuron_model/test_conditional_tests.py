@@ -335,3 +335,42 @@ def test_gbm_classifier_option_runs(real):
                                        classifiers=("logistic", "gbm"), n_real_draw=600, log=lambda *_: None)
     assert "gbm/all" in res["classifier"] and 0.5 < res["classifier"]["gbm/all"]["auc"] <= 1.0
     assert "gbm" in res["discriminability"]["inhibitory@g1"]
+
+
+def test_load_spines_reads_h01_and_both_datasets(tmp_path):
+    """morphology_by_condition.load_spines: H01 rows get species human and the binary type from h01_celltype.csv; the default
+    (datasets=minnie65) is unchanged; two tables / datasets at once."""
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    meta = root / "datasets"
+    if not (meta / "H01" / "H01_Seg" / "h01_celltype.csv").exists() or not (meta / "minnie65" / "cell_types_with_nucleus.csv").exists():
+        pytest.skip("repository metadata tables are not available")
+    spec = importlib.util.spec_from_file_location("morphology_by_condition", root / "scripts/neuron_model/morphology_by_condition.py")
+    mbc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mbc)
+    rng = np.random.default_rng(0)
+
+    def table(dataset, neurons, name):
+        rows = pd.DataFrame({"dataset": dataset, "neuron_id": np.repeat(neurons, 6), "limb_id": "0", "branch_id": "0", "spine_id": [str(i) for i in range(6 * len(neurons))], "status": "success"})
+        from src.neuron_model.spine_morphometrics import SCALAR_METRICS
+
+        for m in SCALAR_METRICS:
+            rows[m] = rng.uniform(1, 2, len(rows))
+        path = tmp_path / name
+        rows.to_parquet(path, index=False)
+        return path
+
+    h01 = table("H01_Seg", ["neuron_546925828", "neuron_547114083"], "h01.parquet")
+    minnie = table("minnie65", ["864691134886335738", "864691134886404090"], "minnie.parquet")
+    only_h01 = mbc.load_spines(h01, meta, datasets=("h01",))
+    assert len(only_h01) == 12 and set(only_h01["species"]) == {"human"} and only_h01["cell_type"].notna().all()
+    assert set(only_h01["cell_type_binary"].dropna()) <= {"excitatory", "inhibitory"} and only_h01["cell_type_binary"].notna().all()
+    both = mbc.load_spines([minnie, h01], meta, datasets=("minnie65", "h01"))
+    assert set(both["species"]) == {"mouse", "human"} and len(both) == 24
+    drop = tmp_path / "drop.parquet"
+    pd.DataFrame({"spine_key": ["H01_Seg/neuron_546925828/0/0/0", "H01_Seg/neuron_546925828/0/0/1"]}).to_parquet(drop)
+    assert len(mbc.load_spines(h01, meta, datasets=("h01",), exclude_keys=drop)) == 10
+    default = mbc.load_spines([minnie, h01], meta)             # unchanged behaviour: Minnie65 only
+    assert set(default["species"]) == {"mouse"} and len(default) == 12
