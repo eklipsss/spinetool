@@ -53,6 +53,7 @@ def main() -> None:
     if "val_enough" in table.columns:
         print("\ntypes with >= %d validation neurons: %s" % (args.min_neurons, ", ".join(str(t) for t in table.index[table["val_enough"]])))
     if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
         table.to_csv(args.out)
 
 

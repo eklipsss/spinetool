@@ -94,6 +94,7 @@ def main() -> None:
     ap.add_argument("--confocal-param", action="append", default=[], metavar="KEY=VALUE",
                     help="override one imaging parameter, e.g. sigma_z_nm=400 or threshold=0.3 (repeatable)")
     ap.add_argument("--check-self-intersections", action="store_true", help="off by default (CGAL subprocess per mesh), as in the generation")
+    ap.add_argument("--allow-fewer", action="store_true", help="if fewer spines match than --n-samples x seeds, take all of them (split evenly over seeds)")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--out", type=Path, help="default runs/analysis/neuron-model/<date>_real-controls")
     args = ap.parse_args()
@@ -114,7 +115,13 @@ def main() -> None:
     frame = filter_rows(frame, args.where, ap)
     print(f"{len(frame)} {args.split if args.splits else 'all'} spines of {frame['group_id'].nunique()} neurons in {args.splits.name if args.splits else 'the manifest'}"
           + (f" with {' & '.join(args.where)}" if args.where else ""), flush=True)
-    picks = assign_samples(frame["spine_key"].tolist(), n_per_seed=args.n_samples, seeds=args.seeds, base_seed=args.base_seed)
+    n_per_seed = args.n_samples
+    if args.allow_fewer and n_per_seed * len(args.seeds) > len(frame):
+        n_per_seed = len(frame) // len(args.seeds)
+        print(f"only {len(frame)} spines available: {n_per_seed} per seed instead of {args.n_samples} (--allow-fewer)", flush=True)
+    if n_per_seed < 1:
+        ap.error("no spines selected")
+    picks = assign_samples(frame["spine_key"].tolist(), n_per_seed=n_per_seed, seeds=args.seeds, base_seed=args.base_seed)
     by_key = frame.set_index("spine_key", drop=False)
 
     kwargs = {}
