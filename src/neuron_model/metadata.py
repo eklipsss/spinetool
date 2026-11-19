@@ -56,6 +56,10 @@ def labid_unit_id(group: str, dendrite: str) -> str:
 
 _LABID_SOURCE = re.compile(r"^[A-Za-z]*?(\d+)(?=[^0-9]|$)")
 
+# Source folders holding ONE stack for two image numbers (Wt: ``Исходники/4+5``, ``8+9``, one series each): crops of both numbers
+# are cut from the same image, so they form one unit.
+_LABID_SOURCE_MERGED = {("Wt", 4): "Wt_4+5", ("Wt", 5): "Wt_4+5", ("Wt", 8): "Wt_8+9", ("Wt", 9): "Wt_8+9"}
+
 
 def labid_source_id(unit_id: str) -> str:
     """Id of the SOURCE IMAGE a LabID branch folder was cut from: ``<group>_<number>`` (``Ab_ab18_1`` and ``Ab_ab18_2`` -> ``Ab_18``).
@@ -63,14 +67,16 @@ def labid_source_id(unit_id: str) -> str:
     Several folders (dendrite fragments) of one source image come from one image of one cell, so they are NOT independent:
     the unit of the split and of the statistics is the source image (decision 2026-11-18; the folder stays the key of every
     processed table, ``labid_unit_id`` is unchanged). Verified for Ab (``Исходники/<N>`` holds the series of image N, see
-    ``scripts/neuron_model/labid_acquisition_metadata.py``); for the other groups the first number of the folder name is
-    assumed to be the image number until their source folders are checked. An id without a group prefix or a number is
+    ``scripts/neuron_model/labid_acquisition_metadata.py``); for Wt, Ab+9009 and Wt+9009 the first number of the folder name
+    is the image number too (checked 2026-11-18 against their source folders; Wt images 4+5 and 8+9 share one stack and are merged). An id without a group prefix or a number is
     returned unchanged (its own unit)."""
     group = labid_group(unit_id)
     if group is None:
         return str(unit_id)
     m = _LABID_SOURCE.match(str(unit_id)[len(group) + 1:])
-    return f"{group}_{int(m.group(1))}" if m else str(unit_id)
+    if not m:
+        return str(unit_id)
+    return _LABID_SOURCE_MERGED.get((group, int(m.group(1))), f"{group}_{int(m.group(1))}")
 
 
 def labid_name_numbers(dendrite: str) -> Tuple[Optional[int], Optional[int]]:

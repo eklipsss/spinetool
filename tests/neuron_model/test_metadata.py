@@ -21,3 +21,13 @@ def test_split_by_source_image_keeps_fragments_together():
     assert splits["group_id"].nunique() == 30
     both = splits.assign(neuron=[k.split("/")[1] for k in splits["spine_key"]]).groupby(splits["group_id"])["split"].nunique()
     assert both.max() == 1
+
+
+def test_labid_source_image_merges_wt_shared_stacks():
+    from src.neuron_model.metadata import labid_source_id
+
+    assert labid_source_id("Wt_4_1_processed") == labid_source_id("Wt_5_2") == "Wt_4+5"
+    assert labid_source_id("Wt_8_1_processed_1") == labid_source_id("Wt_9_1") == "Wt_8+9"
+    assert labid_source_id("Wt_6_1") == "Wt_6"
+    assert labid_source_id("Ab_4_1") == "Ab_4"
+    assert labid_source_id("Wt+9009_13_2") == "Wt+9009_13"

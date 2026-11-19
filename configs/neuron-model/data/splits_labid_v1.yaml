@@ -5,7 +5,7 @@
 # analysis and for LabID adapters, the test part is read once, at the end.
 #   python scripts/neuron_model/build_splits.py --config configs/neuron-model/data/splits_labid_v1.yaml ^
 #       "manifests=[C:/Users/Student/LipsEkaterina/data/labid/labid_raw_z1/labid/preprocessed/manifest.parquet]"
-# Source images of the groups other than Ab: check data/interim/neuron-model/labid_acquisition.csv (labid_acquisition_metadata.py) first.
+# Source images of all four groups checked 2026-11-18 (labid_acquisition_metadata.py): crop N-k = image N; Wt images 4+5 and 8+9 share one stack and are merged.
 version: splits_labid_v1
 seed: 20261118
 manifests: []
