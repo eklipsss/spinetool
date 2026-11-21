@@ -69,9 +69,16 @@ def wilson(k: int, n: int, z: float = Z_ALPHA) -> Tuple[float, float, float]:
 
 
 def parse_weight(label: str) -> float:
-    """Guidance weight from a set label (``g1.25`` -> 1.25); NaN if the label has no number."""
-    m = re.search(r"(\d+(?:\.\d+)?)", str(label))
-    return float(m.group(1)) if m else float("nan")
+    """Guidance weight from a set label: the number right after a ``g`` that does not follow a letter
+    (``g1.25`` -> 1.25, ``v4g3-pw8`` -> 3) or a purely numeric label (``1.5``); NaN otherwise (``real-pw8val``).
+
+    Before 2026-11-21 the first number of the label was taken, so ``v4g1.5`` and ``v4g3`` both gave 4 (one set
+    overwrote the other in the dose table) and the floor ``real-pw8val`` gave 8."""
+    s = str(label)
+    m = re.search(r"(?:^|[^A-Za-z])g(\d+(?:\.\d+)?)", s)
+    if m:
+        return float(m.group(1))
+    return float(s) if re.fullmatch(r"\d+(?:\.\d+)?", s) else float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -947,15 +954,22 @@ def run_conditional_tests(real: pd.DataFrame, gen_sets: Dict[Tuple[str, str], pd
         out["real_effect"] = real_tbl
         a, b = pr
         labels = labels_of[pr]
-        gen_effects = {parse_weight(lab): gen_tabs[(lab, pr)] for lab in labels}
+        gen_effects = {}
+        for lab in labels:
+            w = parse_weight(lab)
+            if np.isfinite(w) and w in gen_effects:
+                raise ValueError(f"two sets with guidance weight {w} (label {lab!r}): give the dose sets distinct g<w> labels")
+            gen_effects[w if np.isfinite(w) else ("nan", lab)] = gen_tabs[(lab, pr)]
 
         # ---- E: dose-response over the guidance weights (labels with a number)
-        weights = [w for w in gen_effects if np.isfinite(w)]
+        weights = [w for w in gen_effects if isinstance(w, float) and np.isfinite(w)]
         if weights:
             std_pool = pools.get("mixture") or next(iter(pools.values()))
             rng = np.random.default_rng(seed + 500)
             gen_ed = {}
             for lab in labels:
+                if not np.isfinite(parse_weight(lab)):
+                    continue
                 za, zb = complete_rows(gen_sets[(a, lab)], metrics), complete_rows(gen_sets[(b, lab)], metrics)
                 if len(za) >= 30 and len(zb) >= 30:
                     za = std_pool.standardise(za[rng.choice(len(za), min(len(za), 500), replace=False)])

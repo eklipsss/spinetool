@@ -374,3 +374,12 @@ def test_load_spines_reads_h01_and_both_datasets(tmp_path):
     assert len(mbc.load_spines(h01, meta, datasets=("h01",), exclude_keys=drop)) == 10
     default = mbc.load_spines([minnie, h01], meta)             # unchanged behaviour: Minnie65 only
     assert set(default["species"]) == {"mouse"} and len(default) == 12
+
+
+def test_parse_weight_takes_the_number_after_g():
+    parse_weight = ct.parse_weight
+    assert parse_weight("g1.25") == 1.25
+    assert parse_weight("v4g1.5-pw8") == 1.5 and parse_weight("v4g3-pw8") == 3.0
+    assert parse_weight("1.5") == 1.5
+    for lab in ("real-pw8val", "v4-pw8", "default", "seg2"):
+        assert parse_weight(lab) != parse_weight(lab)  # NaN
