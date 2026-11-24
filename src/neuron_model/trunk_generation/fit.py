@@ -14,6 +14,7 @@ import functools
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+import pandas as pd
 
 from ..significance import cluster_bootstrap_diff, ks_pvalue
 from .conditions import DesignEncoder
@@ -103,6 +104,49 @@ def _thin_share(model: T0Model, requests: Sequence[Dict[str, Any]], val: Sequenc
     return out
 
 
+def _neuron_thin(model: T0Model, requests: Sequence[Dict[str, Any]], val: Sequence[T0Branch], val_neurons: Sequence[str], seed: int,
+                 thin_nm: float = 200.0, min_branches: int = 5) -> Dict[str, Any]:
+    """Thin branches (median radius <= ``thin_nm``) per NEURON and per pair (first draw, no rejection).
+
+    ``per_neuron``: share of thin branches of every validation neuron with >= ``min_branches`` branches, quantiles over the
+    neurons: real, generated with an independent effect per branch, and (model with a neuron effect) with one fresh
+    effect per neuron. ``pairing``: P(generated thin | real thin) and P(generated thin | real thick) of the same request,
+    independent vs the posterior of the neuron from its OTHER validation branches (leave one out). Why: chain AK0, the
+    spine excess came from real thin branches getting a thick trunk."""
+    rng = np.random.default_rng(seed + 23)
+    neurons = np.asarray(list(val_neurons), dtype=object)
+    real = np.array([float(np.median(np.exp(b.log_radius))) <= thin_nm for b in val])
+    def draw(reqs):
+        return np.array([float(np.median(np.exp(r["log_radius"]))) <= thin_nm for r in model.sample(list(reqs), rng)])
+    variants = {"independent": draw(requests)}
+    if model.has_neuron_effect:
+        fresh = {n: model.fresh_neuron_effect(rng) for n in pd.unique(neurons)}
+        variants["per_neuron"] = draw([dict(q, t0_neuron_effect=fresh[n]) for q, n in zip(requests, neurons)])
+        idx_of = {}
+        for i, n in enumerate(neurons):
+            idx_of.setdefault(n, []).append(i)
+        post = [dict(q, t0_neuron_effect=model.posterior_neuron_effect([val[j] for j in idx_of[n] if j != i], rng))
+                for i, (q, n) in enumerate(zip(requests, neurons))]
+        variants["posterior"] = draw(post)
+    out: Dict[str, Any] = {"thin_nm": thin_nm, "n_branches": int(len(val)), "real_share": float(real.mean()), "per_neuron": {}, "pairing": {}}
+    uniq, inv = np.unique(neurons.astype(str), return_inverse=True)
+    counts = np.bincount(inv)
+    keep = counts >= min_branches
+    def quant(flags):
+        share = np.bincount(inv, weights=flags.astype(float)) / counts
+        s = share[keep]
+        return {"n_neurons": int(keep.sum()), "median": float(np.median(s)), "p75": float(np.percentile(s, 75)), "p90": float(np.percentile(s, 90)),
+                "sd": float(s.std()), "share_zero": float(np.mean(s == 0.0))} if keep.any() else {"n_neurons": 0}
+    out["per_neuron"]["real"] = quant(real)
+    for name, flags in variants.items():
+        if name != "posterior":
+            out["per_neuron"][name] = quant(flags)
+        if name != "per_neuron":
+            out["pairing"][name] = {"gen_share": float(flags.mean()), "p_thin_given_real_thin": float(flags[real].mean()) if real.any() else float("nan"),
+                                    "p_thin_given_real_thick": float(flags[~real].mean()) if (~real).any() else float("nan")}
+    return out
+
+
 def _raw_tortuosity_by_length(model: T0Model, requests: Sequence[Dict[str, Any]], val: Sequence[T0Branch], seed: int) -> Dict[str, Dict[str, float]]:
     """Real vs generated tortuosity per length class; generated = one draw per request WITHOUT the rejection step
     (a structural excess of winding grows with the length when the heading diffuses freely)."""
@@ -186,6 +230,7 @@ def fit_t0(
         raw = _raw_tortuosity_by_length(model, requests, val, seed)
         raw_cv = _raw_radius_cv_by_radius(model, requests, val, seed)
         thin = _thin_share(model, requests, val, seed)
+        neuron_thin = _neuron_thin(model, requests, val, val_neurons, seed)
         # the same on (at most 500) TRAIN branches: matching there but not on validation = the validation neurons differ
         if train_conditions is not None:
             idx = np.random.default_rng(seed + 13).permutation(len(train))[:500]
@@ -194,7 +239,7 @@ def fit_t0(
         else:
             raw_cv_train = {}
         results[mean] = {"generation": summary, "functionals": metrics, "tortuosity_by_length": raw, "radius_cv_by_radius": raw_cv, "radius_cv_by_radius_train": raw_cv_train, "thin_share": thin,
-                         "mean_w1_rel": float(np.nanmean([m["w1_rel"] for m in metrics.values()]))}
+                         "neuron_thin": neuron_thin, "mean_w1_rel": float(np.nanmean([m["w1_rel"] for m in metrics.values()]))}
         models[mean] = model
         log(f"[t0] {mean:9s} acceptance {summary['acceptance_rate']:.3f}, rejected {summary.get('rejection_reasons', {})}, "
             f"mean W1/std over functionals {results[mean]['mean_w1_rel']:.3f}")
@@ -208,6 +253,21 @@ def fit_t0(
         for name, v in thin.items():
             log(f"       thin branches, {name:16s} n {v['n']:4d}: share <=150 nm real {v['real_le150']:.3f} gen {v['gen_le150']:.3f} | "
                 f"<=200 nm real {v['real_le200']:.3f} gen {v['gen_le200']:.3f} | p5 of the median radius real {v['real_p5']:.0f} gen {v['gen_p5']:.0f} nm")
+        ne = (model.mean.fit_info or {}).get("neuron_effect") if hasattr(model.mean, "fit_info") else None
+        if ne:
+            level = (f"level: sd log r_L {ne['sd_log_r_L']:.3f}, sd log ratio {ne['sd_log_ratio']:.3f}, share of the log r_L variance {ne['share_log_r_L']:.2f}"
+                     if "sd_log_r_L" in ne else "level: off")
+            gate = (f"gate: tau {ne['tau_gate']:.3f} (log odds thinnest vs thickest component; direction {[round(v, 2) for v in ne['gate_direction']]})"
+                    if "tau_gate" in ne else "gate: off")
+            log(f"       neuron effect ({ne['n_neurons']} neurons, {ne['iterations']} rounds): {level}; {gate}; within-neuron sd of the components "
+                f"{[round(v, 3) for v in ne['sd_log_r_L_within_after']]} (without the effects {[round(v, 3) for v in ne['sd_log_r_L_within_before']]})")
+        for name, v in neuron_thin["per_neuron"].items():
+            if v.get("n_neurons"):
+                log(f"       thin share per neuron ({name:11s}, {v['n_neurons']} neurons >= 5 branches): median {v['median']:.3f} p75 {v['p75']:.3f} p90 {v['p90']:.3f} "
+                    f"sd {v['sd']:.3f}, neurons without thin {v['share_zero']:.2f}")
+        for name, v in neuron_thin["pairing"].items():
+            log(f"       pairing ({name:11s}): P(gen thin | real thin) {v['p_thin_given_real_thin']:.3f}, P(gen thin | real thick) {v['p_thin_given_real_thick']:.3f}, "
+                f"gen thin {v['gen_share']:.3f} (real {neuron_thin['real_share']:.3f})")
         for part, table in (("val", raw_cv), ("train", raw_cv_train)):
             for name, v in table.items():
                 log(f"       radius CV {part:5s}, {name:12s} n {v['n']:3d}: real median {v['real_median']:.3f} p90 {v['real_p90']:.3f} | "

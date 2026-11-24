@@ -13,7 +13,11 @@ branch, nearest-neighbour distance on the trunk surface, gaps along the branch, 
 two halves of the real reference. Per-spine statistics of the generated branches are computed after the same thinning
 the real ones undergo (spines without a position, ~7 %): every generated spine is kept with the share
 n_with_position / n_spines_in_range of its source branch (``--no-position-thinning``: all generated spines, as before
-2026-11-11). Counts and densities always use all spines; the generator is not affected. Writes ``<out>/evaluation.json``, ``<out>/evaluation_branches.csv`` and ``<out>/evaluation_spines.csv``
+2026-11-11). Counts and densities always use all spines; the generator is not affected.
+Paired populations (2026-11-24): a real source branch NOT eligible for P has no spine count (NaN) and no per-spine
+statistics, so the count, the density, the empty share and the per-spine statistics of its generated twin are dropped
+too (set to NaN / empty); otherwise all generated branches were compared with the P-eligible real subset only. Trunk
+functionals use all branches. ``--unpaired-counts``: the previous behaviour. Writes ``<out>/evaluation.json``, ``<out>/evaluation_branches.csv`` and ``<out>/evaluation_spines.csv``
 (out = the assembly directory, else ``<tp-dir>/evaluation``). CPU, seconds.
 """
 
@@ -56,6 +60,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path)
     parser.add_argument("--cell-type-binary", choices=("excitatory", "inhibitory"),
                         help="only the requests copied from branches of this cell type (output: evaluation_<type>/)")
+    parser.add_argument("--unpaired-counts", action="store_true",
+                        help="keep the counts / per-spine statistics of generated branches whose real source has no count (before 2026-11-24)")
     parser.add_argument("--no-position-thinning", action="store_true",
                         help="per-spine statistics on ALL generated spines (biased: the real ones lack ~7 %% of positions)")
     args = parser.parse_args()
@@ -115,13 +121,16 @@ def main() -> None:
     sp = spines[(spines["status"].astype(str) == "valid") & spines["has_position"].fillna(False).astype(bool)] if len(spines) else spines
     sp_by_key = {k: g for k, g in sp.groupby(key_series(sp))} if len(sp) else {}
     real_rows, real_stats, real_neurons = [], [], []
+    count_known = []  # aligned with the generated rows: does the real source branch have a spine count?
     for key in sources:
         if key not in pack or key not in rows_by_key:
+            count_known.append(False)
             continue
         row = rows_by_key[key]
         rec = trunk_record(pack.get(key))
         eligible_p = bool(row.get("train_eligible_P"))
         n = int(row["n_spines_in_range"]) if eligible_p and pd.notna(row.get("n_spines_in_range")) else np.nan
+        count_known.append(bool(np.isfinite(n)))
         real_rows.append({"source_branch": key, "length_nm": float(rec["length"]), "n_spines": n, **trunk_functionals(rec)})
         g = sp_by_key.get(key)
         if eligible_p and g is not None:
@@ -130,6 +139,14 @@ def main() -> None:
             real_stats.append(spine_geometry_stats(np.zeros(0), np.zeros(0), np.zeros(0), float(rec["length"])))
         real_neurons.append(key.split("/")[1])
 
+    n_unknown = int(len(count_known) - sum(count_known))
+    if not args.unpaired_counts and n_unknown:
+        for j, known in enumerate(count_known):
+            if not known:
+                gen_rows[j]["n_spines"] = np.nan
+                gen_stats[j] = spine_geometry_stats(np.zeros(0), np.zeros(0), np.zeros(0), gen_rows[j]["length_nm"])
+        print(f"[evaluate] {n_unknown} of {len(count_known)} requests have a real source without a spine count (not eligible for P): "
+              "their generated counts and per-spine statistics are left out (--unpaired-counts keeps them)")
     gen_b, gen_s = collect(gen_rows, gen_stats, gen_neurons)
     real_b, real_s = collect(real_rows, real_stats, real_neurons)
     result = compare_sets(gen_b, real_b, gen_s, real_s, n_boot=args.bootstrap)
@@ -145,6 +162,7 @@ def main() -> None:
     out = args.out or (args.assembly if args.assembly else args.tp_dir / ("evaluation" + (f"_{args.cell_type_binary}" if args.cell_type_binary else "")))
     out.mkdir(parents=True, exist_ok=True)
     report = {"tp_dir": str(args.tp_dir), "assembly": str(args.assembly) if args.assembly else None, "level": "assembled" if args.assembly else "tp",
+              "paired_counts": not args.unpaired_counts, "n_requests_without_real_count": n_unknown,
               "n_generated": int(len(gen_b)), "n_real": int(len(real_b)), "n_real_neurons": int(len(set(real_neurons))),
               "noise_floor_by": "neuron" if len(set(real_neurons)) >= 2 else "branch",
               "position_thinning": None if args.no_position_thinning else {"mean_keep_fraction": float(np.mean(keep_fractions)) if keep_fractions else float("nan")},

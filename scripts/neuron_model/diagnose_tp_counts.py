@@ -68,10 +68,15 @@ def main() -> None:
         if not cands:
             raise SystemExit(f"no evaluation*/evaluation_branches.csv in {args.tp_dir}")
         ev = cands[-1]
-    p = pair_frame(args.tp_dir, ev)
+    p_all = pair_frame(args.tp_dir, ev)
     out = ev / "count_diagnosis"
     out.mkdir(parents=True, exist_ok=True)
-    p.to_csv(out / "pairs.csv", index=False)
+    p_all.to_csv(out / "pairs.csv", index=False)
+    # a request whose generated trunk was rejected (or whose evaluation row is missing) has NaN count / radius: every
+    # statistic below uses the SAME complete pairs, otherwise the means and the summed excess refer to different branches
+    complete = p_all[["n_gen", "n_real", "r_gen", "r_real"]].notna().all(axis=1)
+    inc = p_all[~complete]
+    p = p_all[complete].reset_index(drop=True)
 
     cross = p.groupby(["thin_real", "thin_gen"]).agg(n=("n_gen", "size"), n_real_mean=("n_real", "mean"), n_gen_mean=("n_gen", "mean"),
                                                       excess_sum=("n_excess", "sum")).reset_index()
@@ -85,9 +90,14 @@ def main() -> None:
     rq.to_csv(out / "radius_quantiles.csv", index=False)
 
     lines = ["# Spines per branch: where the excess comes from", "",
-             f"Set `{args.tp_dir.name}`, evaluation `{ev.name}`: {len(p)} pairs (generated branch, its source real branch).",
+             f"Set `{args.tp_dir.name}`, evaluation `{ev.name}`: {len(p_all)} pairs (generated branch, its source real branch), "
+             f"{len(p)} complete; all numbers below on the complete pairs.",
+             (f"Incomplete pairs: {len(inc)} (generated missing {int(inc['n_gen'].isna().sum())}, real missing {int(inc['n_real'].isna().sum())}); "
+              f"their real branches: mean {inc['n_real'].mean():.1f} spines, median length {inc['length_nm'].median() / 1000:.1f} um "
+              f"(complete: {p['n_real'].mean():.1f}, {p['length_nm'].median() / 1000:.1f} um)." if len(inc) else "Incomplete pairs: 0."),
              f"Spines per branch: mean {p['n_gen'].mean():.2f} generated against {p['n_real'].mean():.2f} real, median {p['n_gen'].median():g} against {p['n_real'].median():g}; "
-             f"thin (r < {THIN_NM:g} nm) {p['thin_gen'].mean():.3f} against {p['thin_real'].mean():.3f}; total excess {p['n_excess'].sum():.0f} spines.", "",
+             f"thin (r < {THIN_NM:g} nm) {p['thin_gen'].mean():.3f} against {p['thin_real'].mean():.3f}; total excess {p['n_excess'].sum():.0f} spines "
+             f"({p['n_excess'].mean():+.2f} per branch).", "",
              "## Thin status of the pair", "", "| real thin | generated thin | n | spines real (mean) | generated (mean) | share of the excess |", "| --- | --- | --- | --- | --- | --- |"]
     for _, r in cross.iterrows():
         lines.append(f"| {r.thin_real} | {r.thin_gen} | {r.n} | {r.n_real_mean:.1f} | {r.n_gen_mean:.1f} | {r.excess_share:.2f} |")
@@ -101,7 +111,7 @@ def main() -> None:
             name = " / ".join(str(r[c]) for c in k)
             lines.append(f"| {name} | {r.n} | {r.thin_real:.2f} | {r.thin_gen:.2f} | {r.r_real:.0f} | {r.r_gen:.0f} | {r.n_real:g} | {r.n_gen:g} | {r.excess_share:.2f} |")
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print("\n".join(lines[:16]))
+    print("\n".join(lines))
     print(f"-> {out}")
 
 

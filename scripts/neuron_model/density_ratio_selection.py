@@ -32,12 +32,30 @@ from src.neuron_model.spine_generation.evaluation.density_ratio import DensityRa
 from src.neuron_model.spine_generation.evaluation.paired_bootstrap import METRICS, cv_auc, log_complete, neuron_of  # noqa: E402
 
 
+KEY_PARTS = ["dataset", "neuron_id", "limb_id", "branch_id", "spine_id"]
+
+
 def read(path: Path, real: bool) -> pd.DataFrame:
-    cols = (["spine_key"] if real else ["sample_id"]) + list(METRICS)
-    have = set(pd.read_parquet(path, columns=None).columns) if not real else None
-    if have is not None and "sample_id" not in have:
-        cols = list(METRICS)
-    return pd.read_parquet(path, columns=cols)
+    """Real: ``spine_key`` + metrics; a preprocessing stage-8 table has the key in parts (dataset/neuron/limb/branch/spine),
+    the key is then built the same way as in ``evaluation.morphometrics._read_stage_table``. Generated: sample_id + metrics."""
+    import pyarrow.parquet as pq
+
+    have = set(pq.ParquetDataset(path).schema.names)
+    metrics = [m for m in METRICS if m in have]
+    if not real:
+        return pd.read_parquet(path, columns=(["sample_id"] if "sample_id" in have else []) + metrics)
+    if "spine_key" in have:
+        return pd.read_parquet(path, columns=["spine_key"] + metrics)
+    if not set(KEY_PARTS) <= have:
+        raise SystemExit(f"{path}: neither spine_key nor the key parts {KEY_PARTS}")
+    extra = ["status"] if "status" in have else []
+    frame = pd.read_parquet(path, columns=KEY_PARTS + extra + metrics)
+    if extra:
+        frame = frame[frame["status"].astype(str) == "success"]
+    frame["spine_key"] = frame[KEY_PARTS].astype(str).agg("/".join, axis=1)
+    frame = frame.drop_duplicates("spine_key", keep="last")
+    print(f"{path.name}: {len(frame)} spines, key built from {'/'.join(KEY_PARTS)}")
+    return frame[["spine_key"] + metrics].reset_index(drop=True)
 
 
 def main() -> None:

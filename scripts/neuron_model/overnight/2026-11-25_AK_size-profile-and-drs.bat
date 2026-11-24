@@ -46,13 +46,14 @@ if not exist %P3%\seed_2 (echo NO v3 seed_2 & goto :end)
 if not exist %SPLITS%\splits_v1.parquet (echo NO splits_v1 & goto :end)
 
 echo ===== [AK0] spines per branch: where the excess comes from ===== %date% %time%
+rem 2026-11-24: the evaluation compared ALL generated branches with the P-eligible real sources only (the others have no
+rem count); evaluate_assembled_branches.py now pairs them. Re-evaluation of the newest AH sets into evaluation_paired.
 for %%k in (minnie65 h01) do (
-  for /f "delims=" %%d in ('dir /b /ad /o-n %TPH%\%%k\generated') do (
-    python scripts\neuron_model\diagnose_tp_counts.py --tp-dir %TPH%\%%k\generated\%%d
-  )
+  for %%m in (generated real_t) do call :pairednewest %TPH%\%%k\%%m
 )
 
 echo ===== [AK1] radius profile of the point clouds ===== %date% %time%
+if exist %ANA%\2026-11-25_cloud-profile\profile.csv (echo cloud profile exists, skipped & goto :ak2)
 python scripts\neuron_model\cloud_size_diagnostics.py --manifest cache\minnie65_v1_60k\manifest.parquet --real real=%CMP2%\real\poisson\seed_1 ^
   --gen A-s1=%MAN%\seed_1 --gen A-s2=%MAN%\seed_2 --gen v3-s1=%P3%\seed_1 --gen v3-s2=%P3%\seed_2 ^
   --gen v4-23P-g1.5=%P4%\v4_mouse_23P_g1.5_seed_1 --gen v4-6P-CT-g1.5=%P4%\v4_mouse_6P-CT_g1.5_seed_1 ^
@@ -61,6 +62,7 @@ python scripts\neuron_model\cloud_size_diagnostics.py --manifest cache\minnie65_
   --out %ANA%\2026-11-25_cloud-profile
 if errorlevel 1 (echo CLOUD PROFILE FAILED)
 
+:ak2
 echo ===== [AK2] density-ratio selection, A and v3 ===== %date% %time%
 python scripts\neuron_model\density_ratio_selection.py --real-fit %MORPH% --real-fit-splits %SPLITS%\splits_v1.parquet --real-fit-split train ^
   --gen-fit %EVAI%\postprocessed\morphometrics_mogen_A_seed1.parquet --real-eval %EVAI%\real_test_morphometrics.parquet ^
@@ -90,3 +92,12 @@ type %EVAL%\postprocessed\summary.md
 
 :end
 echo ===== chain AK done ===== %date% %time%
+goto :eof
+
+:pairednewest
+for /f "delims=" %%d in ('dir /b /ad /o-n %1') do (
+  python scripts\neuron_model\evaluate_assembled_branches.py --tp-dir %1\%%d --out %1\%%d\evaluation_paired
+  python scripts\neuron_model\diagnose_tp_counts.py --tp-dir %1\%%d --evaluation %1\%%d\evaluation_paired
+  goto :eof
+)
+goto :eof

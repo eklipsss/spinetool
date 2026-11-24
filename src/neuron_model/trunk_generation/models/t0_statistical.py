@@ -18,7 +18,10 @@ Mean log-radius profile ``m(s)``, two competing descriptions:
   distributed N(B^T x, S) with a linear dependence on log L and the conditions;
 - ``gam`` (T0-b): m(s) = f(u, log L, C) + b_branch, penalised B-spline model plus a random branch shift;
 - ``parabola_mix``: T0-a with a mixture of experts for the pair (``ParabolicMixtureMean``: components with their own
-  regression and covariance, the component probabilities a softmax regression on the design; the thin distal population).
+  regression and covariance, the component probabilities a softmax regression on the design; the thin distal population);
+- ``parabola_mix_neuron`` (2026-11-24): the same with a random effect of the neuron on the pair
+  (``ParabolicMixtureNeuronMean``); a request may carry ``t0_neuron_effect`` (the shared / posterior effect of its neuron),
+  without it the effect is drawn independently per branch.
 
 Branch length for fully automatic generation: log-normal mixture (<= 3 components) per group.
 
@@ -131,8 +134,8 @@ class ParabolicMean:
         """m(s_j) of a TRAINING branch from its own fitted pair."""
         return self._profile(self._fit_branch(b), b.n_nodes)
 
-    def sample_log_mean(self, design: np.ndarray, n_nodes: int, rng: np.random.Generator) -> np.ndarray:
-        theta = rng.multivariate_normal(design @ self.coef, self.cov)
+    def sample_log_mean(self, design: np.ndarray, n_nodes: int, rng: np.random.Generator, neuron_effect=None) -> np.ndarray:
+        theta = rng.multivariate_normal(design @ self.coef, self.cov)  # no neuron effect in this model: ``neuron_effect`` ignored
         return self._profile(theta, n_nodes)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -177,15 +180,22 @@ class ParabolicMixtureMean(ParabolicMean):
     kind = "parabola_mix"
 
     def __init__(self, n_components: Any = "auto", max_components: int = 3, ridge: float = 1.0, gate_ridge: float = 1.0,
-                 cov_floor: float = 1e-4, max_iter: int = 300, tol: float = 1e-7, seed: int = 0) -> None:
+                 cov_floor: float = 1e-4, max_iter: int = 300, tol: float = 1e-7, seed: int = 0,
+                 neuron_effect: bool = False, neuron_level: bool = True, neuron_gate: bool = True, gate_grid: int = 21,
+                 neuron_iter: int = 40, neuron_tol: float = 1e-3) -> None:
         super().__init__()
         self.n_components = n_components
         self.max_components = int(max_components)
         self.ridge, self.gate_ridge, self.cov_floor = float(ridge), float(gate_ridge), float(cov_floor)
         self.max_iter, self.tol, self.seed = int(max_iter), float(tol), int(seed)
+        self.neuron_effect, self.neuron_level, self.neuron_gate = bool(neuron_effect), bool(neuron_level), bool(neuron_gate)
+        self.gate_grid, self.neuron_iter, self.neuron_tol = int(gate_grid), int(neuron_iter), float(neuron_tol)
         self.coefs: Optional[np.ndarray] = None  # [K, d, 2]
-        self.covs: Optional[np.ndarray] = None   # [K, 2, 2]
+        self.covs: Optional[np.ndarray] = None   # [K, 2, 2]  (with the neuron effect: WITHIN-neuron covariance)
         self.gate: Optional[np.ndarray] = None   # [d, K] (last column 0)
+        self.neuron_cov: Optional[np.ndarray] = None       # T [2, 2] of the level effect a_n (None: none)
+        self.neuron_gate_sd: Optional[float] = None        # tau of the gate effect b_n (None: none)
+        self.gate_direction: Optional[np.ndarray] = None   # s [K]: b_n s_k is added to the logit of component k (0 thickest, 1 thinnest)
         self.fit_info: Dict[str, Any] = {}
 
     # ------------------------------------------------------------ EM
@@ -194,7 +204,10 @@ class ParabolicMixtureMean(ParabolicMean):
         pen[0, 0] = 0.0
         return pen
 
-    def _fit_gate(self, x: np.ndarray, resp: np.ndarray, start: np.ndarray) -> np.ndarray:
+    def _fit_gate(self, x: np.ndarray, resp: np.ndarray, start: np.ndarray, offset: Optional[np.ndarray] = None,
+                  weight: Optional[np.ndarray] = None) -> np.ndarray:
+        """Multinomial logistic regression of the soft labels ``resp`` on ``x`` (ridge, intercept free); ``offset`` [n, K] is
+        added to the logits (the gate effect of the neuron), ``weight`` [n] weights the rows (grid of the gate effect)."""
         from scipy.optimize import minimize
 
         n, d = x.shape
@@ -203,14 +216,15 @@ class ParabolicMixtureMean(ParabolicMean):
             return np.zeros((d, 1))
         pen = np.ones(d)
         pen[0] = 0.0
+        wr = resp if weight is None else resp * weight[:, None]
 
         def fun(flat):
             g = np.zeros((d, k))
             g[:, :-1] = flat.reshape(d, k - 1)
-            logits = x @ g
+            logits = x @ g if offset is None else x @ g + offset
             logp = logits - np.logaddexp.reduce(logits, axis=1, keepdims=True)
-            loss = -(resp * logp).sum() + 0.5 * self.gate_ridge * (pen[:, None] * g[:, :-1] ** 2).sum()
-            grad = x.T @ (np.exp(logp) - resp)
+            loss = -(wr * logp).sum() + 0.5 * self.gate_ridge * (pen[:, None] * g[:, :-1] ** 2).sum()
+            grad = x.T @ (np.exp(logp) * wr.sum(1, keepdims=True) - wr)
             grad = grad[:, :-1] + self.gate_ridge * pen[:, None] * g[:, :-1]
             return loss, grad.ravel()
 
@@ -219,10 +233,29 @@ class ParabolicMixtureMean(ParabolicMean):
         g[:, :-1] = res.x.reshape(d, k - 1)
         return g
 
-    def _em(self, theta: np.ndarray, x: np.ndarray, k: int) -> Dict[str, Any]:
+    def _log_pi(self, x: np.ndarray, b: Optional[np.ndarray] = None, gate: Optional[np.ndarray] = None) -> np.ndarray:
+        """log component probabilities [n, K]; ``b`` [n]: gate effect of the neuron of every row (logit_k += b s_k)."""
+        logits = x @ (self.gate if gate is None else gate)
+        if b is not None and self.gate_direction is not None:
+            logits = logits + np.asarray(b, dtype=float).reshape(-1, 1) * self.gate_direction[None, :]
+        return logits - np.logaddexp.reduce(logits, axis=1, keepdims=True)
+
+    def _comp_loglik(self, theta: np.ndarray, x: np.ndarray, coefs=None, covs=None) -> np.ndarray:
+        coefs = self.coefs if coefs is None else coefs
+        covs = self.covs if covs is None else covs
+        return np.column_stack([_gauss_logpdf(theta, x @ coefs[j], covs[j]) for j in range(len(coefs))])
+
+    def _responsibilities(self, theta: np.ndarray, x: np.ndarray, coefs=None, covs=None, gate=None, b=None) -> np.ndarray:
+        comp = self._log_pi(x, b, gate) + self._comp_loglik(theta, x, coefs, covs)
+        return np.exp(comp - np.logaddexp.reduce(comp, axis=1)[:, None])
+
+    def _em(self, theta: np.ndarray, x: np.ndarray, k: int, init: Optional[Dict[str, np.ndarray]] = None) -> Dict[str, Any]:
+        """EM for K components; ``init`` (coefs, covs, gate): warm start from these parameters (their E-step) instead of k-means."""
         n, d = x.shape
         pen = self._penalty(d)
-        if k == 1:
+        if init is not None:
+            resp = self._responsibilities(theta, x, init["coefs"], init["covs"], init["gate"])
+        elif k == 1:
             resp = np.ones((n, 1))
         else:
             from sklearn.cluster import KMeans
@@ -230,7 +263,7 @@ class ParabolicMixtureMean(ParabolicMean):
             base = np.linalg.solve(x.T @ x + pen, x.T @ theta)
             labels = KMeans(n_clusters=k, n_init=10, random_state=self.seed).fit_predict(theta - x @ base)
             resp = np.eye(k)[labels] * 0.9 + 0.1 / k
-        gate = np.zeros((d, k))
+        gate = np.zeros((d, k)) if init is None else np.array(init["gate"], dtype=float)
         loglik_old = -np.inf
         coefs, covs = np.zeros((k, d, 2)), np.zeros((k, 2, 2))
         for it in range(self.max_iter):
@@ -269,33 +302,238 @@ class ParabolicMixtureMean(ParabolicMean):
             "components": [{"weight": w, "log_r_L_intercept_nm": float(math.exp(c[0, 0])), "sd_log_r_L": float(math.sqrt(v[0, 0]))}
                            for w, c, v in zip(best["weights"], best["coefs"], best["covs"])],
         }
+        if self.neuron_effect:
+            neurons = [b.neuron for b in branches]
+            if any(n is None for n in neurons):
+                raise ValueError("neuron_effect needs T0Branch.neuron for every training branch")
+            self._fit_neuron_effect(theta, x, neurons, best)
         return self
 
+    # ------------------------------------------------------------ neuron effect
+    @property
+    def has_neuron_effect(self) -> bool:
+        return self.neuron_cov is not None or self.neuron_gate_sd is not None
+
+    def _grid(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Standard-normal quadrature nodes z_j and log weights for the gate effect b = tau z."""
+        z = np.linspace(-3.5, 3.5, max(self.gate_grid, 3))
+        logw = -0.5 * z ** 2
+        return z, logw - np.logaddexp.reduce(logw)
+
+    def _neuron_estep(self, theta: np.ndarray, x: np.ndarray, g: np.ndarray, n_g: int, a: np.ndarray):
+        """E-step of the neuron effects at the current level effects ``a`` [n_g, 2] (plugged in): responsibilities [B, K]
+        averaged over the posterior of the gate effect, the grid posterior w [n_g, J] (None without the gate effect) and the
+        per-grid responsibilities [B, J, K] (for the gate refit)."""
+        comp = self._comp_loglik(theta - a[g], x)
+        if self.neuron_gate_sd is None:
+            lp = self._log_pi(x)
+            joint = lp + comp
+            return np.exp(joint - np.logaddexp.reduce(joint, axis=1, keepdims=True)), None, None
+        z, logw = self._grid()
+        b = self.neuron_gate_sd * z
+        logits = (x @ self.gate)[:, None, :] + b[None, :, None] * self.gate_direction[None, None, :]
+        lp = logits - np.logaddexp.reduce(logits, axis=2, keepdims=True)          # [B, J, K]
+        joint = lp + comp[:, None, :]
+        lb = np.logaddexp.reduce(joint, axis=2)                                    # [B, J]: log p(theta_b | b_j)
+        ln = np.zeros((n_g, len(z)))
+        np.add.at(ln, g, lb)
+        ln += logw[None, :]
+        w = np.exp(ln - np.logaddexp.reduce(ln, axis=1, keepdims=True))            # [n_g, J]
+        resp_j = np.exp(joint - lb[..., None])                                     # [B, J, K]
+        return np.einsum("bj,bjk->bk", w[g], resp_j), w, resp_j
+
+    def _level_update(self, theta: np.ndarray, x: np.ndarray, g: np.ndarray, n_g: int, resp: np.ndarray):
+        """Gaussian posterior N(a_n, V_n) of the level effects given the responsibilities: P_b = sum_k resp_bk S_k^-1,
+        r_b = theta_b - sum_k resp_bk B_k^T x_b, V_n = (T^-1 + sum_b P_b)^-1, a_n = V_n sum_b P_b r_b."""
+        means = np.einsum("bk,kbj->bj", resp, np.stack([x @ c for c in self.coefs]))
+        prec = np.einsum("bk,kij->bij", resp, np.linalg.inv(self.covs))
+        r = theta - means
+        sp = np.zeros((n_g, 2, 2))
+        np.add.at(sp, g, prec)
+        spr = np.zeros((n_g, 2))
+        np.add.at(spr, g, np.einsum("bij,bj->bi", prec, r))
+        v = np.linalg.inv(np.linalg.inv(self.neuron_cov)[None] + sp)
+        return np.einsum("gij,gj->gi", v, spr), v
+
+    def _fit_neuron_effect(self, theta: np.ndarray, x: np.ndarray, neurons: Sequence[str], best: Dict[str, Any]) -> None:
+        """Two random effects of the neuron n, K fixed at the BIC choice without them:
+
+            level:  theta_b = B_k^T x_b + a_n + e_b,          a_n ~ N(0, T)
+            gate:   P(k | x_b, n) = softmax_k(G^T x_b + b_n s_k),  b_n ~ N(0, tau^2)
+
+        s_k = (max c - c_k) / (max c - min c), c_k = mean log r_L of component k (0 for the thickest, 1 for the thinnest):
+        b_n is the shift of the log odds of the thinnest against the thickest component, b_n > 0 moves the branches of the
+        neuron towards the thin components (a neuron with many thin branches); a_n shifts the thickness of all its
+        branches. ECM, each round: (i) E-step over b_n on a quadrature grid with a_n plugged in, (ii) Gaussian posterior of
+        a_n given the responsibilities, (iii) T = mean (a a^T + V), tau^2 = mean E[b^2] (EM steps of the random-effect
+        variances), (iv) M-step of the components (weighted ridge on theta - a_n) and of the gate (logistic regression on
+        the grid-expanded rows with the offset b_j s and weights w_nj). Stops when T and tau change by < ``neuron_tol``."""
+        names, g = np.unique(np.asarray(neurons, dtype=object).astype(str), return_inverse=True)
+        n_g, (n, d), k = len(names), x.shape, best["k"]
+        cov_before = self.covs.copy()
+        pen = self._penalty(d)
+        c = np.array([float(np.mean((x @ cf)[:, 0])) for cf in self.coefs])
+        gate_on = self.neuron_gate and k > 1 and c.std() > 0
+        self.gate_direction = (c.max() - c) / (c.max() - c.min()) if gate_on else None
+        self.neuron_gate_sd = 1.0 if gate_on else None
+        a = np.zeros((n_g, 2))
+        v = np.zeros((n_g, 2, 2))
+        if self.neuron_level:
+            resp0 = self._responsibilities(theta, x)
+            r0 = theta - np.einsum("bk,kbj->bj", resp0, np.stack([x @ cf for cf in self.coefs]))
+            m = np.zeros((n_g, 2))
+            np.add.at(m, g, r0)
+            m /= np.bincount(g, minlength=n_g)[:, None]
+            self.neuron_cov = 0.5 * np.cov(m.T) + 1e-4 * np.eye(2)  # start: half the spread of the neuron means of the residuals
+        z, _ = self._grid()
+        it, history = 0, []
+        for it in range(1, self.neuron_iter + 1):
+            resp, w, resp_j = self._neuron_estep(theta, x, g, n_g, a)
+            change = 0.0
+            if self.neuron_level:
+                a, v = self._level_update(theta, x, g, n_g, resp)
+                t_new = (np.einsum("gi,gj->ij", a, a) + v.sum(0)) / n_g + 1e-8 * np.eye(2)
+                change = max(change, float(np.abs(t_new - self.neuron_cov).max() / max(np.abs(self.neuron_cov).max(), 1e-12)))
+                self.neuron_cov = t_new
+                resp, w, resp_j = self._neuron_estep(theta, x, g, n_g, a)
+            if w is not None:
+                tau_new = self.neuron_gate_sd * math.sqrt(float(np.mean(w @ z ** 2)))
+                # M-step of the gate at the CURRENT grid (before tau moves), rows (branch, grid node) weighted by w_nj
+                offset = np.repeat((self.neuron_gate_sd * z)[None, :, None] * self.gate_direction[None, None, :], n, axis=0).reshape(-1, k)
+                self.gate = self._fit_gate(np.repeat(x, len(z), axis=0), resp_j.reshape(-1, k), self.gate, offset=offset, weight=w[g].reshape(-1))
+                change = max(change, abs(tau_new - self.neuron_gate_sd) / max(self.neuron_gate_sd, 1e-6))
+                self.neuron_gate_sd = max(tau_new, 1e-3)
+            shifted = theta - a[g]
+            for j in range(k):
+                wj = resp[:, j]
+                self.coefs[j] = np.linalg.solve(x.T @ (x * wj[:, None]) + pen, x.T @ (shifted * wj[:, None]))
+                res = shifted - x @ self.coefs[j]
+                self.covs[j] = (res * wj[:, None]).T @ res / max(wj.sum(), 1e-9) + self.cov_floor * np.eye(2)
+            if w is None:
+                self.gate = self._fit_gate(x, resp, self.gate)
+            history.append({"sd_level": None if self.neuron_cov is None else float(math.sqrt(self.neuron_cov[0, 0])), "tau_gate": self.neuron_gate_sd})
+            if change < self.neuron_tol:
+                break
+        self.coef, self.cov = self.coefs[0], self.covs[0]
+        resp, w, _ = self._neuron_estep(theta, x, g, n_g, a)
+        weights = resp.mean(0)
+        within = float(np.sum(weights * self.covs[:, 0, 0]))
+        info: Dict[str, Any] = {"n_neurons": int(n_g), "iterations": it, "history": history[-5:], "weights": weights.tolist(),
+                                "sd_log_r_L_within_before": [float(math.sqrt(cv[0, 0])) for cv in cov_before],
+                                "sd_log_r_L_within_after": [float(math.sqrt(cv[0, 0])) for cv in self.covs],
+                                "component_mean_log_r_L": c.tolist()}
+        if self.neuron_cov is not None:
+            t_cov = self.neuron_cov
+            info.update(cov=t_cov.tolist(), sd_log_r_L=float(math.sqrt(t_cov[0, 0])), sd_log_ratio=float(math.sqrt(t_cov[1, 1])),
+                        corr=float(t_cov[0, 1] / math.sqrt(t_cov[0, 0] * t_cov[1, 1])),
+                        # share of the between-neuron variance in the (mixture-weighted) variance of log r_L around the regression
+                        share_log_r_L=float(t_cov[0, 0] / (t_cov[0, 0] + within)))
+        if self.neuron_gate_sd is not None:
+            info.update(tau_gate=float(self.neuron_gate_sd), gate_direction=self.gate_direction.tolist())
+        self.fit_info["neuron_effect"] = info
+
+    def neuron_posterior(self, branches: Sequence["T0Branch"], n_iter: int = 6) -> Dict[str, np.ndarray]:
+        """Posterior of the effects of ONE neuron given its observed branches (none: the prior): level N(a_mean, a_cov)
+        and the grid posterior of the gate effect (``b_values``, ``b_weights``)."""
+        if not self.has_neuron_effect:
+            raise ValueError("this mean model has no neuron effect")
+        z, logw = self._grid()
+        b_vals = (self.neuron_gate_sd or 0.0) * z
+        out = {"a_mean": np.zeros(2), "a_cov": self.neuron_cov.copy() if self.neuron_cov is not None else np.zeros((2, 2)),
+               "b_values": b_vals, "b_weights": np.exp(logw)}
+        if not len(branches):
+            return out
+        theta = np.vstack([self._fit_branch(b) for b in branches])
+        x = np.vstack([b.design for b in branches])
+        g = np.zeros(len(theta), dtype=int)
+        a = np.zeros((1, 2))
+        for _ in range(n_iter):
+            resp, w, _ = self._neuron_estep(theta, x, g, 1, a)
+            if self.neuron_cov is None:
+                break
+            a, v = self._level_update(theta, x, g, 1, resp)
+            out["a_cov"] = v[0]
+        out["a_mean"] = a[0]
+        if w is not None:
+            out["b_weights"] = w[0]
+        return out
+
+    def sample_posterior_effect(self, branches: Sequence["T0Branch"], rng: np.random.Generator) -> np.ndarray:
+        """A draw [a_log_r_L, a_log_ratio, b_gate] of the effect of the neuron whose observed branches are ``branches``."""
+        post = self.neuron_posterior(branches)
+        a = rng.multivariate_normal(post["a_mean"], post["a_cov"]) if self.neuron_cov is not None else np.zeros(2)
+        b = 0.0
+        if self.neuron_gate_sd is not None:
+            j = int(rng.choice(len(post["b_values"]), p=post["b_weights"] / post["b_weights"].sum()))
+            step = post["b_values"][1] - post["b_values"][0]
+            b = float(post["b_values"][j] + rng.uniform(-0.5, 0.5) * step)
+        return np.r_[a, b]
+
+    def sample_neuron_effect(self, rng: np.random.Generator) -> np.ndarray:
+        """A fresh effect [a_log_r_L, a_log_ratio, b_gate] of a NEW neuron from the prior (zeros where an effect is off)."""
+        a = rng.multivariate_normal(np.zeros(2), self.neuron_cov) if self.neuron_cov is not None else np.zeros(2)
+        b = rng.normal(0.0, self.neuron_gate_sd) if self.neuron_gate_sd is not None else 0.0
+        return np.r_[a, b]
+
     # ------------------------------------------------------------ sampling / io
-    def component_probabilities(self, design: np.ndarray) -> np.ndarray:
-        return _softmax(np.atleast_2d(design) @ self.gate)
+    def component_probabilities(self, design: np.ndarray, gate_effect: float = 0.0) -> np.ndarray:
+        return np.exp(self._log_pi(np.atleast_2d(design), np.array([gate_effect]) if gate_effect else None))
 
-    def sample_theta(self, design: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        pi = self.component_probabilities(design)[0]
-        k = int(rng.choice(len(pi), p=pi))
-        return rng.multivariate_normal(design @ self.coefs[k], self.covs[k])
+    def sample_theta(self, design: np.ndarray, rng: np.random.Generator, neuron_effect=None) -> np.ndarray:
+        """``neuron_effect``: [a_log_r_L, a_log_ratio(, b_gate)] of the neuron the branch belongs to (shared by its
+        branches, or a posterior draw); None = an independent fresh draw for this branch, which gives the same MARGINAL
+        distribution of the pair as the fitted hierarchical model averaged over neurons."""
+        e = np.zeros(3)
+        if self.has_neuron_effect:
+            src = self.sample_neuron_effect(rng) if neuron_effect is None else np.asarray(neuron_effect, dtype=float).ravel()
+            e[: len(src)] = src[:3]
+        pi = self.component_probabilities(design, float(e[2]))[0]
+        k = int(rng.choice(len(pi), p=pi / pi.sum()))
+        return rng.multivariate_normal(design @ self.coefs[k], self.covs[k]) + e[:2]
 
-    def sample_log_mean(self, design: np.ndarray, n_nodes: int, rng: np.random.Generator) -> np.ndarray:
-        return self._profile(self.sample_theta(design, rng), n_nodes)
+    def sample_log_mean(self, design: np.ndarray, n_nodes: int, rng: np.random.Generator, neuron_effect=None) -> np.ndarray:
+        return self._profile(self.sample_theta(design, rng, neuron_effect), n_nodes)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"kind": self.kind, "coefs": self.coefs.tolist(), "covs": self.covs.tolist(), "gate": self.gate.tolist(),
+                "neuron_cov": None if self.neuron_cov is None else self.neuron_cov.tolist(),
+                "neuron_gate_sd": self.neuron_gate_sd,
+                "gate_direction": None if self.gate_direction is None else self.gate_direction.tolist(),
                 "settings": {"n_components": self.n_components, "max_components": self.max_components, "ridge": self.ridge,
-                             "gate_ridge": self.gate_ridge, "cov_floor": self.cov_floor},
+                             "gate_ridge": self.gate_ridge, "cov_floor": self.cov_floor, "neuron_effect": self.neuron_effect,
+                             "neuron_level": self.neuron_level, "neuron_gate": self.neuron_gate, "gate_grid": self.gate_grid,
+                             "neuron_iter": self.neuron_iter, "neuron_tol": self.neuron_tol},
                 "fit_info": self.fit_info}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ParabolicMixtureMean":
         obj = cls(**d.get("settings", {}))
         obj.coefs, obj.covs, obj.gate = np.asarray(d["coefs"]), np.asarray(d["covs"]), np.asarray(d["gate"])
+        obj.neuron_cov = None if d.get("neuron_cov") is None else np.asarray(d["neuron_cov"])
+        obj.neuron_gate_sd = None if d.get("neuron_gate_sd") is None else float(d["neuron_gate_sd"])
+        obj.gate_direction = None if d.get("gate_direction") is None else np.asarray(d["gate_direction"])
         obj.coef, obj.cov = obj.coefs[0], obj.covs[0]
         obj.fit_info = d.get("fit_info", {})
         return obj
+
+
+class ParabolicMixtureNeuronMean(ParabolicMixtureMean):
+    """``parabola_mix`` with random effects of the NEURON (2026-11-24, ``_fit_neuron_effect``): a level effect a_n on the
+    pair (all branches of the neuron thicker / thinner) and a gate effect b_n on the component probabilities (more or
+    fewer branches in the thin components).
+
+    Why: in the full generation the spine excess came from the trunk (chain AK0): real thin branches got a thick trunk
+    (only 26-30 % of the real thin branches stayed thin, three times the chance rate), because the share of thin
+    branches differs strongly between neurons (half the neurons <= 2 %, a tenth >= 20 %; 22 % of the variance of the
+    log radius is between neurons) and the conditions do not carry that. With the effects, the branches of one neuron
+    share their thickness: a generated neuron draws its effects once, a request copying a real branch can use the
+    posterior of that neuron. Drawing the effects independently per branch keeps the marginal distribution."""
+
+    kind = "parabola_mix_neuron"
+
+    def __init__(self, **kw: Any) -> None:
+        kw.setdefault("neuron_effect", True)
+        super().__init__(**kw)
 
 
 class GamMean:
@@ -340,7 +578,7 @@ class GamMean:
         f = self._design(b.u, b.design) @ self.beta
         return f + float(np.mean(b.log_radius - f))
 
-    def sample_log_mean(self, design: np.ndarray, n_nodes: int, rng: np.random.Generator) -> np.ndarray:
+    def sample_log_mean(self, design: np.ndarray, n_nodes: int, rng: np.random.Generator, neuron_effect=None) -> np.ndarray:
         u = np.arange(n_nodes) / (n_nodes - 1)
         return self._design(u, design) @ self.beta + rng.normal(0.0, self.sigma_b)
 
@@ -354,7 +592,7 @@ class GamMean:
         return obj
 
 
-MEAN_MODELS = {"parabola": ParabolicMean, "parabola_mix": ParabolicMixtureMean, "gam": GamMean}
+MEAN_MODELS = {"parabola": ParabolicMean, "parabola_mix": ParabolicMixtureMean, "parabola_mix_neuron": ParabolicMixtureNeuronMean, "gam": GamMean}
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +832,21 @@ class T0Model:
             print(self.fit_info)
         return self
 
+    @property
+    def has_neuron_effect(self) -> bool:
+        return bool(getattr(self.mean, "has_neuron_effect", False))
+
+    def fresh_neuron_effect(self, rng: np.random.Generator) -> Optional[np.ndarray]:
+        """Effect of a NEW neuron (prior draw), to be shared by all its branches; None without a neuron effect."""
+        return self.mean.sample_neuron_effect(rng) if self.has_neuron_effect else None
+
+    def posterior_neuron_effect(self, branches: Sequence[T0Branch], rng: np.random.Generator) -> Optional[np.ndarray]:
+        """A draw of the effect of the neuron whose OTHER branches are ``branches`` (T0Branch with this model's design);
+        no branch: a prior draw. None without a neuron effect."""
+        if not self.has_neuron_effect:
+            return None
+        return self.mean.sample_posterior_effect(branches, rng)
+
     def params_for(self, group: str) -> OUParams:
         return OUParams(self.group_theta.get(group, self.pooled))
 
@@ -636,7 +889,7 @@ class T0Model:
             z[:, j + 1] = phi * z[:, j] + np.einsum("nab,nb->na", chol_q, eps[j])
         out = []
         for i, m in enumerate(meta):
-            log_mean = self.mean.sample_log_mean(m["design"], m["n_nodes"], rng)
+            log_mean = self.mean.sample_log_mean(m["design"], m["n_nodes"], rng, neuron_effect=conditions[i].get("t0_neuron_effect"))
             k = m["n_nodes"] - 1
             if self.direction is not None:
                 kappa1, kappa2 = self.direction.sample_bending(m["n_nodes"], m["step"], m["group"], rng, radius_nm=float(np.exp(np.median(log_mean))))
