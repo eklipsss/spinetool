@@ -20,7 +20,7 @@ from ...data.datasets import PointCloudDataset, make_loader
 from ...data.index import SpineIndex
 from ...experiment.artifacts import write_pointcloud_ply
 from ...experiment.config import resolve_path
-from .flow import flow_matching_loss, sample_midpoint
+from .flow import flow_matching_loss, sample_midpoint, size_penalty_loss
 from .pointinfinity import PointInfinity, PointInfinityConfig
 from .weights import load_flax_npz, load_pointinfinity_from_flax
 
@@ -129,7 +129,8 @@ def point_cloud_datasets(index: SpineIndex, data_cfg: Mapping[str, Any], cond_by
         index = index.subset([k for k in index.frame["spine_key"] if k in cond_by_key])
     train_index = index.subset(index.frame.loc[index.frame["split"] == "train", "spine_key"])
     val_index = index.subset(index.frame.loc[index.frame["split"] == "val", "spine_key"])
-    common = dict(n_points=int(data_cfg["n_points"]), coord_scale=float(data_cfg["coord_scale"]), use_normals=False, variants=tuple(int(v) for v in data_cfg.get("variants", (1, 2, 3, 4))))
+    common = dict(n_points=int(data_cfg["n_points"]), coord_scale=float(data_cfg["coord_scale"]), use_normals=False, variants=tuple(int(v) for v in data_cfg.get("variants", (1, 2, 3, 4))),
+                  subsample=data_cfg.get("subsample_points"))
 
     def cond_of(idx):
         return None if cond_by_key is None else np.stack([cond_by_key[k] for k in idx.frame["spine_key"]]) if len(idx) else None
@@ -139,14 +140,28 @@ def point_cloud_datasets(index: SpineIndex, data_cfg: Mapping[str, Any], cond_by
     return train, val
 
 
+def size_penalty_settings(flow_cfg: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """``flow.size_penalty`` (2026-11-24): {weight, every, n_sub, t_min, t_max, n_steps, weights: [radial, axial]}; None or
+    weight 0 = off. See ``flow.size_penalty_loss``."""
+    cfg = flow_cfg.get("size_penalty") or {}
+    if not cfg or float(cfg.get("weight", 0.0)) <= 0:
+        return None
+    return {"weight": float(cfg["weight"]), "every": int(cfg.get("every", 1)), "n_sub": int(cfg.get("n_sub", 2)),
+            "t_min": float(cfg.get("t_min", 0.0)), "t_max": float(cfg.get("t_max", 0.8)), "n_steps": int(cfg.get("n_steps", 6)),
+            "weights": tuple(float(w) for w in cfg.get("weights", (1.0, 1.0)))}
+
+
 def make_loss_fn(flow_cfg: Mapping[str, Any], device, *, encoder=None, condition_cfg: Optional[Mapping[str, Any]] = None):
     """Flow Matching loss; with ``cond`` in the batch the condition goes through block dropout (``encoder.drop_blocks``,
-    probabilities ``condition.p_block`` / ``condition.p_all``) before the model."""
+    probabilities ``condition.p_block`` / ``condition.p_all``) before the model. ``flow.size_penalty``: + weight x the
+    distributional size penalty (``flow.size_penalty_loss``) every ``every`` steps (the generated spines are thicker than
+    the real ones, chains AJ / AK / AM: the field itself, not the sampler)."""
     schedule = flow_cfg.get("time_schedule", "mogen_cosine")
     condition_cfg = condition_cfg or {}
     p_block = condition_cfg.get("p_block", 0.15)
     p_block = dict(p_block) if isinstance(p_block, Mapping) else float(p_block)
     p_all = float(condition_cfg.get("p_all", 0.10))
+    size = size_penalty_settings(flow_cfg)
 
     def loss_fn(model, batch, step: int) -> Tuple[Any, Dict[str, float]]:
         x1 = batch["points"].to(device, non_blocking=True)
@@ -155,8 +170,16 @@ def make_loss_fn(flow_cfg: Mapping[str, Any], device, *, encoder=None, condition
             cond = cond.to(device, non_blocking=True)
             if encoder is not None:
                 cond = encoder.drop_blocks(cond, p_block=p_block, p_all=p_all)
-        loss = flow_matching_loss(model, x1, schedule=schedule, cond=cond)
-        return loss, {"loss": float(loss.detach())}
+        fm = flow_matching_loss(model, x1, schedule=schedule, cond=cond)
+        metrics = {"fm_loss": float(fm.detach())}
+        loss = fm
+        if size is not None and step % size["every"] == 0:
+            pen, info = size_penalty_loss(model, x1, n_sub=size["n_sub"], t_min=size["t_min"], t_max=size["t_max"],
+                                          n_steps=size["n_steps"], cond=cond, weights=size["weights"])
+            loss = fm + size["weight"] * pen
+            metrics.update(info)
+        metrics["loss"] = float(loss.detach())
+        return loss, metrics
 
     return loss_fn
 
@@ -187,6 +210,22 @@ def make_validate_fn(val_dataset, flow_cfg: Mapping[str, Any], device, *, batch_
         out = {"val_loss": total / max(n, 1)}
         if total_null:
             out["val_loss_null_cond"] = total_null / max(n, 1)
+        monitor = flow_cfg.get("size_monitor") or {}
+        if monitor.get("n_batches", 0):  # size gap of ODE end points from the true x_t (no gradients), also without the penalty
+            gaps = []
+            with torch.no_grad():
+                for i, batch in enumerate(make_loader(val_dataset, batch_size=batch_size, shuffle=False, seed=seed)):
+                    if i >= int(monitor["n_batches"]):
+                        break
+                    x1 = batch["points"].to(device)
+                    cond = batch.get("cond")
+                    _, info = size_penalty_loss(model, x1, n_sub=x1.shape[0], t_min=float(monitor.get("t_min", 0.0)), t_max=float(monitor.get("t_max", 0.8)),
+                                                n_steps=int(monitor.get("n_steps", 10)), cond=None if cond is None else cond.to(device),
+                                                generator=torch.Generator().manual_seed(seed + 1000 + i))
+                    gaps.append((info["size_gap_radial"], info["size_gap_axial"]))
+            if gaps:
+                out["val_size_gap_radial"] = float(np.mean([g[0] for g in gaps]))
+                out["val_size_gap_axial"] = float(np.mean([g[1] for g in gaps]))
         return out
 
     return validate

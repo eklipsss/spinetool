@@ -1,0 +1,18 @@
+# Model A again, from mouse_mixed, on the LARGER training part (cache minnie65_v1_60k: 60 000 training spines of
+# splits_v1, the cache of the conditional models) instead of the 15 000 of splits_dev_100n. Control for the size penalty:
+# does more data alone change the size bias (chain AQ, 2026-11-24)? Unconditional, as A.
+#   python scripts/neuron_model/train_mogen.py --config configs/neuron-model/mogen/a_full.yaml \
+#     "data.manifests=['cache/minnie65_v1_60k/manifest.parquet']" data.splits=data/processed/neuron-model/splits/splits_v1.parquet
+defaults: [pretrained_finetune.yaml]
+name: mogen-a-full
+data:
+  variants: [1, 2]          # the cache keeps resampling variants 1-2
+  drop_unassigned: true
+  check_files: []
+train:
+  max_steps: 12000          # A plateaus in size from step ~3000 (chain AJ); 12 000 = 6.4 epochs of 60 000 at batch 32
+  validate_every: 2000
+  checkpoint_every: 2000
+  keep_every: 4000
+flow:
+  size_monitor: {n_batches: 10, t_min: 0.0, t_max: 0.8, n_steps: 10}   # val_size_gap_radial / _axial (no gradients)

@@ -70,6 +70,59 @@ def flow_matching_loss(
     return torch.mean((pred - target) ** 2)
 
 
+def log_size_stats(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """[B, N, 3] -> [B, 2]: log of the rms distance of the points from the spine axis (the y axis through the centroid:
+    x and z) and log of the rms spread along the axis (y). Scale-free (logs), invariant to the coordinate scale."""
+    d = x - x.mean(dim=1, keepdim=True)
+    radial = (d[..., 0] ** 2 + d[..., 2] ** 2).mean(dim=1)
+    axial = (d[..., 1] ** 2).mean(dim=1)
+    return 0.5 * torch.log(torch.stack([radial, axial], dim=1) + eps)
+
+
+def rollout_to_one(model, x: torch.Tensor, t0: torch.Tensor, *, n_steps: int, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Integrate dx/dt = v(x, t) from per-sample times ``t0`` [B] to t = 1 with ``n_steps`` midpoint steps, WITH gradients."""
+    b = x.shape[0]
+    shape = (b,) + (1,) * (x.dim() - 1)
+    dt = (1.0 - t0) / n_steps
+
+    def call(y, tt):
+        return model(y, tt, cond) if cond is not None else model(y, tt)
+
+    t = t0
+    for _ in range(n_steps):
+        v0 = call(x, t)
+        x_mid = x + v0 * (dt / 2).view(shape)
+        v_mid = call(x_mid, t + dt / 2)
+        x = x + v_mid * dt.view(shape)
+        t = t + dt
+    return x
+
+
+def size_penalty_loss(model, x_1: torch.Tensor, *, n_sub: int = 2, t_min: float = 0.0, t_max: float = 0.8, n_steps: int = 6,
+                      cond: Optional[torch.Tensor] = None, weights=(1.0, 1.0), generator: Optional[torch.Generator] = None):
+    """Distributional size penalty (2026-11-24, docs: legacy/23.11-29.11.md, stage 25).
+
+    Why distributional: if the velocity field is right, the end points of the ODE started from the TRUE intermediate
+    marginal x_t = (1 - t) x_0 + t x_1 (x_1 data, x_0 noise) are distributed as the data, but a single end point is NOT the
+    x_1 it was built from (the flow is deterministic and does not invert the coupling), and the one-step estimate
+    x_hat_1 = x_t + (1 - t) v is the conditional MEAN, shrunk by construction - so matching either to its own x_1 would
+    be biased. Instead: ``n_sub`` clouds of the batch, start times t0 ~ U(t_min, t_max), ``n_steps`` midpoint steps to 1
+    with gradients, and the squared difference of the batch means of (log radial size, log axial size) between these end
+    points and ALL real clouds of the batch, weighted by ``weights``. Returns (loss, info with the gaps in log units)."""
+    b = x_1.shape[0]
+    n = min(int(n_sub), b)
+    draw_device = generator.device if generator is not None else x_1.device
+    x_0 = torch.randn((n,) + tuple(x_1.shape[1:]), device=draw_device, dtype=x_1.dtype, generator=generator).to(x_1.device)
+    t0 = (t_min + (t_max - t_min) * torch.rand(n, device=draw_device, dtype=x_1.dtype, generator=generator)).to(x_1.device)
+    t_exp = t0.view(n, *([1] * (x_1.dim() - 1)))
+    x_t = (1 - t_exp) * x_0 + t_exp * x_1[:n]
+    end = rollout_to_one(model, x_t, t0, n_steps=n_steps, cond=None if cond is None else cond[:n])
+    gap = log_size_stats(end).mean(dim=0) - log_size_stats(x_1).mean(dim=0).detach()
+    w = torch.as_tensor(weights, dtype=gap.dtype, device=gap.device)
+    loss = (w * gap ** 2).sum()
+    return loss, {"size_gap_radial": float(gap[0].detach()), "size_gap_axial": float(gap[1].detach()), "size_penalty": float(loss.detach())}
+
+
 @torch.no_grad()
 def sample_midpoint(
     model: Callable[..., torch.Tensor],

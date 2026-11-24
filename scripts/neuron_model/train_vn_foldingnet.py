@@ -62,6 +62,9 @@ def main() -> None:
                              check_files=tuple(data_cfg.get("check_files", (f"pointcloud_{data_cfg['n_points']}_path",))))
     index = index.with_split(load_splits(resolve_path(data_cfg["splits"])), drop_unassigned=bool(data_cfg.get("drop_unassigned", False)))
     train_ds, val_ds = point_cloud_datasets(index, data_cfg)
+    if len(train_ds) == 0:
+        parser.error(f"no training spines: check data.splits and that the manifest has pointcloud_{data_cfg['n_points']}_path files "
+                     f"(the training cache holds only the size it was built with; use data.subsample_points for fewer points)")
     model = build_model(cfg["model"])
     if not args.resume:
         cfg["data"]["dataset_version"] = index.dataset_version

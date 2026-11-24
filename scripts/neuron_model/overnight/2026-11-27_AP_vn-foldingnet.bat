@@ -33,6 +33,7 @@ for %%m in (frame invariant) do (
   echo ===== [AP] train VN + FoldingNet, mode %%m ===== %date% %time%
   python scripts\neuron_model\train_vn_foldingnet.py --config configs\neuron-model\vn_foldingnet\%%m.yaml ^
     "data.manifests=['%DEV%']" data.splits=%SPLITS%\splits_dev_100n.parquet
+  if errorlevel 1 (echo TRAINING FAILED, mode %%m & goto :end)
   call :generate %%m
 )
 
@@ -62,6 +63,12 @@ goto :eof
 :genfound
 call set RUN=%%VN_%1%%
 echo run of mode %1: %RUN%
-python scripts\neuron_model\generate_vn_foldingnet.py --run %RUN% --mode reconstruction --n-samples 300
-python scripts\neuron_model\generate_vn_foldingnet.py --run %RUN% --mode prior --n-samples 500 --seeds 1 2
+if not exist %RUN%\checkpoints\latest.pt (echo NO checkpoint in %RUN% & set VN_%1=& goto :eof)
+rem clouds with torch, meshes in a separate process (pymeshlab and torch conflict over OpenMP on Windows)
+python scripts\neuron_model\generate_vn_foldingnet.py --run %RUN% --mode reconstruction --n-samples 300 --no-mesh
+python scripts\neuron_model\generate_vn_foldingnet.py --run %RUN% --mode prior --n-samples 500 --seeds 1 2 --no-mesh
+for %%s in (recon_val seed_1 seed_2) do (
+  python scripts\neuron_model\reconstruct_mogen_poisson.py --run %RUN% --meshes-dir %RUN%\clouds_flow --set %%s --out %RUN%\meshes_flow_d8_pw8 ^
+    --poisson-config configs\neuron-model\reconstruction\poisson_sweep\d8_pw8.yaml --workers 8
+)
 goto :eof

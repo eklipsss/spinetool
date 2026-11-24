@@ -42,6 +42,9 @@ class PointCloudDataset:
         coord_scale: physical -> model units.
         use_normals: also return normals.
         cond: optional [N, cond_dim] condition vectors aligned with ``index`` (conditioning.py) -> ``item["cond"]``.
+        subsample: return a random subset of this many points of the ``n_points`` cloud (a subset of an i.i.d.
+            area-weighted sample is again one; lets e.g. a 2048-point model train on a cache holding only 8192).
+            Training (``random_variant``): a fresh subset per call; evaluation: fixed per item (seeded by its position).
     """
 
     def __init__(
@@ -55,8 +58,10 @@ class PointCloudDataset:
         coord_scale: float = 1.0,
         use_normals: bool = True,
         cond: Optional[np.ndarray] = None,
+        subsample: Optional[int] = None,
     ) -> None:
         self.index = index
+        self.subsample = None if not subsample or int(subsample) >= int(n_points) else int(subsample)
         if cond is not None and len(cond) != len(index):
             raise ValueError(f"cond has {len(cond)} rows, the index {len(index)}")
         self.cond = None if cond is None else np.asarray(cond, dtype=np.float32)
@@ -87,6 +92,13 @@ class PointCloudDataset:
         points = torch.from_numpy(np.asarray(data["points"], dtype=np.float32))
         if points.shape[0] != self.n_points:
             raise ValueError(f"{self._keys[i]}: expected {self.n_points} points, file has {points.shape[0]}")
+        pick = None
+        if self.subsample is not None:
+            if self.random_variant:
+                pick = torch.randperm(self.n_points)[: self.subsample]
+            else:
+                pick = torch.from_numpy(np.random.default_rng(i).permutation(self.n_points)[: self.subsample])
+            points = points[pick]
         if self.jitter_std > 0:
             points = points + torch.randn_like(points) * self.jitter_std
         item: Dict[str, Any] = {
@@ -95,7 +107,8 @@ class PointCloudDataset:
             "variant": variant,
         }
         if self.use_normals:
-            item["normals"] = torch.from_numpy(np.asarray(data["normals"], dtype=np.float32))
+            normals = torch.from_numpy(np.asarray(data["normals"], dtype=np.float32))
+            item["normals"] = normals if pick is None else normals[pick]
         if self.cond is not None:
             item["cond"] = torch.from_numpy(self.cond[i])
         return item

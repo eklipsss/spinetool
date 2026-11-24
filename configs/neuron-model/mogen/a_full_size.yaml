@@ -1,0 +1,10 @@
+# a_full.yaml + the distributional size penalty (flow.size_penalty_loss, 2026-11-24): every micro-batch, 1 cloud of the
+# batch (4 per optimizer step with accumulation 4) is integrated from the TRUE x_t (t0 ~ U(0, 0.8)) to t = 1 in 4 midpoint
+# steps with gradients (8 extra passes: memory about doubles, fits the 24 GB of the RTX 4090 at batch 8), and the squared
+# gap of the batch means of log radial / log axial size against the real clouds of the batch is added (weight 3).
+# Why: the generated clouds are 10-12 % too thick from the axis with the right length, a plateau of the fine-tuning
+# (chain AJ), not the sampler (chain AM: 50-400 steps give the same size).
+defaults: [a_full.yaml]
+name: mogen-a-full-size
+flow:
+  size_penalty: {weight: 3.0, every: 1, n_sub: 1, t_min: 0.0, t_max: 0.8, n_steps: 4, weights: [1.0, 1.0]}

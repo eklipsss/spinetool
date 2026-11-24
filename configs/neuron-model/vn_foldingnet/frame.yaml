@@ -10,10 +10,12 @@ name: vn-foldingnet-frame
 precision: fp32           # Chamfer and the VN normalisations in fp32
 
 data:
-  n_points: 2048          # FoldingNet resolution (the decoder generates any number of points: 8192 at generation)
+  n_points: 8192          # stored cloud read from the cache (cache/minnie65_dev holds only 8192, variants 1-2)
+  subsample_points: 2048  # FoldingNet resolution: random 2048 of the 8192 area-weighted points (fresh per step);
+                          # the decoder generates any number of points (8192 at generation)
   coord_scale: 1.0e-3     # nm -> um (spines ~0.5-3 um); Chamfer in um^2
   jitter_std: 5.0         # nm, as MoGen; NO random rotations (the spine frame is meaningful)
-  variants: [1, 2, 3, 4]
+  variants: [1, 2]        # the variants kept in the cache (as MoGen A)
   batch_size: 32
   num_workers: 4
   drop_unassigned: true

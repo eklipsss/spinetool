@@ -14,6 +14,10 @@
    ``--mode reconstruction``: the validation codes decoded instead (``recon_val``): the ceiling of the autoencoder.
 Evaluation: evaluate_generators.py --model vn_foldingnet=<run>/meshes_flow_d8_pw8 (folders seed_<s>). GPU for steps
 1 and 3, the Poisson chain on CPU (~2 s per spine).
+
+On Windows run with ``--no-mesh`` (clouds -> ``<run>/clouds_flow/<tag>``) and build the meshes in a SEPARATE process
+with reconstruct_mogen_poisson.py --run <run> --meshes-dir <run>/clouds_flow --set <tag> --out <run>/meshes_flow_d8_pw8
+--poisson-config .../d8_pw8.yaml: pymeshlab and torch in one process conflict over OpenMP (the reason that script exists).
 """
 
 from __future__ import annotations
@@ -67,7 +71,8 @@ def main() -> None:
     ap.add_argument("--flow-noise", type=float, default=0.05)
     ap.add_argument("--refit-flow", action="store_true")
     ap.add_argument("--poisson-config", type=Path, default=REPO_ROOT / "configs/neuron-model/reconstruction/poisson_sweep/d8_pw8.yaml")
-    ap.add_argument("--no-mesh", action="store_true")
+    ap.add_argument("--no-mesh", action="store_true", help="only the clouds (-> <run>/clouds_flow); meshes by reconstruct_mogen_poisson.py")
+    ap.add_argument("--out-name", default=None, help="output folder inside the run (default meshes_flow_<poisson config> / clouds_flow)")
     ap.add_argument("--manifests", nargs="*", help="override data.manifests of the run (e.g. another copy of the cache)")
     args = ap.parse_args()
 
@@ -98,7 +103,8 @@ def main() -> None:
             if split == "train" and args.max_train_codes and len(idx) > args.max_train_codes:
                 pick = np.sort(np.random.default_rng(0).choice(len(idx), args.max_train_codes, replace=False))
                 idx = idx.subset(idx.frame["spine_key"].iloc[pick])
-            ds = PointCloudDataset(idx, int(data_cfg["n_points"]), variants=(1,), random_variant=False, jitter_std=0.0, coord_scale=coord_scale, use_normals=False)
+            ds = PointCloudDataset(idx, int(data_cfg["n_points"]), variants=(1,), random_variant=False, jitter_std=0.0, coord_scale=coord_scale, use_normals=False,
+                                  subsample=data_cfg.get("subsample_points"))
             vec, keys = encode_dataset(model, ds, device, log=log)
             np.savez(codes_path[split], codes=vec, spine_key=np.array(keys), checkpoint=checkpoint_id)
             log(f"{split}: {len(keys)} codes of dimension {vec.shape[1]} -> {codes_path[split]}")
@@ -126,7 +132,7 @@ def main() -> None:
     rec_cfg = load_config(resolve_path(args.poisson_config))
     poisson = PoissonParams.from_mapping(rec_cfg["poisson"])
     k_normal = int(rec_cfg["normals"]["k_normal"])
-    out_root = run.root / f"meshes_flow_{Path(args.poisson_config).stem}"
+    out_root = run.root / (args.out_name or ("clouds_flow" if args.no_mesh else f"meshes_flow_{Path(args.poisson_config).stem}"))
     writer = SampleWriter(out_root)
     for seed in args.seeds:
         if args.mode == "prior":

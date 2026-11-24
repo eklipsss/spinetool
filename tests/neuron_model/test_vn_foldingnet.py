@@ -104,6 +104,7 @@ def test_train_and_generate_scripts_end_to_end(fake_dataset, tmp_path):
     out = subprocess.run([sys.executable, str(repo / "scripts/neuron_model/train_vn_foldingnet.py"), "--config", str(cfg_path)],
                          capture_output=True, text=True, cwd=repo)
     assert out.returncode == 0, out.stderr[-3000:]
+    assert "train 0 /" not in out.stdout
     run_dir = next((tmp_path / "runs").iterdir())
     gen = subprocess.run([sys.executable, str(repo / "scripts/neuron_model/generate_vn_foldingnet.py"), "--run", str(run_dir), "--n-samples", "3",
                           "--seeds", "1", "--no-mesh", "--flow-epochs", "3", "--flow-hidden", "16", "--flow-layers", "2"],
@@ -111,7 +112,28 @@ def test_train_and_generate_scripts_end_to_end(fake_dataset, tmp_path):
     assert gen.returncode == 0, gen.stderr[-3000:]
     from src.neuron_model.spine_generation.experiment.artifacts import read_pointcloud_ply
 
-    pts, _ = read_pointcloud_ply(run_dir / "meshes_flow_d8_pw8" / "seed_1" / "sample_00000" / "generated_pointcloud.ply")
+    pts, _ = read_pointcloud_ply(run_dir / "clouds_flow" / "seed_1" / "sample_00000" / "generated_pointcloud.ply")
     assert pts.shape == (8192, 3) and np.isfinite(pts).all()
     codes = np.load(run_dir / "latent_prior_flow" / "codes_train.npz", allow_pickle=True)["codes"]
     assert codes.shape[1] == 8 + 6  # code + 6-D rotation in mode 'frame'
+
+
+def test_point_cloud_subsample(fake_dataset):
+    """data.subsample_points: 2048 of the stored 8192 points (the training cache holds only 8192); random per call in
+    training, fixed per item in evaluation, normals follow the points."""
+    import torch
+
+    from src.neuron_model.spine_generation.data.datasets import PointCloudDataset
+    from src.neuron_model.spine_generation.data.index import load_spine_index
+
+    index = load_spine_index([fake_dataset / "manifest.parquet"])
+    full = PointCloudDataset(index, 8192, variants=(1,), random_variant=False)[0]
+    ev = PointCloudDataset(index, 8192, variants=(1,), random_variant=False, subsample=2048)
+    a, b = ev[0], ev[0]
+    assert a["points"].shape == (2048, 3) and torch.equal(a["points"], b["points"])
+    rows = {tuple(p) for p in full["points"].numpy().round(4)}
+    assert all(tuple(p) in rows for p in a["points"].numpy().round(4))
+    pairs = {tuple(np.r_[p, n]) for p, n in zip(full["points"].numpy().round(4), full["normals"].numpy().round(4))}
+    assert all(tuple(np.r_[p, n]) in pairs for p, n in zip(a["points"].numpy().round(4), a["normals"].numpy().round(4)))
+    tr = PointCloudDataset(index, 8192, variants=(1,), random_variant=True, subsample=2048)
+    assert not torch.equal(tr[0]["points"], tr[0]["points"])
