@@ -1,0 +1,49 @@
+# VN + FoldingNet autoencoder (the architecture used in the lab for spine embeddings) + normalizing flow over its codes,
+# trained on the SAME spines as MoGen A and the VAE (cache of splits_dev_100n) and evaluated by the same protocol
+# (comparison model, 2026-11-24; src/neuron_model/spine_generation/models/spine_foldnet, docs/neuron-model/24.11-bridge-matching.md).
+#   python scripts/neuron_model/train_vn_foldingnet.py --config configs/neuron-model/vn_foldingnet/frame.yaml \
+#     "data.manifests=['cache/minnie65_dev/manifest.parquet']" data.splits=data/processed/neuron-model/splits/splits_dev_100n.parquet
+# mode frame: invariant code + equivariant frame, the decoder output rotated back (loses no orientation); the flow models
+# (code, 6-D rotation). invariant.yaml: the code alone (orientation must be guessed by the decoder).
+defaults: [../base/experiment.yaml]
+name: vn-foldingnet-frame
+precision: fp32           # Chamfer and the VN normalisations in fp32
+
+data:
+  n_points: 2048          # FoldingNet resolution (the decoder generates any number of points: 8192 at generation)
+  coord_scale: 1.0e-3     # nm -> um (spines ~0.5-3 um); Chamfer in um^2
+  jitter_std: 5.0         # nm, as MoGen; NO random rotations (the spine frame is meaningful)
+  variants: [1, 2, 3, 4]
+  batch_size: 32
+  num_workers: 4
+  drop_unassigned: true
+
+model:
+  architecture:
+    mode: frame
+    latent_dim: 512       # FoldingNet code size
+    encoder_channels: [21, 42, 85, 170]   # VN channels (64 / 3 ... as in the VN paper)
+    k_nn: 16
+    grid: plane           # FoldingNet 2-D grid; sphere = closed-surface variant
+    grid_points: 2025     # 45 x 45
+    grid_extent: 0.3
+    hidden_dim: 512
+
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  schedule: {type: cosine, min_lr: 1.0e-5}
+
+train:
+  max_steps: 60000        # ~128 epochs of 15 000 spines
+  accumulation_steps: 1
+  clip_norm: 1.0
+  ema_decay: 0.999
+  log_every: 100
+  validate_every: 2000
+  sample_every: 10000
+  checkpoint_every: 2000
+  tracked_metrics: {val_loss: min}
+  n_val_batches: 50
+  n_samples: 8

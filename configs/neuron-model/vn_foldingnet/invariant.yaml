@@ -1,0 +1,7 @@
+# VN + FoldingNet with the rotation-INVARIANT code alone: the decoder output is the cloud, the code cannot tell a spine
+# from its rotated copy (tests the claim that an invariant encoder loses the tilt of the spine in the dendrite frame).
+defaults: [frame.yaml]
+name: vn-foldingnet-invariant
+model:
+  architecture:
+    mode: invariant
