@@ -12,7 +12,14 @@ surface is passed through the same physics:
 3. sample: the blurred intensity read at the centres of the confocal voxels (``voxel_nm``), with a random sub-voxel phase
    (the grid of the microscope does not know where the spine is);
 4. optional noise (Gaussian, relative to the full-fill intensity);
-5. segment: iso-surface at ``threshold`` x the intensity of a fully filled large region (Marching Cubes), largest component.
+5. segment, two variants (``surface``):
+   - ``isosurface``: iso-surface at ``threshold`` x the intensity of a fully filled large region (Marching Cubes), largest
+     component;
+   - ``spinetool`` (2026-11-25): the procedure of SpineTool 1 that built the LabID meshes (``spine_segmentation.py``,
+     ``notebooks/dendrite/dendrite-segmentation.ipynb``): 8-bit image, Gaussian smoothing with sigma = 1 voxel, local
+     threshold ``T = base - w (base - median_3x3x3)`` with ``base = 255 threshold``, largest connected component, boundary
+     voxels of the binary image (binary minus its erosion) with normals = gradient of the negated binary image, Poisson
+     reconstruction IN VOXEL COORDINATES, then scaling by the voxel size (``spinetool_surface``).
 
 Geometry of imaging: LabID dendrites lie in the imaging plane (field 15-25 um in xy, ~2.5 um in z), so the optical axis is
 perpendicular to the dendrite and the spine points at a uniformly random angle around it. In the spine's local frame
@@ -46,6 +53,12 @@ class ConfocalParams:
     keep: str = "largest"                                          # components kept: largest | all
     trunk_radius_nm: Optional[float] = None                        # image together with a trunk cylinder of this radius, cut along it
     attached_max_gap_nm: float = 150.0                             # kept piece starting higher than this above the trunk = detached head
+    surface: str = "isosurface"                                    # isosurface | spinetool (last step of SpineTool 1)
+    st_weight: float = 0.05                                        # SpineTool local threshold weight w
+    st_block: int = 3                                              # SpineTool median window (voxels)
+    st_presmooth_voxels: float = 1.0                               # Gaussian sigma before thresholding, in voxels of each axis
+    st_8bit: bool = True                                           # quantise the image to 0..255 (saturates above the full fill)
+    st_poisson: str = "auto"                                       # auto (pymeshlab, then binary_mc) | pymeshlab | cgal (subprocess) | binary_mc
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -209,6 +222,35 @@ def image_mesh(vertices: np.ndarray, faces: np.ndarray, params: ConfocalParams, 
         info["max_joint_intensity"] = float(joint.max())
     if p.noise_sd > 0:
         field = field + rng.normal(0.0, float(p.noise_sd), field.shape)
+    if p.surface == "spinetool":
+        bin_trunk = None
+        if trunk is None:
+            binary = spinetool_binary(image, p)
+        else:
+            bin_trunk = spinetool_binary(trunk_only, p)
+            binary = spinetool_binary(joint, p) & ~bin_trunk
+        binary = _largest_binary_component(binary)
+        info["n_voxels"] = int(binary.sum())
+        if binary.sum() < 8:
+            return {"vertices": np.zeros((0, 3)), "faces": np.zeros((0, 3), dtype=np.int64), "detected": False, "info": info}
+        verts, tris, backend = spinetool_surface(binary, vox, p.st_poisson)
+        info["poisson_backend"] = backend
+        verts = verts + np.array([a[0] for a in axes])
+        if p.keep == "largest" and len(tris):
+            verts, tris, n_comp = _largest_component(verts, tris)
+            info["n_components"] = n_comp
+        local = verts @ R
+        # attached = the kept spine region touches the region of the IMAGED trunk (at a low threshold the imaged trunk is
+        # a few hundred nm thicker than the membrane, so the height above y = 0 is not the right test here)
+        if bin_trunk is not None:
+            from scipy import ndimage
+
+            touch = ndimage.binary_dilation(binary, structure=np.ones((3, 3, 3), dtype=bool)) & bin_trunk
+            info["attached_to_trunk"] = bool(touch.any())
+        else:
+            info["attached_to_trunk"] = None
+        info["base_gap_nm"] = float(local[:, 1].min()) if len(local) else float("nan")
+        return {"vertices": local, "faces": np.asarray(tris, dtype=np.int64), "detected": bool(len(tris)), "info": info}
     if field.max() <= 0 or field.min() >= 0:
         return {"vertices": np.zeros((0, 3)), "faces": np.zeros((0, 3), dtype=np.int64), "detected": False, "info": info}
     # the field is HIGH inside (an SDF is low): gradient_direction="ascent" gives outward faces
@@ -222,6 +264,99 @@ def image_mesh(vertices: np.ndarray, faces: np.ndarray, params: ConfocalParams, 
     info["attached_to_trunk"] = bool(local[:, 1].min() < float(p.attached_max_gap_nm)) if trunk is not None else None
     info["base_gap_nm"] = float(local[:, 1].min())
     return {"vertices": local, "faces": tris.astype(np.int64), "detected": True, "info": info}
+
+
+def spinetool_binary(intensity: np.ndarray, p: "ConfocalParams") -> np.ndarray:
+    """SpineTool 1 segmentation of an image whose full fill is 1: optional 8-bit quantisation, Gaussian sigma in voxels,
+    local threshold ``base - w (base - median)``, ``base = 255 * threshold`` (``spine_segmentation.local_threshold_3d``)."""
+    from scipy import ndimage
+
+    img = np.asarray(intensity, dtype=np.float64)
+    scale = 255.0
+    if p.st_8bit:
+        img = np.clip(np.round(img * scale), 0, 255)
+    else:
+        img = img * scale
+    if p.st_presmooth_voxels > 0:
+        img = ndimage.gaussian_filter(img, float(p.st_presmooth_voxels))
+    base = float(p.threshold) * scale
+    thr = base - float(p.st_weight) * (base - ndimage.median_filter(img, size=int(p.st_block)))
+    return img > thr
+
+
+def _largest_binary_component(binary: np.ndarray) -> np.ndarray:
+    from scipy import ndimage
+
+    lab, n = ndimage.label(binary, structure=np.ones((3, 3, 3), dtype=bool))
+    if n <= 1:
+        return binary
+    sizes = np.bincount(lab.ravel())
+    sizes[0] = 0
+    return lab == int(np.argmax(sizes))
+
+
+def spinetool_surface(binary: np.ndarray, voxel_nm: np.ndarray, backend: str = "auto") -> Tuple[np.ndarray, np.ndarray, str]:
+    """Boundary voxels of the binary image with normals = gradient of the negated image, Poisson reconstruction in voxel
+    coordinates, then scaling by the voxel size (as SpineTool: "small coordinates give worse reconstruction results").
+    Returns (vertices in nm relative to voxel index 0, faces, backend used)."""
+    from scipy import ndimage
+
+    b = np.asarray(binary, dtype=bool)
+    padded = np.pad(b, 2)
+    edges = padded & ~ndimage.binary_erosion(padded)
+    pts = np.argwhere(edges).astype(np.float64)
+    grad = np.gradient(-padded.astype(np.float64) * 255.0)
+    idx = tuple(pts.astype(int).T)
+    normals = np.stack([g[idx] for g in grad], axis=1)
+    ok = np.linalg.norm(normals, axis=1) > 0
+    pts, normals = pts[ok], normals[ok]
+    vox = np.asarray(voxel_nm, dtype=np.float64)
+    order = ["pymeshlab", "binary_mc"] if backend == "auto" else [backend]
+    for name in order:
+        try:
+            if name == "cgal":
+                v, f = _poisson_cgal(pts, normals)
+            elif name == "pymeshlab":
+                from .spine_generation.reconstruction.screened_poisson import PoissonParams, screened_poisson
+
+                m = screened_poisson(pts, normals, PoissonParams(depth=8, point_weight=4.0))
+                v, f = np.asarray(m.vertices), np.asarray(m.faces)
+            elif name == "binary_mc":
+                from skimage import measure
+
+                smooth = ndimage.gaussian_filter(padded.astype(np.float64), 1.0)
+                v, f, _, _ = measure.marching_cubes(smooth, level=0.5, gradient_direction="ascent")
+            else:
+                raise ValueError(f"unknown Poisson backend {name!r}")
+            if len(f) == 0:
+                raise RuntimeError("empty reconstruction")
+            return (np.asarray(v, dtype=np.float64) - 2.0) * vox, np.asarray(f, dtype=np.int64), name
+        except Exception:  # noqa: BLE001 - try the next backend (CGAL without Eigen, no pymeshlab on the mac)
+            if backend != "auto":
+                raise
+    raise RuntimeError("no Poisson backend worked")
+
+
+def _poisson_cgal(points: np.ndarray, normals: np.ndarray, timeout_s: float = 300.0) -> Tuple[np.ndarray, np.ndarray]:
+    """CGAL Poisson (SpineTool's mesher) in a subprocess: the binding can abort the interpreter."""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    import trimesh
+
+    repo = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = os.path.join(tmp, "in.npz"), os.path.join(tmp, "out.off")
+        np.savez(src, points=points, normals=normals)
+        res = subprocess.run([sys.executable, "-m", "src.neuron_model._cgal_poisson_worker", src, dst], cwd=str(repo),
+                             capture_output=True, timeout=timeout_s)
+        if res.returncode != 0 or not os.path.exists(dst):
+            raise RuntimeError(f"CGAL Poisson failed (exit {res.returncode}): {res.stderr.decode(errors='replace')[-300:]}")
+        m = trimesh.load(dst, process=False, force="mesh")
+    return np.asarray(m.vertices), np.asarray(m.faces)
 
 
 def _largest_component(verts: np.ndarray, tris: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:

@@ -20,6 +20,7 @@ from typing import Dict, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+N_PROFILE = 10  # height bins of the radius profile (0 = base, 9 = tip)
 MEASURES = ("length_nm", "extent_x_nm", "extent_z_nm", "radial_rms_nm", "head_radius_nm", "neck_radius_nm",
             "hull_volume_nm3", "nn_spacing_nm", "surface_noise_nm", "mesh_volume_nm3", "mesh_over_hull")
 
@@ -45,6 +46,12 @@ def cloud_measures(points: np.ndarray, *, k: int = 16, n_noise: int = 1024, seed
         "head_radius_nm": float(np.percentile(r[upper], 90)) if upper.sum() > 10 else float("nan"),
         "neck_radius_nm": float(np.median(r[band])) if band.sum() > 10 else float("nan"),
     }
+    # radius profile along the spine axis: median distance from the axis through the centroid, per height decile
+    h = np.clip((y - lo) / max(length, 1e-9), 0, 1 - 1e-9)
+    b = (h * N_PROFILE).astype(int)
+    for k in range(N_PROFILE):
+        sel = b == k
+        out[f"profile_r{k}_nm"] = float(np.median(r[sel])) if sel.sum() >= 10 else float("nan")
     try:
         out["hull_volume_nm3"] = float(ConvexHull(p).volume)
     except Exception:  # noqa: BLE001 - degenerate cloud
@@ -145,4 +152,19 @@ def summarise(tables: Mapping[str, pd.DataFrame], reference: str, *, n_boot: int
                          "ratio_to_ref": float(np.median(v[ok]) / np.median(rv[rok])),
                          "ratio_lo": float(np.percentile(ratios, 2.5)), "ratio_hi": float(np.percentile(ratios, 97.5)),
                          "p99_ratio_to_ref": float(np.percentile(v[ok], 99) / np.percentile(rv[rok], 99))})
+    return pd.DataFrame(rows)
+
+
+def profile_table(tables: Mapping[str, pd.DataFrame], reference: str) -> pd.DataFrame:
+    """Per set and height bin: median radius (nm) over the clouds and its ratio to the reference."""
+    ref = tables[reference]
+    rows = []
+    for label, t in tables.items():
+        for k in range(N_PROFILE):
+            col = f"profile_r{k}_nm"
+            if col not in t.columns or col not in ref.columns:
+                continue
+            m, mr = float(np.nanmedian(t[col])), float(np.nanmedian(ref[col]))
+            rows.append({"set": label, "bin": k, "height_from": k / N_PROFILE, "height_to": (k + 1) / N_PROFILE,
+                         "median_radius_nm": m, "ratio_to_ref": m / mr if mr > 0 else float("nan")})
     return pd.DataFrame(rows)

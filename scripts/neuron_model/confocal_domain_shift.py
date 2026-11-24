@@ -14,7 +14,8 @@ Inputs are sets in the generator layout written by make_real_controls.py, all me
     python scripts\\neuron_model\\confocal_domain_shift.py --reference minnie=<out>\\minnie\\asis\\seed_1 ^
         --target labid_wt=<out>\\labid_wt\\asis\\seed_1 --imaged t05=<out>\\minnie\\confocal\\seed_1 --imaged t03=<out>\\minnie_t03\\confocal\\seed_1
 
-Unit of inference: the source neuron (Minnie65) / the branch folder (LabID), from ``spine_key`` in generation_metadata.json.
+Unit of inference: the source neuron (Minnie65) / the source image of the branch folder (LabID, since 2026-11-25), from
+``spine_key`` in generation_metadata.json.
 Writes ``runs/analysis/neuron-model/<time>_confocal-shift/{shift.csv, summary.csv, imaging.csv, run_info.json}``.
 """
 
@@ -37,6 +38,17 @@ from src.neuron_model.spine_generation.evaluation.domain_shift import shift_tabl
 from src.neuron_model.spine_morphometrics import SCALAR_METRICS  # noqa: E402
 
 
+def unit_of(spine_key: str) -> str:
+    """Unit of inference of a source spine: the neuron (EM) or, for LabID, the SOURCE IMAGE its branch folder was cut from
+    (fragments of one image = one cell, not independent; decision 2026-11-18)."""
+    from src.neuron_model.metadata import labid_source_id
+
+    parts = str(spine_key).split("/")
+    if len(parts) < 2:
+        return str(spine_key)
+    return labid_source_id(parts[1]) if parts[0].lower().startswith("labid") else parts[1]
+
+
 def measure(folder: Path, mesh_kind: str) -> tuple:
     """Metrics of one set + per-sample unit (neuron / folder of the source spine) + imaging diagnostics of a confocal set."""
     from src.neuron_model.spine_generation.evaluation.morphometrics import generated_set_metrics
@@ -48,7 +60,7 @@ def measure(folder: Path, mesh_kind: str) -> tuple:
     for sample in frame["sample_id"].astype(str):
         meta = folder / sample / "generation_metadata.json"
         key = json.loads(meta.read_text(encoding="utf-8")).get("spine_key") if meta.exists() else None
-        units.append(str(key).split("/")[1] if key else sample)
+        units.append(unit_of(key) if key else sample)
         rep = folder / sample / "mesh_validation_raw.json"
         conf = json.loads(rep.read_text(encoding="utf-8")).get("confocal") if rep.exists() else None
         imaging.append(conf or {})

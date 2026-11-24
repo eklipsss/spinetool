@@ -111,3 +111,23 @@ def test_shift_table_splits_total_into_optics_and_rest():
     assert v.total_sig and v.optics_sig
     s = summarize(t, sets, "ref")
     assert 0.2 < s["closed_fraction"].iloc[0] < 0.9
+
+
+def test_spinetool_surface_keeps_a_large_sphere_and_a_visible_neck_at_low_threshold():
+    # SpineTool last step (local threshold on the smoothed 8-bit image, boundary voxels, Poisson in voxel units);
+    # binary_mc: the mac cannot run pymeshlab (OpenMP clash) nor CGAL Poisson (no Eigen); the path is the same up to the mesher
+    big = _sphere(800.0)
+    p = ConfocalParams(sigma_xy_nm=55.0, sigma_z_nm=180.0, threshold=0.5, surface="spinetool", random_phase=False,
+                       voxel_nm=(22.17, 22.17, 100.0), st_poisson="binary_mc")
+    out = image_mesh(big.vertices, big.faces, p, np.random.default_rng(1))
+    assert out["detected"] and out["info"]["poisson_backend"] in ("cgal", "pymeshlab", "binary_mc")
+    m = trimesh.Trimesh(out["vertices"], out["faces"])
+    assert m.volume == pytest.approx(big.volume, rel=0.2)
+    # optical axis across the neck: neck brightness ~ r^2 / (2 sigma_xy sigma_z) = 0.13 for r = 50 nm
+    s = _spine(neck_r=50.0, neck_len=600.0, head_r=300.0)
+    common = dict(sigma_xy_nm=55.0, sigma_z_nm=180.0, surface="spinetool", optical_axis_angle=np.pi / 2, random_phase=False,
+                  trunk_radius_nm=400.0, voxel_nm=(22.17, 22.17, 100.0), st_poisson="binary_mc")
+    low = image_mesh(s.vertices, s.faces, ConfocalParams(threshold=0.08, **common), np.random.default_rng(0))
+    high = image_mesh(s.vertices, s.faces, ConfocalParams(threshold=0.5, **common), np.random.default_rng(0))
+    assert low["detected"] and low["info"]["attached_to_trunk"]          # the 50 nm neck is visible at the LabID threshold
+    assert (not high["detected"]) or (not high["info"]["attached_to_trunk"])  # at 0.5 the head comes off (or vanishes)

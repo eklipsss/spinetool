@@ -97,7 +97,10 @@ def discover_raw(labid_root: Path, units: Optional[List[str]] = None) -> pd.Data
 
     rows = []
     for group_dir in sorted(p for p in Path(labid_root).iterdir() if p.is_dir()):
-        for d in sorted(p for p in group_dir.iterdir() if p.is_dir()):
+        # since 2026-11-18 a group folder holds output/ (the branch folders), the source stacks and deconvolution results;
+        # older copies have the branch folders directly in the group folder
+        branch_root = group_dir / "output" if (group_dir / "output").is_dir() else group_dir
+        for d in sorted(p for p in branch_root.iterdir() if p.is_dir()):
             if (d / "pure_surface_mesh.off").exists():
                 n1, n2 = labid_name_numbers(d.name)
                 rows.append({"group": group_dir.name, "dendrite": d.name, "path": str(d), "neuron_id": labid_unit_id(group_dir.name, d.name),

@@ -34,6 +34,7 @@ def generate_point_clouds(
     cond=None,
     guidance: float = 1.0,
     log=None,
+    noise_scale: float = 1.0,
 ) -> np.ndarray:
     """``[n_samples, n_points, 3]`` in PHYSICAL units (model output / coord_scale).
 
@@ -42,6 +43,8 @@ def generate_point_clouds(
     noise under two conditions = the swap test of the conditional evaluation).
     ``cond``: one condition vector [cond_dim] for every sample (conditioning.py), or None;
     ``guidance``: classifier-free guidance weight (1 = plain conditional sampling).
+    ``noise_scale``: standard deviation of the starting noise (1 = as in training; < 1 = "temperature" below one, a
+    diagnostic of whether the spread of the samples comes from the start of the flow).
     """
     import torch
 
@@ -49,7 +52,7 @@ def generate_point_clouds(
     model.eval()
     for start in range(0, n_samples, batch_size):
         idx = range(start, min(start + batch_size, n_samples))
-        noise = torch.stack([torch.randn(n_points, 3, generator=torch.Generator().manual_seed(seed * 1_000_003 + i)) for i in idx]).to(device)
+        noise = torch.stack([torch.randn(n_points, 3, generator=torch.Generator().manual_seed(seed * 1_000_003 + i)) for i in idx]).to(device) * float(noise_scale)
         batch_cond = None
         if cond is not None:
             vec = torch.as_tensor(np.asarray(cond, dtype=np.float32)).reshape(1, -1).to(device)

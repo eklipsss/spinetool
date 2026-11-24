@@ -66,6 +66,7 @@ def main() -> None:
     parser.add_argument("--no-mesh", action="store_true", help="only point clouds")
     parser.add_argument("--condition", default=None, help="block=value,... (conditional runs only)")
     parser.add_argument("--guidance", type=float, default=1.0, help="classifier-free guidance weight (1 = none)")
+    parser.add_argument("--noise-scale", type=float, default=1.0, help="sd of the starting noise (1 = as in training; diagnostic)")
     parser.add_argument("--tag", default=None, help="output folder name (default seed_<s>, or cond_..._seed_<s>)")
     args = parser.parse_args()
 
@@ -114,6 +115,7 @@ def main() -> None:
         "coord_scale": float(cfg["data"]["coord_scale"]),
         "n_points": int(cfg["data"]["n_points"]),
         "generation_seed": args.seed,
+        "noise_scale": float(args.noise_scale),
         "checkpoint_id": checkpoint_id,
         "cond": "zeros (unconditional)" if cond_vec is None else {"condition": condition, "vector": cond_vec.tolist(), "guidance": args.guidance},
     }
@@ -130,6 +132,7 @@ def main() -> None:
         cond=cond_vec,
         guidance=args.guidance,
         log=log,
+        noise_scale=args.noise_scale,
     )
     rec_cfg = load_config(resolve_path(cfg["reconstruction"]["poisson_config"]))
     poisson = PoissonParams.from_mapping(rec_cfg["poisson"])

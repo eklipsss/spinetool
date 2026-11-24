@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.neuron_model.spine_generation.data.index import load_spine_index  # noqa: E402
-from src.neuron_model.spine_generation.evaluation.cloud_size import measure_generated_dir, measure_real_controls, summarise  # noqa: E402
+from src.neuron_model.spine_generation.evaluation.cloud_size import measure_generated_dir, measure_real_controls, profile_table, summarise  # noqa: E402
 
 
 def labelled(values, ap):
@@ -70,6 +70,15 @@ def main() -> None:
         lines += [f"## {m}", "", "| set | n | median | p99 | median / real [95 %] | p99 / real p99 |", "| --- | --- | --- | --- | --- | --- |"]
         for _, r in g.iterrows():
             lines.append(f"| {r.set} | {r.n} | {r['median']:.4g} | {r.p99:.4g} | {r.ratio_to_ref:.3f} [{r.ratio_lo:.3f}; {r.ratio_hi:.3f}] | {r.p99_ratio_to_ref:.2f} |")
+        lines.append("")
+    prof = profile_table(tables, real_label)
+    prof.to_csv(args.out / "profile.csv", index=False)
+    if len(prof):
+        wide = prof.pivot(index="bin", columns="set", values="ratio_to_ref")
+        lines += ["## radius profile along the spine axis (median radius / real, height deciles from the base)", "",
+                  "| height | " + " | ".join(wide.columns) + " |", "| --- |" + " --- |" * len(wide.columns)]
+        for k, row in wide.iterrows():
+            lines.append(f"| {k / 10:.1f}-{(k + 1) / 10:.1f} | " + " | ".join(f"{v:.2f}" for v in row.to_numpy()) + " |")
         lines.append("")
     (args.out / "summary.md").write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
