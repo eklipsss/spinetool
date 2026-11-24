@@ -259,7 +259,11 @@ def fit_t0(
                      if "sd_log_r_L" in ne else "level: off")
             gate = (f"gate: tau {ne['tau_gate']:.3f} (log odds thinnest vs thickest component; direction {[round(v, 2) for v in ne['gate_direction']]})"
                     if "tau_gate" in ne else "gate: off")
-            log(f"       neuron effect ({ne['n_neurons']} neurons, {ne['iterations']} rounds): {level}; {gate}; within-neuron sd of the components "
+            hist = ne.get("history") or [{}]
+            centring = (f"; mean level effect taken out by the centring: first round {[round(v, 3) for v in hist[0].get('mean_level_before_centring', [])]}, "
+                        f"last {[round(v, 4) for v in hist[-1].get('mean_level_before_centring', [])]}") if "mean_level_before_centring" in hist[0] else ""
+            log(f"       neuron effect ({ne['n_neurons']} neurons, {ne['iterations']} rounds, converged {ne.get('converged')}{centring})")
+            log(f"       neuron effect: {level}; {gate}; within-neuron sd of the components "
                 f"{[round(v, 3) for v in ne['sd_log_r_L_within_after']]} (without the effects {[round(v, 3) for v in ne['sd_log_r_L_within_before']]})")
         for name, v in neuron_thin["per_neuron"].items():
             if v.get("n_neurons"):

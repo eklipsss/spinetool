@@ -182,7 +182,7 @@ class ParabolicMixtureMean(ParabolicMean):
     def __init__(self, n_components: Any = "auto", max_components: int = 3, ridge: float = 1.0, gate_ridge: float = 1.0,
                  cov_floor: float = 1e-4, max_iter: int = 300, tol: float = 1e-7, seed: int = 0,
                  neuron_effect: bool = False, neuron_level: bool = True, neuron_gate: bool = True, gate_grid: int = 21,
-                 neuron_iter: int = 40, neuron_tol: float = 1e-3) -> None:
+                 neuron_iter: int = 100, neuron_tol: float = 1e-3) -> None:
         super().__init__()
         self.n_components = n_components
         self.max_components = int(max_components)
@@ -385,22 +385,49 @@ class ParabolicMixtureMean(ParabolicMean):
             np.add.at(m, g, r0)
             m /= np.bincount(g, minlength=n_g)[:, None]
             self.neuron_cov = 0.5 * np.cov(m.T) + 1e-4 * np.eye(2)  # start: half the spread of the neuron means of the residuals
+        # neuron-level columns of the design (constant within every neuron; the intercept first) for the PX-EM centring
+        first = np.unique(g, return_index=True)[1]
+        zcols = [c for c in range(d) if np.allclose(x[:, c], x[first, c][g])]
+        zmat = x[first][:, zcols]
         z, _ = self._grid()
         it, history = 0, []
         for it in range(1, self.neuron_iter + 1):
             resp, w, resp_j = self._neuron_estep(theta, x, g, n_g, a)
             change = 0.0
+            a_bar, b_bar = np.zeros(2), 0.0
             if self.neuron_level:
                 a, v = self._level_update(theta, x, g, n_g, resp)
+                # PX-EM centring (2026-11-24, chain AN): at the maximum of the likelihood the posterior means of the level
+                # effects are orthogonal to every NEURON-LEVEL column of the design (intercept, species, cell type: the
+                # score of such a coefficient is sum_n z_n T^-1 a_n). With ~40 branches per neuron plain EM moves a shift
+                # between those coefficients and the effects very slowly; on Minnie65 + H01 (40 rounds, not converged) the
+                # mouse part ended ~0.25 too high in log r_L with the effects of the mouse neurons ~0.25 too low (independent
+                # draws +100 nm, H01 -8 nm, the posterior draws exact). Each round the projection of the effects on the
+                # neuron-level columns goes into those coefficients of ALL components (a common shift of theta: the
+                # likelihood is unchanged).
+                gamma = np.linalg.lstsq(zmat, a, rcond=None)[0]          # [q, 2]
+                a_bar = a.mean(axis=0)
+                a = a - zmat @ gamma
+                for j in range(k):
+                    self.coefs[j][zcols] += gamma
                 t_new = (np.einsum("gi,gj->ij", a, a) + v.sum(0)) / n_g + 1e-8 * np.eye(2)
                 change = max(change, float(np.abs(t_new - self.neuron_cov).max() / max(np.abs(self.neuron_cov).max(), 1e-12)))
                 self.neuron_cov = t_new
                 resp, w, resp_j = self._neuron_estep(theta, x, g, n_g, a)
             if w is not None:
-                tau_new = self.neuron_gate_sd * math.sqrt(float(np.mean(w @ z ** 2)))
                 # M-step of the gate at the CURRENT grid (before tau moves), rows (branch, grid node) weighted by w_nj
                 offset = np.repeat((self.neuron_gate_sd * z)[None, :, None] * self.gate_direction[None, None, :], n, axis=0).reshape(-1, k)
                 self.gate = self._fit_gate(np.repeat(x, len(z), axis=0), resp_j.reshape(-1, k), self.gate, offset=offset, weight=w[g].reshape(-1))
+                # the same centring of the gate effect: the projection f_n of its posterior means on the neuron-level columns
+                # goes into those rows of the gate (logit_k += f_n s_k; the last column of the gate is fixed at 0, so relative
+                # to it), tau from the second moment around f_n (E b^2 - f^2: f is an OLS projection with the intercept)
+                post_mean = self.neuron_gate_sd * (w @ z)
+                gamma_b = np.linalg.lstsq(zmat, post_mean, rcond=None)[0]   # [q]
+                fitted = zmat @ gamma_b
+                b_bar = float(fitted.mean())
+                self.gate[zcols, :] += gamma_b[:, None] * (self.gate_direction - self.gate_direction[-1])[None, :]
+                second = self.neuron_gate_sd ** 2 * float(np.mean(w @ z ** 2)) - float(np.mean(fitted ** 2))
+                tau_new = math.sqrt(max(second, 1e-12))
                 change = max(change, abs(tau_new - self.neuron_gate_sd) / max(self.neuron_gate_sd, 1e-6))
                 self.neuron_gate_sd = max(tau_new, 1e-3)
             shifted = theta - a[g]
@@ -411,14 +438,17 @@ class ParabolicMixtureMean(ParabolicMean):
                 self.covs[j] = (res * wj[:, None]).T @ res / max(wj.sum(), 1e-9) + self.cov_floor * np.eye(2)
             if w is None:
                 self.gate = self._fit_gate(x, resp, self.gate)
-            history.append({"sd_level": None if self.neuron_cov is None else float(math.sqrt(self.neuron_cov[0, 0])), "tau_gate": self.neuron_gate_sd})
+            history.append({"sd_level": None if self.neuron_cov is None else float(math.sqrt(self.neuron_cov[0, 0])), "tau_gate": self.neuron_gate_sd,
+                            "mean_level_before_centring": a_bar.tolist(), "mean_gate_before_centring": b_bar,
+                            "neuron_level_columns": len(zcols)})
             if change < self.neuron_tol:
                 break
         self.coef, self.cov = self.coefs[0], self.covs[0]
         resp, w, _ = self._neuron_estep(theta, x, g, n_g, a)
         weights = resp.mean(0)
         within = float(np.sum(weights * self.covs[:, 0, 0]))
-        info: Dict[str, Any] = {"n_neurons": int(n_g), "iterations": it, "history": history[-5:], "weights": weights.tolist(),
+        info: Dict[str, Any] = {"n_neurons": int(n_g), "iterations": it, "converged": bool(change < self.neuron_tol),
+                                "history": history[:3] + history[-5:], "weights": weights.tolist(),
                                 "sd_log_r_L_within_before": [float(math.sqrt(cv[0, 0])) for cv in cov_before],
                                 "sd_log_r_L_within_after": [float(math.sqrt(cv[0, 0])) for cv in self.covs],
                                 "component_mean_log_r_L": c.tolist()}

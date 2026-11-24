@@ -23,7 +23,8 @@ SD_NEURON = 0.25
 N_NODES, STEP, LENGTH = 31, 500.0, 15000.0
 
 
-def _neurons(n_neurons: int, per_neuron: int, seed: int, enc: DesignEncoder = None, level_sd: float = SD_NEURON, gate_sd: float = 0.0):
+def _neurons(n_neurons: int, per_neuron: int, seed: int, enc: DesignEncoder = None, level_sd: float = SD_NEURON, gate_sd: float = 0.0,
+             species_of=lambda i: "mouse"):
     rng = np.random.default_rng(seed)
     soma_all = rng.uniform(5000.0, 400000.0, n_neurons * per_neuron)
     enc = enc or DesignEncoder.fit([10000.0, 30000.0], soma_all)
@@ -40,7 +41,7 @@ def _neurons(n_neurons: int, per_neuron: int, seed: int, enc: DesignEncoder = No
             ratio = math.exp(0.15 + rng.normal(0.0, 0.05))
             r = math.exp(log_rl) * (1.0 - w2) + math.exp(log_rl) * ratio * w2
             branches.append(T0Branch(rng.normal(0, 1e-4, N_NODES - 1), rng.normal(0, 1e-4, N_NODES - 1), np.log(r) + rng.normal(0, 0.005, N_NODES),
-                                     STEP, enc.row("mouse", "excitatory", "apical", LENGTH, d, True), "mouse|excitatory|apical", f"n{seed}_{i}"))
+                                     STEP, enc.row(species_of(i), "excitatory", "apical", LENGTH, d, True), f"{species_of(i)}|excitatory|apical", f"n{seed}_{i}"))
             branches[-1].soma_mid = float(d)  # for the requests of the tests (the design uses the midpoint)
             true_log_rl.append(log_rl)
     return branches, np.asarray(true_log_rl), enc
@@ -133,8 +134,9 @@ def test_t0_model_with_the_neuron_effect_samples_saves_and_loads(tmp_path):
 def test_fit_report_neuron_thin_diagnostic_shows_the_pairing_gain():
     from src.neuron_model.trunk_generation.fit import _neuron_thin
 
-    train, _, enc = _neurons(60, 20, seed=4)
-    val, _, _ = _neurons(25, 20, seed=5, enc=enc)
+    # the gate effect makes the thin share differ between neurons (the level effect alone barely does)
+    train, _, enc = _neurons(60, 20, seed=4, gate_sd=1.5)
+    val, _, _ = _neurons(25, 20, seed=5, enc=enc, gate_sd=1.5)
     req = [{"species": "mouse", "cell_type_binary": "excitatory", "compartment": "apical", "length_nm": b.length, "step_nm": b.step,
             "soma_distance_start_nm": b.soma_mid - 0.5 * b.length, "is_terminal": True} for b in val]
     assert np.allclose(enc.row("mouse", "excitatory", "apical", val[0].length, req[0]["soma_distance_start_nm"] + 0.5 * val[0].length, True), val[0].design)
@@ -174,3 +176,29 @@ def test_generate_tp_neuron_effects_per_request(mini, tmp_path):
     post = gt.neuron_effects_for_requests(model, requests, "posterior", table, pack, "val", None, rng)
     assert post["n_with_other_branches"] == 0 and len(post["effects"][0]) == 3  # the only branch is the source itself: prior draw
     assert isinstance(pd.Series(post["effects"]).iloc[0], list)
+
+
+def test_independent_draws_keep_the_mean_even_from_a_shifted_start():
+    """Chain AN (2026-11-24): on Minnie65 + H01 the mouse part of the fixed effects ended ~0.25 too high in log r_L with
+    the effects of the mouse neurons ~0.25 too low (independent draws +100 nm for Minnie65, -8 nm for H01, the posterior
+    draws exact). The PX-EM centring keeps the effects orthogonal to the neuron-level columns of the design (intercept,
+    species, ...): started with the intercept shifted by +0.3 and the species column by -0.3, the fit must come back, and
+    independent draws must reproduce the median of log r_L in BOTH species."""
+    branches, _, enc = _neurons(80, 40, seed=11, level_sd=0.26, gate_sd=2.0, species_of=lambda i: "human" if i % 4 == 0 else "mouse")
+    human_col = 2  # 'species=human' (after the intercept and z_log_length)
+    assert all(b.design[human_col] == (1.0 if b.group.startswith("human") else 0.0) for b in branches)
+    model = ParabolicMixtureNeuronMean(n_components=2)
+    ParabolicMixtureMean.fit(model, branches)          # the fit without the effects
+    model.coefs[:, 0, 0] += 0.3                          # a deliberately wrong start of the fixed part
+    model.coefs[:, human_col, 0] -= 0.3
+    theta = np.vstack([model._fit_branch(b) for b in branches])
+    x = np.vstack([b.design for b in branches])
+    model._fit_neuron_effect(theta, x, [b.neuron for b in branches], {"k": 2})
+    rng = np.random.default_rng(0)
+    gen = np.array([model.sample_theta(b.design, rng)[0] for b in branches])
+    for sp in ("mouse", "human"):
+        sel = np.array([b.group.startswith(sp) for b in branches])
+        assert abs(np.median(gen[sel]) - np.median(theta[sel, 0])) < 0.06, sp
+        names = sorted({b.neuron for b in branches if b.group.startswith(sp)})
+        post = [model.neuron_posterior([b for b in branches if b.neuron == n])["a_mean"][0] for n in names]
+        assert abs(np.mean(post)) < 0.04, sp
