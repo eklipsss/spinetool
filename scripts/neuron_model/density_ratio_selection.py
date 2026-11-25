@@ -58,6 +58,22 @@ def read(path: Path, real: bool) -> pd.DataFrame:
     return frame[["spine_key"] + metrics].reset_index(drop=True)
 
 
+def export_samples(source: Path, target: Path, sample_ids) -> None:
+    """Copy the folders ``<source>/<sample_id>`` into ``target`` (a new generated set in the generator layout)."""
+    import shutil
+
+    target.mkdir(parents=True, exist_ok=True)
+    missing = 0
+    for sid in sample_ids:
+        src = source / str(sid)
+        if not src.exists():
+            missing += 1
+        elif not (target / str(sid)).exists():
+            shutil.copytree(src, target / str(sid))
+    if missing:
+        print(f"WARNING: {missing} sample folders not found in {source}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--real-fit", type=Path)
@@ -70,6 +86,8 @@ def main() -> None:
     ap.add_argument("--real-fit-max", type=int, default=30000, help="random subsample of the real fitting spines (0 = all)")
     ap.add_argument("--gen-eval-dir", type=Path, help="set folder (sample_*/) of --gen-eval; with --export, the kept samples are copied")
     ap.add_argument("--export", type=Path, help="write the kept samples as a new set <export>/<name of --gen-eval-dir>")
+    ap.add_argument("--export-random", type=Path,
+                    help="write the random subset of the same size (control) as a new set <export-random>/<name of --gen-eval-dir>")
     ap.add_argument("--split-neurons", action="store_true")
     ap.add_argument("--model", default="gbm", choices=["gbm", "logistic"])
     ap.add_argument("--quantile", type=float, default=0.95)
@@ -108,25 +126,26 @@ def main() -> None:
     print(f"selector {args.model}: M = {sel.M_:.3g}, mean acceptance on the fitting seed {sel.mean_accept_:.3f}; "
           f"kept {keep.sum()} of {len(gen_eval)} evaluation samples")
 
-    random_same_n = gen_eval.iloc[rng.choice(len(gen_eval), int(keep.sum()), replace=False)].reset_index(drop=True)
-    if args.export is not None:
-        import shutil
-
-        if args.gen_eval_dir is None or "sample_id" not in gen_eval.columns:
-            ap.error("--export needs --gen-eval-dir and a sample_id column in --gen-eval")
-        target = args.export / args.gen_eval_dir.name
-        target.mkdir(parents=True, exist_ok=True)
-        for sid in gen_eval.loc[keep, "sample_id"]:
-            src = args.gen_eval_dir / str(sid)
-            if src.exists() and not (target / str(sid)).exists():
-                shutil.copytree(src, target / str(sid))
-        print(f"exported {int(keep.sum())} kept samples -> {target}")
+    random_idx = np.sort(rng.choice(len(gen_eval), int(keep.sum()), replace=False))
+    random_same_n = gen_eval.iloc[random_idx].reset_index(drop=True)
+    for flag, ids, what in ((args.export, gen_eval.loc[keep, "sample_id"] if "sample_id" in gen_eval else None, "kept"),
+                            (args.export_random, gen_eval["sample_id"].iloc[random_idx] if "sample_id" in gen_eval else None,
+                             "random same-size")):
+        if flag is None:
+            continue
+        if args.gen_eval_dir is None or ids is None:
+            ap.error("--export / --export-random need --gen-eval-dir and a sample_id column in --gen-eval")
+        export_samples(args.gen_eval_dir, flag / args.gen_eval_dir.name, ids)
+        print(f"exported {len(ids)} {what} samples -> {flag / args.gen_eval_dir.name}")
     sets = {"generated": gen_eval, "generated_selected": selected, "generated_random_same_n": random_same_n}
     if args.floor:
         sets["floor"] = read(args.floor, False)
     table = per_metric_shift(real_eval, sets, n_boot=args.n_boot, seed=args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
     table.to_csv(args.out / "per_metric.csv", index=False)
+    if "sample_id" in gen_eval.columns:
+        pd.DataFrame({"sample_id": gen_eval["sample_id"], "kept": keep,
+                      "random_same_n": np.isin(np.arange(len(gen_eval)), random_idx)}).to_csv(args.out / "samples.csv", index=False)
 
     xr, _ = log_complete(real_eval, METRICS)
     aucs = {}

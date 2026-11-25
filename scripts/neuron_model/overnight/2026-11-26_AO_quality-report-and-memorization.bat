@@ -4,6 +4,11 @@ rem 2026-11-26, chain AO. Full quality report of the generation per module + Cha
 rem Run AFTER AK (AK0 writes evaluation_paired of the AH sets, AK3 the DRS evaluation) and AN (T0 with the neuron effect).
 rem AO1 CPU ~15 min, AO2 GPU + CPU ~2-4 h (the train cloud cache: 20 000 point clouds read once from the NAS).
 rem
+rem AO0 second generation seed of AN2 (added 2026-11-25 after AN): in AN per_neuron came out worse than independent
+rem     (radius +21 nm, spines +4 per branch), and the mean level of the 74 neurons drawn with seed 1 was +0.026
+rem     (about 2 standard errors). Same T0 (newest *_t0-neuron), same P1, --seed 2, the three modes, Minnie65 and H01,
+rem     evaluate_assembled_branches + diagnose_tp_counts -> tp_generation\minnie_h01_neuron\{minnie65,h01}\generated\*_seed2
+rem     (CPU ~30 min). AO1 picks these sets up together with seed 1.
 rem AO1 make_quality_report.py (protocol: docs\neuron-model\generation-quality-protocol.md): tables and distribution figures,
 rem     real against generated, for
 rem       S overall   - evaluation of chain AI (A and v3, seeds 1 + 2, floor = real spines through d8_pw8) and, if present,
@@ -35,10 +40,25 @@ set TPN=%ANA%\tp_generation\minnie_h01_neuron
 set FULL=C:/Users/Student/LipsEkaterina/GitHub/spinetool/cache/manifest_minnie65_full.parquet
 set MORPH=C:/Users/Student/LipsEkaterina/GitHub/spinetool/cache/morphometrics_minnie65_full.parquet
 set QR=%ANA%\2026-11-26_quality-report
+set P1H=%RUNS%\2026-11-17_072620_p1
 
 cd /d %REPO%
 if not exist %EVAI%\real_test_morphometrics.parquet (echo NO evaluation of chain AI & goto :end)
 
+echo ===== [AO0] AN2 with generation seed 2 ===== %date% %time%
+set T0N=
+for /f "delims=" %%d in ('dir /b /ad /o-n %RUNS%\*_t0-neuron 2^>nul') do (if not defined T0N set T0N=%RUNS%\%%d)
+if not defined T0N (echo NO T0 run of chain AN, AO0 skipped & goto :ao1)
+if not exist %P1H%\p0_bundle.json (echo NO P1 run %P1H%, AO0 skipped & goto :ao1)
+echo T0 run: %T0N%
+for %%k in (minnie65 h01) do (
+  for %%m in (independent per_neuron posterior) do (
+    python scripts\neuron_model\generate_tp.py --t0-run %T0N% --t0-model parabola_mix_neuron --p0-run %P1H% --mode generated --n 1000 --seed 2 --split val --dataset %%k --t0-neuron %%m --out-root %TPN%\%%k\generated
+    if errorlevel 1 (echo GENERATION %%k %%m seed 2 FAILED) else (call :evalnewest %TPN%\%%k\generated)
+  )
+)
+
+:ao1
 echo ===== [AO1] quality report ===== %date% %time%
 set TP=
 for %%k in (minnie65 h01) do (
@@ -76,6 +96,14 @@ type %MEM%\postprocessed\summary.md
 
 :end
 echo ===== chain AO done ===== %date% %time%
+goto :eof
+
+:evalnewest
+for /f "delims=" %%d in ('dir /b /ad /o-n %1') do (
+  python scripts\neuron_model\evaluate_assembled_branches.py --tp-dir %1\%%d
+  python scripts\neuron_model\diagnose_tp_counts.py --tp-dir %1\%%d
+  goto :eof
+)
 goto :eof
 
 :addnewest
