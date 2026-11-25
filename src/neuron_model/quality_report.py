@@ -344,7 +344,10 @@ def _tp_frames(tp_dir: Path, evaluation: Path) -> Tuple[pd.DataFrame, pd.DataFra
     groups = ["species", "cell_type_binary", "cell_type", "compartment"]
     meta = req[[c for c in groups if c in req.columns]].copy()
     meta["neuron"] = req["source_branch"].astype(str).map(_neuron)
-    gen, real = pd.concat([gen, meta], axis=1), pd.concat([real, meta], axis=1)
+    # the evaluation table may already carry some of these columns (species, compartment, neuron ...): the request
+    # metadata wins, otherwise concat makes duplicate columns and gen["neuron"] becomes a DataFrame
+    gen = pd.concat([gen.drop(columns=[c for c in meta.columns if c in gen.columns]), meta], axis=1)
+    real = pd.concat([real.drop(columns=[c for c in meta.columns if c in real.columns]), meta], axis=1)
     sp = pd.read_csv(evaluation / "evaluation_spines.csv") if (evaluation / "evaluation_spines.csv").exists() else pd.DataFrame()
     if len(sp):
         sp = sp.join(meta, on="branch", rsuffix="_m")
