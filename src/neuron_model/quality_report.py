@@ -359,7 +359,7 @@ def _tp_frames(tp_dir: Path, evaluation: Path) -> Tuple[pd.DataFrame, pd.DataFra
 
 
 def _diff_rows(gen: pd.DataFrame, real: pd.DataFrame, columns: Dict[str, str], n_boot: int, seed: int) -> List[Dict]:
-    from .significance import cluster_bootstrap_diff
+    from .significance import cluster_bootstrap_diff, ks_neuron_floor_test
 
     rows = []
     for c, label in columns.items():
@@ -372,8 +372,11 @@ def _diff_rows(gen: pd.DataFrame, real: pd.DataFrame, columns: Dict[str, str], n
         else:
             ci = cluster_bootstrap_diff(a, gen["neuron"], b, real["neuron"], n_boot=n_boot, seed=seed)
             ma, mb = np.nanmedian(a), np.nanmedian(b)
+        # KS with the neuron as the unit (not for a 0/1 share)
+        ks = ks_neuron_floor_test(a, gen["neuron"], b, real["neuron"], n_splits=n_boot, seed=seed) if c != "no_spines" else {}
         rows.append({"metric": c, "label": label, "n_gen": int(np.isfinite(a).sum()), "n_real": int(np.isfinite(b).sum()),
-                     "gen": ma, "real": mb, "diff": ci["diff"], "lo": ci["lo"], "hi": ci["hi"], "p": ci["p"], "w1_sd": w1_sd(a, b)})
+                     "gen": ma, "real": mb, "diff": ci["diff"], "lo": ci["lo"], "hi": ci["hi"], "p": ci["p"], "w1_sd": w1_sd(a, b),
+                     "ks_d": ks.get("d_model", np.nan), "ks_d_floor_p95": ks.get("d_null_p95", np.nan), "ks_p": ks.get("p", np.nan)})
     return rows
 
 
@@ -391,15 +394,22 @@ def tp_report(tp_dir: Path, out: Path, *, label: str = "", evaluation: Optional[
     lines = [f"## T и P: `{tag}` (оценка `{Path(evaluation).name}`)", "",
              f"{len(gen)} пар «сгенерированная ветвь — её реальный прототип», {real['neuron'].nunique()} нейронов. Разность медиан "
              "(для доли ветвей без шипиков — средних), интервал 95 % — бутстрэп нейронов (сгенерированная ветвь принадлежит нейрону "
-             "прототипа), * — значимо после поправки Бенджамини — Хохберга внутри таблицы; W₁/σ — в единицах sd реальных.", ""]
+             "прототипа), * — значимо после поправки Бенджамини — Хохберга внутри таблицы; W₁/σ — в единицах sd реальных. "
+             "КС D — статистика Колмогорова — Смирнова модели против реальных при разбиении нейронов пополам, в скобках 95-й "
+             "процентиль D между двумя половинами реальных нейронов (пол), p — доля разбиений реальных с D не меньше модельного "
+             "(нейрон — единица; наивный КС по ветвям отвергает даже правильный генератор).", ""]
     all_rows = []
     def table(rows, title):
         q = _bh(np.array([r["p"] for r in rows], float))
-        out_lines = [f"#### {title}", "", "| величина | n ген. / реал. | сгенерированные | реальные | разность [95 %] | W₁/σ |", "| --- | --- | --- | --- | --- | --- |"]
-        for r, qq in zip(rows, q):
+        q_ks = _bh(np.array([r.get("ks_p", np.nan) for r in rows], float))
+        out_lines = [f"#### {title}", "", "| величина | n ген. / реал. | сгенерированные | реальные | разность [95 %] | W₁/σ | КС D (пол p95), p |",
+                     "| --- | --- | --- | --- | --- | --- | --- |"]
+        for r, qq, qk in zip(rows, q, q_ks):
             star = "*" if np.isfinite(qq) and qq < 0.05 else ""
-            out_lines.append(f"| {r['label']} | {r['n_gen']} / {r['n_real']} | {r['gen']:.4g} | {r['real']:.4g} | {r['diff']:+.3g}{star} [{r['lo']:+.3g}; {r['hi']:+.3g}] | {r['w1_sd']:.2f} |")
-            all_rows.append({**r, "q": qq, "table": title})
+            ks_txt = (f"{r['ks_d']:.3f} ({r['ks_d_floor_p95']:.3f}), {r['ks_p']:.3f}{'*' if np.isfinite(qk) and qk < 0.05 else ''}"
+                      if np.isfinite(r.get("ks_d", np.nan)) else "")
+            out_lines.append(f"| {r['label']} | {r['n_gen']} / {r['n_real']} | {r['gen']:.4g} | {r['real']:.4g} | {r['diff']:+.3g}{star} [{r['lo']:+.3g}; {r['hi']:+.3g}] | {r['w1_sd']:.2f} | {ks_txt} |")
+            all_rows.append({**r, "q": qq, "q_ks": qk, "table": title})
         return out_lines + [""]
     lines += table(_diff_rows(gen, real, {"length_nm": "длина, нм", **T_FUNCTIONALS}, n_boot, seed), "T: функционалы ствола, все ветви")
     lines += table(_diff_rows(gen, real, P_BRANCH, n_boot, seed), "P: число шипиков, все ветви")

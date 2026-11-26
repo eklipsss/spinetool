@@ -495,6 +495,369 @@ def fig_b6_audit(out: Path) -> None:
     save(fig, out, "b6_audit_decomposition.png")
 
 
+def _tilt_components(length_um=40.0, step=0.25, seed=11):
+    """One transverse component of the T0 tilt (toy parameters of the order of the fitted ones, um):
+    q_slow' = -q_slow / L_d + g, g = OU(sd sigma_g, memory l_g); w = Gaussian-kernel GP; eps = white noise of the node."""
+    rng = np.random.default_rng(seed)
+    m = int(length_um / step) + 1
+    s = np.arange(m) * step
+    L_d, l_g, sigma_g = 13.0, 1.35, 0.06
+    a, phi = math.exp(-step / L_d), math.exp(-step / l_g)
+    q_slow, g = np.zeros(m), np.zeros(m)
+    g[0] = rng.normal(0, sigma_g)
+    for j in range(m - 1):
+        q_slow[j + 1] = a * q_slow[j] + step * g[j]
+        g[j + 1] = phi * g[j] + rng.normal(0, sigma_g * math.sqrt(1 - phi**2))
+    sd_w, l_w = 0.12, 2.0
+    cov = sd_w**2 * np.exp(-((s[:, None] - s[None, :]) / l_w) ** 2) + 1e-10 * np.eye(m)
+    w = np.linalg.cholesky(cov) @ rng.normal(size=m)
+    eps = rng.normal(0, 0.012, m)
+    return s, q_slow, w, eps
+
+
+def _draw_tilt_geometry(ax, formula_box: bool = True, title: str = "а) Наклон: отклонение касательной от оси ветви") -> None:
+    """Planar toy branch: chord axis, tangent at one node, its parts along / across the axis, angle alpha."""
+    # uses a short, strongly bent toy branch so that the tangent and the chord are visible at equal aspect;
+    # the tilt is measured against the chord exactly as in direction.tilt_series
+    xa = np.linspace(0, 12, 400)
+    xy = np.c_[xa, 1.1 * np.sin(2 * np.pi * xa / 10) + 0.35 * np.sin(2 * np.pi * xa / 3.3) + 0.12 * xa]
+    d = np.gradient(xy, axis=0)
+    t = d / np.linalg.norm(d, axis=1)[:, None]
+    chord = xy[-1] - xy[0]
+    ax_dir = chord / np.linalg.norm(chord)
+    u = np.array([-ax_dir[1], ax_dir[0]])
+    q_meas = (t @ u) / (t @ ax_dir)
+
+    ax.plot(xy[:, 0], xy[:, 1], color=GREY, lw=7, solid_capstyle="round", alpha=0.35)
+    ax.plot(xy[:, 0], xy[:, 1], color=INK, lw=1.6)
+    ax.plot([xy[0, 0], xy[-1, 0]], [xy[0, 1], xy[-1, 1]], ls="--", color=GREEN, lw=1.8)
+    ax.text(xy[-1, 0], xy[-1, 1] + 0.35, "хорда = ось ветви $\\mathbf{a}$", color=GREEN, ha="right", va="bottom", fontsize=11)
+    j = 300
+    p = xy[j]
+    L = 2.6
+    tj = t[j]
+    along, across = (tj @ ax_dir) * L, (tj @ u) * L
+    end_along = p + ax_dir * along
+    ax.plot([p[0], end_along[0]], [p[1], end_along[1]], color=GREEN, lw=2.0)
+    ax.plot([end_along[0], end_along[0] + u[0] * across], [end_along[1], end_along[1] + u[1] * across], color=VIOLET, lw=2.4)
+    arrow(ax, p, p + tj * L, color=PINK, lw=2.6)
+    ang0, ang1 = math.degrees(math.atan2(ax_dir[1], ax_dir[0])), math.degrees(math.atan2(tj[1], tj[0]))
+    from matplotlib.patches import Arc
+    ax.add_patch(Arc(p, 1.6, 1.6, theta1=min(ang0, ang1), theta2=max(ang0, ang1), color=INK, lw=1.2))
+    mid = math.radians((ang0 + ang1) / 2)
+    ax.text(p[0] + 1.0 * math.cos(mid), p[1] + 1.0 * math.sin(mid), "$\\alpha$", fontsize=12, ha="left", va="center")
+    ax.scatter([p[0]], [p[1]], s=40, color=PINK, zorder=5)
+    tip = p + tj * L
+    ax.text(p[0] - 0.2, p[1] + 0.5, "касательная $\\mathbf{t}(s)$", color=PINK, fontsize=11, ha="right", va="bottom")
+    ax.text(end_along[0] + u[0] * across / 2 + 0.2, end_along[1] + u[1] * across / 2, "$\\mathbf{t}\\cdot\\mathbf{u}$ (вбок)",
+            color=VIOLET, fontsize=10.5, va="center")
+    ax.text(p[0] + ax_dir[0] * along / 2 + 0.25, p[1] + ax_dir[1] * along / 2 - 0.3, "$\\mathbf{t}\\cdot\\mathbf{a}$ (вдоль оси)",
+            color=GREEN, fontsize=10.5, ha="left", va="top")
+    ax.set_title(title)
+    if formula_box:
+        ax.text(0.02, 0.04, "$q=\\dfrac{\\mathbf{t}\\cdot\\mathbf{u}}{\\mathbf{t}\\cdot\\mathbf{a}}=\\tan\\alpha$\n"
+                "в 3D две поперечные оси $\\mathbf{u}_1,\\mathbf{u}_2$:\n$\\mathbf{q}=(q_1,q_2)$, вектор в $\\mathbb{R}^2$",
+                transform=ax.transAxes, va="bottom", fontsize=11, bbox=dict(fc="white", ec="#c9cbd0", boxstyle="round,pad=0.4"))
+    ax.set_aspect("equal")
+    ax.set_ylim(-2.4, 3.6)
+    ax.set_xlabel("мкм"); ax.set_ylabel("мкм")
+
+
+
+def fig_a8_tilt(out: Path) -> None:
+    """What the tilt q(s) is, how it is obtained from the bending (fit) and back (generation), its three components."""
+    s, q_slow, w, eps = _tilt_components()
+    q = q_slow + w + eps
+    fig = plt.figure(figsize=(15, 9.6))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.05, 1.0], width_ratios=[1.0, 1.0], hspace=0.3, wspace=0.12)
+
+    # (a) geometry of the tilt
+    _draw_tilt_geometry(fig.add_subplot(gs[0, 0]))
+
+    # (b) data <-> tilt
+    axb = fig.add_subplot(gs[0, 1]); axb.axis("off"); axb.grid(False)
+    axb.set_xlim(0, 1); axb.set_ylim(0, 1)
+    axb.set_title("б) Как наклон получается из данных и обратно")
+    bw, bh, y0 = 0.3, 0.24, 0.52
+    xs = [0.0, 0.35, 0.7]
+    labels = ["изгиб в узлах\n$\\kappa_1(s_j),\\ \\kappa_2(s_j)$\n(предобработка)", "касательные\n$\\mathbf{t}_j$\n(интегрирование\nрамки)", "наклон\n$\\mathbf{q}_j=(q_1,q_2)_j$\n(проекция\nна хорду)"]
+    fcs = [SOFT_GREY, SOFT_GREY, SOFT_PINK]
+    for x0, lab, fc in zip(xs, labels, fcs):
+        box(axb, x0, y0, bw, bh, lab, fc=fc, fs=9.6)
+    for x0 in xs[:-1]:
+        arrow(axb, (x0 + bw + 0.004, y0 + bh * 0.68), (x0 + 0.35 - 0.004, y0 + bh * 0.68), color=GREEN, lw=2)
+        arrow(axb, (x0 + 0.35 - 0.004, y0 + bh * 0.3), (x0 + bw + 0.004, y0 + bh * 0.3), color=PINK, lw=2)
+    axb.text(0.5, y0 + bh + 0.07, "подгонка: реальная ветвь $\\rightarrow$ наклон", color=GREEN, ha="center", fontsize=11, fontweight="bold")
+    axb.text(0.5, y0 - 0.07, "генерация: наклон $\\rightarrow$ $\\mathbf{t}=(\\mathbf{q},1)/\\|(\\mathbf{q},1)\\|$ $\\rightarrow$ $\\kappa_1,\\kappa_2$",
+             color=PINK, ha="center", fontsize=11, fontweight="bold")
+    axb.text(0.0, 0.3, "Предобработка хранит изгиб $\\kappa_1,\\kappa_2$ в рамке, минимизирующей вращение.\n"
+             "Модель описывает наклон $\\mathbf{q}$, потому что у него есть «ноль» — ось ветви,\n"
+             "и к нему можно возвращать (ограниченная извилистость). Изгиб $\\approx d\\mathbf{q}/ds$:\n"
+             "это скорость, наклон — положение. Остальная часть T0 и сборка видят только $\\kappa$.",
+             fontsize=10.2, va="top", color="#4a4d55")
+
+    # (c) components
+    axc = fig.add_subplot(gs[1, :])
+    axc.plot(s, q_slow, color=PINK, lw=2.2, label="$q_{\\mathrm{slow}}$: медленный поворот, возврат к оси за $L_d$")
+    axc.plot(s, w, color=GREEN, lw=1.8, label="$w$: гладкие извивы, масштаб $\\ell_w(r)\\approx2$ мкм")
+    axc.plot(s, eps, color=VIOLET, lw=0, marker="o", ms=2.6, label="$\\varepsilon$: шум узла")
+    axc.plot(s, q, color=INK, lw=1.4, ls="--", label="сумма $q=q_{\\mathrm{slow}}+w+\\varepsilon$ (до множителя $m_b$)")
+    axc.axhline(0, color="#9a9ca3", lw=1)
+    axc.set_xlabel("длина дуги $s$, мкм"); axc.set_ylabel("одна компонента наклона $q_1$")
+    axc.set_title("в) Из чего складывается наклон (одна поперечная компонента, параметры порядка подогнанных)")
+    axc.legend(loc="upper right", ncol=2, fontsize=10)
+    lo, hi = min(q.min(), q_slow.min(), w.min()), max(q.max(), q_slow.max(), w.max())
+    axc.set_ylim(lo - 0.05, hi + 0.18)
+    save(fig, out, "r10_tilt_explained.png")
+
+
+def fig_a8a_tilt_geometry(out: Path) -> None:
+    """Panel (a) of r10 alone, without the formula box."""
+    fig, ax = plt.subplots(figsize=(8.2, 4.4))
+    _draw_tilt_geometry(ax, formula_box=False, title="Наклон: отклонение касательной от оси ветви")
+    save(fig, out, "r10a_tilt_geometry.png")
+
+
+def _toy_branch_3d(n=600):
+    """3-D toy branch whose chord is the z axis (ends at x = y = 0), arc-length tangents, um."""
+    z = np.linspace(0, 10, n)
+    xyz = np.c_[0.9 * np.sin(2 * np.pi * z / 10) + 0.25 * np.sin(2 * np.pi * z / 2.7) * np.sin(np.pi * z / 10),
+                0.8 * np.sin(np.pi * z / 10) * np.cos(2 * np.pi * z / 7), z]
+    d = np.gradient(xyz, axis=0)
+    t = d / np.linalg.norm(d, axis=1)[:, None]
+    s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(xyz, axis=0), axis=1))]
+    return xyz, t, s
+
+
+def _style_3d(ax, lim=None):
+    ax.grid(False)
+    for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+        pane.set_facecolor("white"); pane.set_edgecolor("#e3e4e8")
+    ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
+    if lim is not None:
+        ax.set_xlim(*lim[0]); ax.set_ylim(*lim[1]); ax.set_zlim(*lim[2])
+    try:
+        ax.set_box_aspect([lim[0][1] - lim[0][0], lim[1][1] - lim[1][0], lim[2][1] - lim[2][0]] if lim else None)
+    except Exception:
+        pass
+
+
+def _q3(ax, p, v, color, lw=2.2, ratio=0.12):
+    ax.quiver(*p, *v, color=color, lw=lw, arrow_length_ratio=ratio)
+
+
+def fig_a9_rmf_bending_3d(out: Path) -> None:
+    """RMF along a 3-D centre line and how kappa1, kappa2 come out of it (dt/ds = kappa1 e1 + kappa2 e2)."""
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    from src.neuron_model import branch_geometry as bg
+
+    xyz, t, s = _toy_branch_3d()
+    e1_0 = bg.section_basis(t[0])[0]
+    T, E1, E2 = bg.rotation_minimizing_frames(xyz, t, e1_0)
+    fig = plt.figure(figsize=(15, 7.2))
+    ax = fig.add_subplot(1, 2, 1, projection="3d")
+    ax.plot(*xyz.T, color=INK, lw=1.8)
+    L = 0.9
+    for j in np.linspace(20, len(xyz) - 40, 7).astype(int):
+        p = xyz[j]
+        _q3(ax, p, T[j] * L, PINK); _q3(ax, p, E1[j] * L * 0.8, GREEN); _q3(ax, p, E2[j] * L * 0.8, VIOLET)
+        ax.scatter(*p, color=INK, s=12)
+    ax.text(*(xyz[20] + T[20] * L + [0.1, 0, 0.2]), "$\\mathbf{t}$", color=PINK, fontsize=13)
+    ax.text(*(xyz[20] + E1[20] * L * 0.8 + [0.1, 0, 0]), "$\\mathbf{e}_1$", color=GREEN, fontsize=13)
+    ax.text(*(xyz[20] + E2[20] * L * 0.8 + [0.1, 0, 0]), "$\\mathbf{e}_2$", color=VIOLET, fontsize=13)
+    _style_3d(ax, [(-1.6, 1.6), (-1.6, 1.6), (-0.3, 10.5)])
+    ax.view_init(elev=14, azim=-58)
+    ax.set_title("а) Рамка, минимизирующая вращение, вдоль центральной линии", loc="left")
+
+    # (b) one step: tangent turn decomposed on the frame of node j
+    axb = fig.add_subplot(1, 2, 2, projection="3d")
+    j, k = 250, 45
+    tj, tk, e1, e2 = T[j], T[j + k], E1[j], E2[j]
+    ds = s[j + k] - s[j]
+    dt = tk - tj
+    c1, c2 = dt @ e1, dt @ e2
+    o = np.zeros(3)
+    _q3(axb, o, tj, PINK, lw=2.6, ratio=0.08)
+    _q3(axb, o, tk, "#e891c0", lw=2.6, ratio=0.08)
+    _q3(axb, o, e1 * 0.6, GREEN, lw=1.6); _q3(axb, o, e2 * 0.6, VIOLET, lw=1.6)
+    a1 = tj + c1 * e1
+    axb.plot(*np.c_[tj, a1], color=GREEN, lw=3)
+    axb.plot(*np.c_[a1, a1 + c2 * e2], color=VIOLET, lw=3)
+    axb.plot(*np.c_[a1 + c2 * e2, tk], color="#9a9ca3", lw=1, ls=":")
+    axb.text(*(tj * 1.05 - e1 * 0.18), "$\\mathbf{t}(s)$", color=PINK, fontsize=13)
+    axb.text(*(tk * 0.55 + e1 * 0.12), "$\\mathbf{t}(s+\\Delta s)$", color="#c45a95", fontsize=13)
+    axb.text(*(e1 * 0.66), "$\\mathbf{e}_1(s)$", color=GREEN, fontsize=12)
+    axb.text(*(e2 * 0.66), "$\\mathbf{e}_2(s)$", color=VIOLET, fontsize=12)
+    axb.text(*(tj + c1 * e1 / 2 + 0.04), "$\\kappa_1\\Delta s$", color=GREEN, fontsize=13)
+    axb.text(*(a1 + c2 * e2 / 2 + e1 * 0.08), "$\\kappa_2\\Delta s$", color=VIOLET, fontsize=13)
+    pts = np.vstack([o, tj, tk, e1 * 0.6, e2 * 0.6])
+    lo, hi = pts.min(0) - 0.15, pts.max(0) + 0.15
+    _style_3d(axb, list(zip(lo, hi)))
+    v = np.cross(e1, e2)
+    axb.view_init(elev=22, azim=-35)
+    axb.set_title("б) Изгиб: насколько касательная повернула к $\\mathbf{e}_1$ и к $\\mathbf{e}_2$", loc="left")
+    fig.text(0.52, 0.04,
+             "$\\dfrac{d\\mathbf{t}}{ds}=\\kappa_1\\,\\mathbf{e}_1+\\kappa_2\\,\\mathbf{e}_2$,   "
+             "$\\kappa_1=\\dfrac{d\\mathbf{t}}{ds}\\cdot\\mathbf{e}_1$,   $\\kappa_2=\\dfrac{d\\mathbf{t}}{ds}\\cdot\\mathbf{e}_2$\n"
+             "Рамка не крутится вокруг $\\mathbf{t}$, поэтому $\\kappa_1,\\kappa_2$ — только изгиб, без кручения.\n"
+             "Касательные сдвинуты в общее начало; шаг $\\Delta s$ увеличен для наглядности (в данных 250–500 нм).",
+             fontsize=11.5, va="bottom", color=INK)
+    fig.subplots_adjust(left=0.0, right=1.0, top=0.92, bottom=0.12, wspace=0.0)
+    save(fig, out, "r11_rmf_bending_3d.png")
+
+
+def fig_a10_tilt_3d(out: Path) -> None:
+    """The tilt vector q = (q1, q2) in 3-D: fixed axes (a, u1, u2) of the branch, and q as the point where the
+    tangent ray crosses the plane at unit distance along a."""
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    from src.neuron_model import branch_geometry as bg
+
+    xyz, t, s = _toy_branch_3d()
+    a = np.array([0.0, 0.0, 1.0])
+    u1, u2 = np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    fig = plt.figure(figsize=(15, 7.2))
+    ax = fig.add_subplot(1, 2, 1, projection="3d")
+    ax.plot(*xyz.T, color=INK, lw=1.8)
+    ax.plot([0, 0], [0, 0], [0, 10], ls="--", color=GREEN, lw=1.6)
+    ax.text(0.1, 0, 10.2, "ось ветви $\\mathbf{a}$ (хорда)", color=GREEN, fontsize=12)
+    for jj in (60, 540):
+        pp = xyz[jj]
+        _q3(ax, pp, u1 * 0.7, "#7fa86f", lw=1.4); _q3(ax, pp, u2 * 0.7, "#ad97de", lw=1.4)
+    qn = np.hypot(t[:, 0], t[:, 1]) / t[:, 2]
+    j = int(np.argmax(qn[100:-100])) + 100
+    p, tj = xyz[j], t[j]
+    L = 2.2
+    _q3(ax, p, tj * L, PINK, lw=2.6, ratio=0.08)
+    c = L * np.array([tj @ a, tj @ u1, tj @ u2])
+    p1 = p + c[0] * a; p2 = p1 + c[1] * u1; p3 = p2 + c[2] * u2
+    ax.plot(*np.c_[p, p1], color=GREEN, lw=2.4)
+    ax.plot(*np.c_[p1, p2], color="#2f6b1f", lw=2.4)
+    ax.plot(*np.c_[p2, p3], color=VIOLET, lw=2.4)
+    ax.text(*(p + tj * L + [0.1, 0, 0.15]), "$\\mathbf{t}(s)$", color=PINK, fontsize=13)
+    ax.text(*(xyz[60] + u1 * 0.78), "$\\mathbf{u}_1$", color="#2f6b1f", fontsize=12)
+    ax.text(*(xyz[60] + u2 * 0.78), "$\\mathbf{u}_2$", color=VIOLET, fontsize=12)
+    ax.text(*(xyz[540] + u1 * 0.78), "$\\mathbf{u}_1$", color="#2f6b1f", fontsize=12)
+    ax.text(*(xyz[540] + u2 * 0.78), "$\\mathbf{u}_2$", color=VIOLET, fontsize=12)
+    ax.text(*(p1 + [-1.1, 0, -0.9]), "$\\mathbf{t}\\cdot\\mathbf{a}$", color=GREEN, fontsize=12)
+    _style_3d(ax, [(-1.6, 1.6), (-1.6, 1.6), (-0.3, 10.8)])
+    ax.view_init(elev=14, azim=-58)
+    ax.set_title("а) Оси $\\mathbf{a},\\mathbf{u}_1,\\mathbf{u}_2$ одни на всю ветвь", loc="left")
+
+    # (b) q as a point of the plane a = 1
+    axb = fig.add_subplot(1, 2, 2, projection="3d")
+    q1, q2 = (tj @ u1) / (tj @ a), (tj @ u2) / (tj @ a)
+    lim = max(abs(q1), abs(q2)) + 0.25
+    gx, gy = np.meshgrid([-lim, lim], [-lim, lim])
+    axb.plot_surface(gx, gy, np.ones_like(gx), color=SOFT_GREY, alpha=0.45, edgecolor="#c9cbd0")
+    o = np.zeros(3)
+    hit = np.array([q1, q2, 1.0])
+    axb.plot([0, 0], [0, 0], [0, 1.3], ls="--", color=GREEN, lw=1.6)
+    _q3(axb, o, tj * 0.75, PINK, lw=2.8, ratio=0.12)
+    axb.plot(*np.c_[tj * 0.75, hit], color=PINK, lw=1.4, ls=":")
+    axb.plot([0, q1], [0, 0], [1, 1], color="#2f6b1f", lw=3)
+    axb.plot([q1, q1], [0, q2], [1, 1], color=VIOLET, lw=3)
+    axb.plot([0, q1], [0, q2], [1, 1], color=INK, lw=1.6)
+    axb.scatter(*hit, color=PINK, s=45)
+    axb.scatter(0, 0, 1, color=GREEN, s=30)
+    sx, sy = np.sign(q1 or 1), np.sign(q2 or 1)
+    axb.text(q1 * 0.3, -0.13 * sy, 1.0, "$q_1$", color="#2f6b1f", fontsize=15, ha="center", va="center")
+    axb.text(q1 + 0.3 * sx, q2 * 0.6, 1.0, "$q_2$", color=VIOLET, fontsize=15, ha="center", va="center")
+    # the fixed transverse axes of the branch, drawn at the foot of a on the plane and at the origin
+    ua = 0.55 * lim
+    for z0, lw, alpha in ((1.0, 2.0, 1.0), (0.0, 1.4, 0.6)):
+        axb.quiver(0, 0, z0, ua, 0, 0, color="#2f6b1f", lw=lw, arrow_length_ratio=0.15, alpha=alpha)
+        axb.quiver(0, 0, z0, 0, ua, 0, color=VIOLET, lw=lw, arrow_length_ratio=0.15, alpha=alpha)
+        axb.text(ua * 1.1, 0, z0, "$\\mathbf{u}_1$", color="#2f6b1f", fontsize=13, alpha=alpha)
+        axb.text(0, ua * 1.12, z0, "$\\mathbf{u}_2$", color=VIOLET, fontsize=13, alpha=alpha)
+    axb.text(*(hit + [0.04, 0.04, 0.06]), "$(q_1,q_2,1)$", color=PINK, fontsize=12)
+    axb.text(q1 / 2 - 0.05, q2 / 2 + 0.05, 1.03, "$\\mathbf{q}$", color=INK, fontsize=15)
+    axb.text(0.03, 0, 0.12, "$\\mathbf{a}$", color=GREEN, fontsize=14)
+    axb.text(*(tj * 0.4 + [0.05, 0.0, 0.0]), "$\\mathbf{t}$", color=PINK, fontsize=14)
+    axb.text(-lim, lim, 1.02, "плоскость на расстоянии 1 вдоль $\\mathbf{a}$", color="#4a4d55", fontsize=10.5)
+    _style_3d(axb, [(-lim, lim), (-lim, lim), (0, 1.35)])
+    axb.view_init(elev=24, azim=-60)
+    axb.set_title("б) Наклон $\\mathbf{q}$: где луч касательной пересекает плоскость", loc="left")
+    fig.text(0.52, 0.04,
+             "$\\mathbf{q}=(q_1,q_2)=\\left(\\dfrac{\\mathbf{t}\\cdot\\mathbf{u}_1}{\\mathbf{t}\\cdot\\mathbf{a}},\\ "
+             "\\dfrac{\\mathbf{t}\\cdot\\mathbf{u}_2}{\\mathbf{t}\\cdot\\mathbf{a}}\\right)$,   "
+             "$\\|\\mathbf{q}\\|=\\tan\\theta$ ($\\theta$ — полный угол между $\\mathbf{t}$ и $\\mathbf{a}$),\n"
+             "направление $\\mathbf{q}$ — куда отклонилась касательная. Обратно: $\\mathbf{t}=(q_1,q_2,1)/\\|(q_1,q_2,1)\\|$.",
+             fontsize=11.5, va="bottom", color=INK)
+    fig.subplots_adjust(left=0.0, right=1.0, top=0.92, bottom=0.12, wspace=0.0)
+    save(fig, out, "r12_tilt_3d.png")
+
+
+def fig_a11_tilt_steps(out: Path) -> None:
+    """Three steps: (1) tangent t and the branch axes a, u1, u2; (2) the tilt component q1 = tan alpha1 = t.u1 / t.a
+    in the plane (a, u1); (3) the same for u2."""
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    a, u1, u2 = np.array([0.0, 0, 1]), np.array([1.0, 0, 0]), np.array([0.0, 1, 0])
+    t = np.array([0.5, 0.32, 1.0]); t /= np.linalg.norm(t)
+    ta, tu1, tu2 = t @ a, t @ u1, t @ u2
+    o = np.zeros(3)
+    U1C, U2C = "#2f6b1f", VIOLET
+    lim = [(-0.15, 0.75), (-0.15, 0.75), (0, 1.15)]
+    fig = plt.figure(figsize=(16, 6.2))
+
+    def axes_common(ax, faint=False):
+        al = 0.35 if faint else 1.0
+        ax.quiver(*o, *(a * 1.05), color=GREEN, lw=2, arrow_length_ratio=0.08, alpha=al)
+        ax.quiver(*o, *(u1 * 0.6), color=U1C, lw=2, arrow_length_ratio=0.12, alpha=al)
+        ax.quiver(*o, *(u2 * 0.6), color=U2C, lw=2, arrow_length_ratio=0.12, alpha=al)
+        ax.text(0.03, 0, 1.08, "$\\mathbf{a}$", color=GREEN, fontsize=14, alpha=al)
+        ax.text(0.64, 0, 0, "$\\mathbf{u}_1$", color=U1C, fontsize=14, alpha=al)
+        ax.text(0, 0.64, 0, "$\\mathbf{u}_2$", color=U2C, fontsize=14, alpha=al)
+
+    def finish(ax, title, azim=-50):
+        _style_3d(ax, lim)
+        ax.view_init(elev=18, azim=azim)
+        ax.set_title(title, loc="left")
+
+    # (1)
+    ax = fig.add_subplot(1, 3, 1, projection="3d")
+    axes_common(ax)
+    ax.quiver(*o, *t, color=PINK, lw=2.8, arrow_length_ratio=0.1)
+    ax.text(*(t + [0.02, 0.02, 0.04]), "$\\mathbf{t}$", color=PINK, fontsize=15)
+    ax.scatter(*o, color=INK, s=18)
+    ax.text(0.03, -0.12, -0.05, "точка ствола", color="#4a4d55", fontsize=10)
+    finish(ax, "1) Касательная $\\mathbf{t}$ и оси ветви $\\mathbf{a},\\mathbf{u}_1,\\mathbf{u}_2$")
+
+    def component(idx, u, tu, col, name, azim):
+        ax = fig.add_subplot(1, 3, idx, projection="3d")
+        ax.computed_zorder = False
+        axes_common(ax, faint=False)
+        ax.quiver(*o, *t, color=PINK, lw=1.6, arrow_length_ratio=0.1, alpha=0.3)
+        ax.text(*(t + [0.04, 0.04, 0.0]), "$\\mathbf{t}$", color=PINK, fontsize=13, alpha=0.45)
+        # the plane (a, u)
+        pl = [o, u * 0.75, u * 0.75 + a * 1.1, a * 1.1]
+        ax.add_collection3d(Poly3DCollection([pl], facecolor=SOFT_GREY, edgecolor="#c9cbd0", alpha=0.6, zorder=0))
+        proj = ta * a + tu * u
+        ax.plot(*np.c_[t, proj], color="#9a9ca3", lw=1, ls=":")
+        ax.plot(*np.c_[o, ta * a], color=GREEN, lw=4)
+        ax.plot(*np.c_[ta * a, proj], color=col, lw=4)
+        ax.quiver(*o, *proj, color=PINK, lw=2.6, arrow_length_ratio=0.1)
+        ang = np.arctan2(tu, ta)
+        r = 0.3
+        th = np.linspace(0, ang, 30)
+        arc = np.outer(np.cos(th), a * r) + np.outer(np.sin(th), u * r)
+        ax.plot(*arc.T, color=INK, lw=1.4)
+        mid = 0.5 * ang
+        ax.text(*((np.cos(mid) * a + np.sin(mid) * u) * (r + 0.05)), f"$\\alpha_{name}$", color=INK, fontsize=14)
+        ax.text(*(ta * a * 0.5 - u * 0.17), "$\\mathbf{t}\\cdot\\mathbf{a}$", color=GREEN, fontsize=13)
+        ax.text(*(ta * a + tu * u * 0.3 + a * 0.05), f"$\\mathbf{{t}}\\cdot\\mathbf{{u}}_{name}$", color=col, fontsize=13)
+        ax.text(*(proj + a * 0.07 - u * 0.25), f"проекция $\\mathbf{{t}}$\nна плоскость $(\\mathbf{{a}},\\mathbf{{u}}_{name})$", color=PINK, fontsize=10)
+        ax.text2D(0.02, 0.02, f"$q_{name}=\\tan\\alpha_{name}=\\dfrac{{\\mathbf{{t}}\\cdot\\mathbf{{u}}_{name}}}{{\\mathbf{{t}}\\cdot\\mathbf{{a}}}}$",
+                  transform=ax.transAxes, fontsize=15, color=INK)
+        finish(ax, f"{idx}) Наклон в плоскости $(\\mathbf{{a}},\\mathbf{{u}}_{name})$: $q_{name}$", azim)
+
+    component(2, u1, tu1, U1C, "1", -72)
+    component(3, u2, tu2, U2C, "2", -18)
+    fig.subplots_adjust(left=0.0, right=1.0, top=0.9, bottom=0.03, wspace=0.0)
+    save(fig, out, "r13_tilt_steps.png")
+
+
 STATIC = [fig_a1_pipeline, fig_a2_chain, fig_a3_cross_section, fig_a4_tortuosity, fig_a5_assembly, fig_a6_flow_matching, fig_a7_spine_models,
           fig_b1_smoothing, fig_b2_t0, fig_b3_validity, fig_b4_vae, fig_b5_assembly, fig_b6_audit]
 

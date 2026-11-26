@@ -35,3 +35,36 @@ def test_cluster_bootstrap_finds_a_real_shift_and_not_a_neuron_style():
 def test_cluster_bootstrap_handles_too_little_data():
     res = cluster_bootstrap_diff([1.0], ["a"], [2.0, 3.0], ["a", "a"])
     assert np.isnan(res["diff"]) and not res["significant"]
+
+
+def _twins(rng, n_neurons, per_neuron, shift, style_sd=1.0, scale=1.0):
+    """Real branches of neurons with a style, and one generated twin per branch from a NEW neuron-style draw (a correct
+    generator of new neurons when shift = 0 and scale = 1); twins are labelled with the neuron of their prototype."""
+    real, gen, groups = [], [], []
+    for k in range(n_neurons):
+        real.append(rng.normal(rng.normal(0, style_sd), 1.0, per_neuron))
+        gen.append(rng.normal(rng.normal(0, style_sd) + shift, scale, per_neuron))
+        groups += [f"n{k}"] * per_neuron
+    return np.concatenate(gen), np.concatenate(real), np.array(groups)
+
+
+def test_ks_by_neuron_keeps_a_correct_generator_and_finds_a_wrong_one():
+    from src.neuron_model.significance import ks_neuron_floor_test, ks_statistic
+
+    assert abs(ks_statistic(np.array([0.0, 1.0]), np.array([0.0, 1.0]))) < 1e-12
+    flagged, naive = 0, 0
+    for seed in range(8):
+        rng = np.random.default_rng(200 + seed)
+        g, r, n = _twins(rng, 20, 40, 0.0, style_sd=1.0)
+        flagged += ks_neuron_floor_test(g, n, r, n, n_splits=300, seed=seed)["significant"]
+        naive += ks_pvalue(g, r) < 0.05
+    assert flagged <= 1  # the neuron-level test keeps a correct generator
+    assert naive >= 4    # the plain KS over 800 branches rejects it often (neuron styles)
+    # a shift of 0.8 sd of the within-neuron noise: found (10 of 10 seeds in a check)
+    g, r, n = _twins(np.random.default_rng(50), 40, 30, 0.8, style_sd=0.7)
+    res = ks_neuron_floor_test(g, n, r, n, n_splits=300, seed=1)
+    assert res["significant"] and res["d_model"] > res["d_null_p95"]
+    # same median, wrong spread: KS sees the shape; the test is conservative (spread x2: 4 of 10 seeds, x3: 10 of 10)
+    g, r, n = _twins(np.random.default_rng(51), 40, 30, 0.0, style_sd=0.7, scale=3.0)
+    assert ks_neuron_floor_test(g, n, r, n, n_splits=300, seed=2)["significant"]
+    assert not ks_neuron_floor_test([1.0, 2.0], ["a", "a"], [1.0, 2.0], ["a", "a"])["significant"]
