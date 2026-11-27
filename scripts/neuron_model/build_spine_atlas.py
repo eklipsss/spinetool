@@ -134,6 +134,15 @@ def main() -> None:
         raise SystemExit(f"no spines of split {args.split!r} in the manifest")
     print(f"[atlas] reference: {len(real_index)} spines of split {args.split}; VAE {vae.checkpoint_id}", flush=True)
     real = A.real_records(vae, real_index, args.n_real, seed=args.seed, n_meshes=args.real_meshes, source="real")
+    n_lat = sum(r.latent is not None for r in real)
+    n_mesh = sum(r.mesh is not None for r in real)
+    errors = [r.meta.get("error") for r in real if r.meta.get("error")]
+    print(f"[atlas] real spines: {n_lat} of {len(real)} encoded, {n_mesh} meshes read", flush=True)
+    if errors:
+        print(f"[atlas]   first errors ({len(errors)} in total): " + " | ".join(errors[:3]), flush=True)
+        print(f"[atlas]   e.g. cloud path: {real_index.frame.iloc[0].get(f'pointcloud_{vae.n_points}_path')}", flush=True)
+    if n_lat < max(10, len(real) // 2):
+        raise SystemExit("[atlas] most real point clouds could not be read (NAS path / manifest column?), see the errors above")
     train = []
     if args.n_train > 0:
         train_index = index.with_split(splits, "train", drop_unassigned=True)
