@@ -68,3 +68,38 @@ def test_ks_by_neuron_keeps_a_correct_generator_and_finds_a_wrong_one():
     g, r, n = _twins(np.random.default_rng(51), 40, 30, 0.0, style_sd=0.7, scale=3.0)
     assert ks_neuron_floor_test(g, n, r, n, n_splits=300, seed=2)["significant"]
     assert not ks_neuron_floor_test([1.0, 2.0], ["a", "a"], [1.0, 2.0], ["a", "a"])["significant"]
+
+
+def _clustered_reference(rng, n_neurons=60, per_neuron=300, style_sd=0.5):
+    styles = rng.normal(0.0, style_sd, n_neurons)
+    values = np.concatenate([rng.normal(m, 1.0, per_neuron) for m in styles])
+    neurons = np.repeat([f"n{k}" for k in range(n_neurons)], per_neuron)
+    return values, neurons, styles
+
+
+def test_ks_of_a_small_sample_against_clustered_neurons():
+    from src.neuron_model.significance import ks_pvalue, ks_sample_vs_neurons
+
+    rejected_ok, rejected_shift, naive_ok = 0, 0, 0
+    for rep in range(8):
+        rng = np.random.default_rng(100 + rep)
+        ref, ref_n, _ = _clustered_reference(rng)
+        # a correct generator: i.i.d. spines of the POPULATION (new neurons with their own style), 500 samples
+        new_styles = rng.normal(0.0, 0.5, 500)
+        good = rng.normal(new_styles, 1.0)
+        bad = rng.normal(rng.normal(0.0, 0.5, 500), 1.0) + 0.5 * np.sqrt(1.25)  # +0.5 sd of the population (0.3 sd: power ~0.6 at this neuron style)
+        r_ok = ks_sample_vs_neurons(good, None, ref, ref_n, n_splits=150, seed=rep)
+        r_bad = ks_sample_vs_neurons(bad, None, ref, ref_n, n_splits=150, seed=rep)
+        rejected_ok += r_ok["significant"]
+        rejected_shift += r_bad["significant"]
+        naive_ok += ks_pvalue(good, ref) < 0.05
+        assert r_ok["n_compared"] == 500
+    assert rejected_ok <= 1
+    assert rejected_shift >= 6
+    # processed real spines WITH their neurons: compared only with other neurons, a correct chain is kept
+    rng = np.random.default_rng(7)
+    ref, ref_n, _ = _clustered_reference(rng)
+    pick = rng.choice(len(ref), 400, replace=False)
+    floor = ref[pick] + rng.normal(0.0, 0.05, 400)
+    r = ks_sample_vs_neurons(floor, ref_n[pick], ref, ref_n, n_splits=150, seed=1)
+    assert not r["significant"] and r["n_compared"] >= 100

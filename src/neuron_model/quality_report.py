@@ -127,7 +127,7 @@ def _hist_panel(ax, real: np.ndarray, gens: Dict[str, np.ndarray], floor: Option
         return
     lo, hi = np.quantile(allv, [0.005, 0.995])
     if not hi > lo:
-        ax.set_title(f"{title}\n(константа {lo:.3g})", fontsize=9)
+        ax.set_title(f"{title}\n(константа {lo:.3g})", fontsize=11)
         ax.set_yticks([])
         return
     log = log and lo > 0
@@ -150,7 +150,7 @@ def _hist_panel(ax, real: np.ndarray, gens: Dict[str, np.ndarray], floor: Option
 
         ax.xaxis.set_minor_formatter(NullFormatter())
         ax.xaxis.set_major_formatter(LogFormatterSciNotation(labelOnlyBase=False, minor_thresholds=(2, 0.5)))
-    ax.set_title(title, fontsize=9)
+    ax.set_title(title, fontsize=11)
     ax.tick_params(labelsize=7)
     ax.set_yticks([])
 
@@ -167,7 +167,7 @@ def _ecdf_panel(ax, real, gens, floor, title, log, real_label: str = "реаль
         line(v, color=c, lw=1.5, label=name)
     if log:
         ax.set_xscale("log")
-    ax.set_title(title, fontsize=9)
+    ax.set_title(title, fontsize=11)
     ax.tick_params(labelsize=7)
 
 
@@ -192,7 +192,7 @@ def distribution_grid(real: pd.DataFrame, gens: Dict[str, pd.DataFrame], floor: 
     h, lab = axes.ravel()[0].get_legend_handles_labels()
     fig.legend(h, lab, loc="lower center", ncol=min(len(lab), 4), fontsize=8, frameon=False)
     if suptitle:
-        fig.suptitle(suptitle, fontsize=11)
+        fig.suptitle(suptitle, fontsize=13)
     fig.tight_layout(rect=(0, 0.06, 1, 0.96 if suptitle else 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
@@ -272,11 +272,11 @@ def correlation_figure(real: pd.DataFrame, sets: Dict[str, pd.DataFrame], path: 
     fig, axes = plt.subplots(1, 1 + len(sets), figsize=(3.6 * (1 + len(sets)), 3.6))
     axes = np.atleast_1d(axes)
     im = axes[0].imshow(cr, vmin=-1, vmax=1, cmap="PiYG")
-    axes[0].set_title("реальные", fontsize=9)
+    axes[0].set_title("реальные", fontsize=11)
     for ax, (name, f) in zip(axes[1:], sets.items()):
         d = f[cols].corr(method="spearman").to_numpy() - cr
         ax.imshow(d, vmin=-1, vmax=1, cmap="PiYG")
-        ax.set_title(f"{name} − реальные\n(норма Фробениуса {np.sqrt(np.nansum(d ** 2)):.2f})", fontsize=9)
+        ax.set_title(f"{name} − реальные\n(норма Фробениуса {np.sqrt(np.nansum(d ** 2)):.2f})", fontsize=11)
     labels = [S_NAMES[c] for c in cols]
     for ax in axes:
         ax.set_xticks(range(len(cols)), labels, rotation=90, fontsize=6)

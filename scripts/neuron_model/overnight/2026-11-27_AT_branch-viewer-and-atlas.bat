@@ -9,6 +9,9 @@ rem      on the NAS), radius along the branch, spine positions, nearest neighbou
 rem AT3: atlas of the VAE latent space: real spines of the clean evaluation neurons (val v1 minus dev, as slides 13.3),
 rem      MoGen A (500) and VAE_flow (model C), a mesh for EVERY point, 3 nearest spines of every source under the selected one
 rem      -> runs\analysis\neuron-model\atlas\2026-11-27_at\spine_atlas.html
+rem AT4: slide figures (minutes): densities of the 11 morphometrics for VAE_flow (final evaluation of chain S, floor real_mc) and
+rem      for MoGen v4 by organism x binary cell type (real val spines of the group, real-pw8val, conditional v4)
+rem      -> runs\analysis\neuron-model\2026-11-27_slide-figures\r17_s_marginals_vae_flow.png, r16_s_marginals_v4_<organism>_<type>.png
 rem Log: scripts\neuron_model\overnight\2026-11-27_AT_branch-viewer-and-atlas.bat > logs_AT.txt 2>&1
 
 set REPO=C:\Users\Student\LipsEkaterina\GitHub\spinetool
@@ -49,13 +52,29 @@ echo ===== [AT3] atlas of the VAE latent space: real / MoGen A / VAE_flow ===== 
 set VF=
 for /f "delims=" %%d in ('dir /b /ad %VAE%\meshes_flow_prior 2^>nul') do (if exist %VAE%\meshes_flow_prior\%%d\sample_00000 if "!VF!"=="" set VF=%VAE%\meshes_flow_prior\%%d)
 if "%VF%"=="" if exist %VAE%\meshes_flow_prior\sample_00000 set VF=%VAE%\meshes_flow_prior
-if "%VF%"=="" (echo NO VAE_flow meshes in %VAE%\meshes_flow_prior & goto :end)
+if "%VF%"=="" (echo NO VAE_flow meshes in %VAE%\meshes_flow_prior & goto :at4)
 echo VAE_flow meshes: %VF%
 python scripts\neuron_model\build_spine_atlas.py --vae-run %VAE% --manifest %FULL% --path-mode absolute ^
   --splits %SPLITS%\splits_v1_val_minus_dev.parquet --split test --n-real 600 --real-meshes 600 --n-train 1000 ^
   --model MoGen_A=%MAN% --model VAE_flow=%VF% --n-gen 500 --gen-meshes 500 --max-faces 1200 --neighbors 3 ^
   --out %ANA%\atlas\2026-11-27_at\spine_atlas.html
 if errorlevel 1 (echo ATLAS FAILED)
+
+:at4
+echo ===== [AT4] slide figures: morphometric densities of VAE_flow and of MoGen v4 by organism and cell type ===== %date% %time%
+set FIG=%ANA%\2026-11-27_slide-figures
+rem VAE_flow (model C): its final evaluation on the untouched test (chain S); the floor is real_mc = real spines through exact SDF -> Marching Cubes
+set EVS=%ANA%\2026-11-10_010917_generator-evaluation-final
+if exist %EVS%\postprocessed\morphometrics_VAE_flow_seed1.parquet (
+  python scripts\neuron_model\make_sprint_figures.py --out %FIG% --s-marginals %EVS% --s-marginals-model VAE_flow --s-marginals-floor real_mc ^
+    --s-marginals-name vae_flow --s-marginals-file r17_s_marginals_vae_flow.png
+) else (echo NO VAE_flow morphometrics in %EVS%)
+rem MoGen v4 by organism x binary cell type (conditional samples of chain AH, real spines of the val neurons re-read from the stage-8 tables)
+set SPG=
+for /f "delims=" %%d in ('dir /b /ad /o-n %ANA%\*species-generation-v4-valfloor 2^>nul') do (if "!SPG!"=="" set SPG=%ANA%\%%d)
+if "%SPG%"=="" (echo NO species-generation-v4-valfloor report & goto :end)
+python scripts\neuron_model\make_sprint_figures.py --out %FIG% --species-marginals %SPG%
+dir /b %FIG%
 
 :end
 echo ===== chain AT done ===== %date% %time%

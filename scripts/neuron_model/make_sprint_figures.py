@@ -64,7 +64,7 @@ plt.rcParams.update({
     "font.family": "DejaVu Sans", "font.size": 11, "text.color": INK, "axes.labelcolor": INK,
     "axes.edgecolor": "#c9cbd0", "xtick.color": "#4a4d55", "ytick.color": "#4a4d55",
     "axes.spines.top": False, "axes.spines.right": False, "axes.grid": True, "grid.color": "#ececef", "grid.linewidth": 0.8,
-    "axes.axisbelow": True, "axes.titlesize": 12, "axes.titleweight": "bold", "axes.titlelocation": "left",
+    "axes.axisbelow": True, "axes.titlesize": 14, "figure.titlesize": 15, "axes.titleweight": "bold", "axes.titlelocation": "left",
     "legend.frameon": False, "axes.unicode_minus": False,
 })
 
@@ -303,10 +303,10 @@ def fig_a4_tortuosity(out: Path) -> None:
             ax.plot(xy[:, 0], xy[:, 1], color=col, lw=1.4, alpha=0.85)
         ax.plot([0], [0], "o", color=INK, ms=5)
         ax.set_xlim(*xl); ax.set_ylim(*yl); ax.set_aspect("equal"); ax.grid(False)
-        ax.set_title(title, fontsize=11)
+        ax.set_title(title, fontsize=13)
         ax.text(0.02, 0.03, f"медиана извилистости на 80 мкм: {np.median(tort):.2f}", transform=ax.transAxes, fontsize=10, color=INK)
         ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle("Одинаковый среднеквадратичный изгиб, разное направление (упрощённая двумерная иллюстрация, девять ветвей по 80 мкм из одной точки)", fontsize=10.5, x=0.01, ha="left")
+    fig.suptitle("Одинаковый среднеквадратичный изгиб, разное направление (упрощённая двумерная иллюстрация, девять ветвей по 80 мкм из одной точки)", fontsize=12.5, x=0.01, ha="left")
     save(fig, out, "a4_tortuosity_mechanism.png")
 
 
@@ -340,7 +340,7 @@ def fig_a5_assembly(out: Path) -> None:
     ax.text((hi_ + 2 * R) / 2 + 0.02, 0.45, "слишком глубоко:\nвыходит с другой\nстороны", ha="center", fontsize=8.8, color=PINK)
     ax.axvline(R, color=GREY, ls=":", lw=1.2); ax.text(R + 0.02, 1.03, "глубина = радиус", color="#4a4d55", fontsize=9)
     ax.set_xlabel("глубина погружения δ / радиус ствола"); ax.set_ylabel("доля вершин основания внутри ствола")
-    ax.set_title("Функция немонотонна: простой перебор «глубже, пока внутри» не работает", fontsize=11)
+    ax.set_title("Функция немонотонна: простой перебор «глубже, пока внутри» не работает", fontsize=13)
     ax.set_ylim(-0.02, 1.12); ax.set_xlim(0, 2 * R)
     save(fig, out, "a5_assembly_immersion.png")
 
@@ -364,8 +364,8 @@ def fig_a6_flow_matching(out: Path) -> None:
                 ax.plot([x0[k, 0], x1[k, 0]], [x0[k, 1], x1[k, 1]], color="#e3e4e8", lw=0.8, zorder=1)
         ax.scatter(xt[:, 0], xt[:, 1], s=7, color=PINK if t > 0 else GREY, zorder=2)
         ax.set_aspect("equal"); ax.grid(False); ax.set_xticks([]); ax.set_yticks([])
-        ax.set_title({0.0: "t = 0: шум", 1.0: "t = 1: форма шипика"}.get(t, f"t = {t:g}"), fontsize=10.5)
-    fig.suptitle("Flow Matching на плоскости: каждая точка движется по прямой от шума к форме; сеть учится угадывать эту скорость", fontsize=11, x=0.01, ha="left", y=0.98)
+        ax.set_title({0.0: "t = 0: шум", 1.0: "t = 1: форма шипика"}.get(t, f"t = {t:g}"), fontsize=12.5)
+    fig.suptitle("Flow Matching на плоскости: каждая точка движется по прямой от шума к форме; сеть учится угадывать эту скорость", fontsize=13, x=0.01, ha="left", y=0.98)
     save(fig, out, "a6_flow_matching_toy.png")
 
 
@@ -414,7 +414,7 @@ def fig_b1_smoothing(out: Path) -> None:
     axes[0].set_title("Доля линии внутри сетки"); axes[0].set_ylim(0, 1.15); axes[0].legend(loc="lower right")
     grouped_bars(axes[1], classes, {"окно 1 мкм": [0.48, 0.42, 0.26], "адаптивное (k = 2)": [0.28, 0.29, 0.21]}, [GREY, PINK])
     axes[1].set_title("Ошибка круглой трубки / радиус (меньше — лучше)"); axes[1].set_ylim(0, 0.6)
-    fig.suptitle("Адаптивное сглаживание центральной линии: 120 ветвей, 10 нейронов", fontsize=11, x=0.01, ha="left")
+    fig.suptitle("Адаптивное сглаживание центральной линии: 120 ветвей, 10 нейронов", fontsize=13, x=0.01, ha="left")
     save(fig, out, "b1_smoothing_adaptive.png")
 
 
@@ -455,9 +455,9 @@ def fig_b4_vae(out: Path) -> None:
         bars = ax.bar(range(3), vals, color=cols, width=0.62)
         for b, v in zip(bars, vals):
             ax.text(b.get_x() + b.get_width() / 2, v, fmt.format(v), ha="center", va="bottom", fontsize=10)
-        ax.set_xticks(range(3), labels, fontsize=8.6); ax.set_title(title, fontsize=10.5); ax.grid(axis="x", visible=False)
+        ax.set_xticks(range(3), labels, fontsize=8.6); ax.set_title(title, fontsize=12.5); ax.grid(axis="x", visible=False)
         ax.set_ylim(0, max(vals) * 1.18)
-    fig.suptitle("VAE: три рецепта обучения (50 проверочных шипиков, шаг 30 000)", fontsize=11, x=0.01, ha="left")
+    fig.suptitle("VAE: три рецепта обучения (50 проверочных шипиков, шаг 30 000)", fontsize=13, x=0.01, ha="left")
     save(fig, out, "b4_vae_recipes.png")
 
 
@@ -471,7 +471,7 @@ def fig_b5_assembly(out: Path) -> None:
     grouped_bars(axes[2], ["расстояние до ближайшего\nшипика, нм (медиана)"], {"реальные ветви": [791], "собранные ветви": [854]}, [GREY, PINK], width=0.6, fmt="{:.0f}")
     axes[2].set_title("Расстояние до ближайшего соседа"); axes[2].set_ylim(0, 1000)
     fig.suptitle("Собранные ветви (шипики MoGen после дообучения) против реальных ветвей тех же запросов\n"
-                 "20 ветвей, один проверочный нейрон. Положения вдоль ветви: W₁/σ = 0,05 при шумовом поле 0,13", fontsize=10, x=0.01, y=0.99, ha="left")
+                 "20 ветвей, один проверочный нейрон. Положения вдоль ветви: W₁/σ = 0,05 при шумовом поле 0,13", fontsize=12, x=0.01, y=0.99, ha="left")
     fig.subplots_adjust(top=0.78, wspace=0.28)
     save(fig, out, "b5_assembly_vs_real.png")
 
@@ -491,7 +491,7 @@ def fig_b6_audit(out: Path) -> None:
     ax = axes[2]
     grouped_bars(ax, ["«ядро» ствола"], {"круглое сечение": [0.27], "эллипс": [0.25]}, [PINK, GREEN], width=0.6)
     ax.set_ylim(0, 0.34); ax.set_title("Ошибка на «ядре», доля радиуса")
-    fig.suptitle("Аудит обратной реконструкции: ошибку определяют выросты сегментации, эллипс почти не помогает", fontsize=11, x=0.01, ha="left")
+    fig.suptitle("Аудит обратной реконструкции: ошибку определяют выросты сегментации, эллипс почти не помогает", fontsize=13, x=0.01, ha="left")
     save(fig, out, "b6_audit_decomposition.png")
 
 
@@ -973,7 +973,7 @@ def fig_a12_conditional_curves(out: Path, v2: Path, v3: Path) -> None:
     axd.plot(m["step"], diff.rolling(w, min_periods=w // 2, center=True).mean(), color=VIOLET, lw=2.2)
     axd.set_xlabel("шаг внутри запуска (одинаковые пакеты у v2 и v3)")
     axd.set_ylabel("v3 − v2")
-    axd.set_title(f"б) Те же пакеты: корреляция журналов {corr:.3f}, средняя разность {diff.mean():+.5f} ± {se:.5f}".replace(".", ","), fontsize=11)
+    axd.set_title(f"б) Те же пакеты: корреляция журналов {corr:.3f}, средняя разность {diff.mean():+.5f} ± {se:.5f}".replace(".", ","), fontsize=13)
     fig.tight_layout()
     save(fig, out, "r14_conditional_v2_v3_loss.png")
 
@@ -993,9 +993,29 @@ def fig_a12_conditional_curves(out: Path, v2: Path, v3: Path) -> None:
     save(fig, out, "r14b_conditional_v2_v3_train_loss.png")
 
 
-def fig_a13_s_marginals(out: Path, evaluation: Path, model: str = "mogen_v3", name: str = "MoGen") -> None:
-    """Slide version of ``s_marginals.png`` of the quality report: densities of the 11 morphometrics, real spines of the
-    evaluation neurons, the same real spines after the reconstruction chain (floor) and ONE generator."""
+V3_NAME = "Условная MoGen (бинарный тип клетки, подробный тип клетки)"
+V4_NAME = "Условная MoGen (организм, бинарный тип клетки, подробный тип клетки)"
+# legend names by a Latin key (Cyrillic arguments of a .bat file are garbled by the Windows console code page)
+MODEL_NAMES = {"v3": V3_NAME, "v4": V4_NAME, "A": "MoGen (без условий)", "vae_flow": "VAE с нормализующим потоком"}
+
+
+def _marginals(real: pd.DataFrame, gen: pd.DataFrame, floor: Optional[pd.DataFrame], name: str, path: Path, title: str) -> None:
+    """Densities of the 11 morphometrics: real (grey), real after the generator's reconstruction chain (dashed), one model."""
+    from src.neuron_model import quality_report as qr
+
+    cap = lambda t: t[:1].upper() + t[1:]
+    labels = {m: cap(t) for m, t in qr.S_LABELS.items()}
+    log_cols = [m for m in qr.S_METRICS if m not in ("OpenAngle", "CVD", "ConvexHullRatio")]
+    qr.distribution_grid(real, {name: gen}, floor, labels, path, "hist", log_cols, title,
+                         scale={m: f for m, (f, _) in qr.S_DISPLAY.items()}, labels={"real": "Реальные", "floor": "Реальные после постобработки"})
+    print(f"[figures] {path}")
+
+
+def fig_a13_s_marginals(out: Path, evaluation: Path, model: str = "mogen_v3", name: str = V3_NAME, floor: str = "real_poisson",
+                        file_name: str = "r15_s_marginals_mogen.png") -> None:
+    """Slide version of ``s_marginals.png`` of the quality report from an ``evaluate_generators`` run: real spines of the
+    evaluation neurons, the same real spines after the reconstruction chain of the model (``floor``: real_poisson for MoGen,
+    real_mc for the VAE) and ONE model."""
     from src.neuron_model import quality_report as qr
 
     pp = Path(evaluation) / "postprocessed"
@@ -1004,13 +1024,46 @@ def fig_a13_s_marginals(out: Path, evaluation: Path, model: str = "mogen_v3", na
     if model not in sets:
         print(f"[figures] a13: no {model} in {pp} ({sorted(sets)})")
         return
-    cap = lambda t: t[:1].upper() + t[1:]
-    labels = {m: cap(t) for m, t in qr.S_LABELS.items()}
-    log_cols = [m for m in qr.S_METRICS if m not in ("OpenAngle", "CVD", "ConvexHullRatio")]
-    qr.distribution_grid(real, {name: sets[model]}, sets.get("real_poisson"), labels, Path(out) / "r15_s_marginals_mogen.png", "hist", log_cols,
-                         "Морфометрики шипиков: реальные против сгенерированных", scale={m: f for m, (f, _) in qr.S_DISPLAY.items()},
-                         labels={"real": "Реальные", "floor": "Реальные после постобработки"})
-    print(f"[figures] {Path(out) / 'r15_s_marginals_mogen.png'}")
+    if floor not in sets:
+        print(f"[figures] a13: no floor {floor} in {pp}, drawn without it")
+    _marginals(real, sets[model], sets.get(floor), name, Path(out) / file_name, "Морфометрики шипиков: реальные против сгенерированных")
+
+
+def fig_a14_species_marginals(out: Path, report: Path, name: str = V4_NAME, label: str = "v4-pw8", floor_label: str = "real-pw8val",
+                              metadata_root: Path = REPO_ROOT / "datasets") -> None:
+    """MoGen v4 by organism and binary cell type from a ``compare_species_generation.py`` report: for every group the real
+    spines of the validation neurons of that organism and type (read again from the stage-8 tables of the report), the same
+    real spines after the d8_pw8 chain (``floor_label``) and the CONDITIONAL v4 samples of that group (one figure per group)."""
+    import importlib.util
+
+    report = Path(report)
+    info = json.loads((report / "run_info.json").read_text(encoding="utf-8"))
+    gen = pd.read_parquet(report / "generated_metrics.parquet")
+
+    def load(name_):
+        spec = importlib.util.spec_from_file_location(name_, REPO_ROOT / "scripts/neuron_model" / f"{name_}.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    csg, mbc = load("compare_species_generation"), load("morphology_by_condition")
+    splits = Path(info["splits"]) if info.get("splits") not in (None, "None") else None
+    frames = {"mouse": mbc.load_spines(Path(info["minnie_table"]), Path(metadata_root).resolve(), splits, info.get("split")),
+              "human": csg.load_h01_spines(Path(info["h01_table"]), Path(metadata_root).resolve(),
+                                           Path(info["h01_detached"]) if info.get("h01_detached") not in (None, "None") else None, splits, info.get("split"))}
+    species_ru = {"mouse": "мышь", "human": "человек"}
+    type_ru = {"excitatory": "возбуждающие", "inhibitory": "тормозные"}
+    for species, frame in frames.items():
+        for ctype in ("excitatory", "inhibitory"):
+            group = f"{species}/{ctype}"
+            real = frame[frame["cell_type_binary"] == ctype]
+            g = gen[(gen["value"] == group) & (gen["label"] == label)]
+            fl = gen[(gen["value"] == group) & (gen["label"] == floor_label)]
+            if not len(real) or not len(g):
+                print(f"[figures] a14: {group}: real {len(real)}, generated {len(g)} - skipped")
+                continue
+            _marginals(real, g, fl if len(fl) else None, name, Path(out) / f"r16_s_marginals_v4_{species}_{ctype}.png",
+                       f"Морфометрики шипиков: {species_ru[species]}, {type_ru[ctype]} клетки ({real['neuron_id'].nunique()} проверочных нейронов)")
 
 
 def _eval_dir(evaluation: Path, kind: str) -> Path:
@@ -1082,9 +1135,9 @@ def fig_c3_morph_hist(out: Path, evaluation: Path, kind: str, features=("Length"
         ax.hist(pool[0], bins=bins, density=True, color=SOFT_GREY, ec="#c9cbd0", label=f"реальные (n = {len(pool[0])})")
         for (name, g), col, p in zip(gens.items(), gen_colors, pool[1:]):
             ax.hist(p, bins=bins, density=True, histtype="step", color=col, lw=2.0, label=f"{name} (n = {len(p)})")
-        ax.set_title(meta["name"], fontsize=11); ax.set_xlabel(f"{meta['name']}, {meta['unit']}".rstrip(", ")); ax.set_yticks([])
+        ax.set_title(meta["name"], fontsize=13); ax.set_xlabel(f"{meta['name']}, {meta['unit']}".rstrip(", ")); ax.set_yticks([])
     axes[0][0].legend(fontsize=8.5)
-    fig.suptitle(f"Распределения морфометрик: тестовые реальные шипики и сгенерированные ({KIND_RU[kind]})", fontsize=12, x=0.01, ha="left")
+    fig.suptitle(f"Распределения морфометрик: тестовые реальные шипики и сгенерированные ({KIND_RU[kind]})", fontsize=14, x=0.01, ha="left")
     fig.tight_layout()
     save(fig, out, "c3_morph_hist.png")
 
@@ -1142,7 +1195,7 @@ def fig_c4_scorecard(out: Path, evaluation: Path, kind: str) -> None:
             cell.set_text_props(fontweight="bold"); cell.set_facecolor("#f6f6f8")
         if c == 0 and r > 0:
             cell.set_text_props(ha="left"); cell._loc = "left"
-    ax.set_title(f"Сводка критериев ({KIND_RU[kind]}): зелёный — лучшее значение в строке, розовый — худшее", fontsize=10.5, loc="left")
+    ax.set_title(f"Сводка критериев ({KIND_RU[kind]}): зелёный — лучшее значение в строке, розовый — худшее", fontsize=12.5, loc="left")
     save(fig, out, "c4_scorecard.png")
 
 
@@ -1212,7 +1265,7 @@ def fig_c6_assembled(out: Path, directory: Path) -> None:
         for ax in axes[1]:
             ax.axis("off")
         axes[1][1].text(0.5, 0.5, "evaluation_spines.csv не найден:\nповторите evaluate_assembled_branches.py\nс текущим скриптом", ha="center", va="center", transform=axes[1][1].transAxes)
-    fig.suptitle("Собранные ветви против реальных ветвей из тех же запросов", fontsize=12, x=0.01, ha="left")
+    fig.suptitle("Собранные ветви против реальных ветвей из тех же запросов", fontsize=14, x=0.01, ha="left")
     fig.tight_layout()
     save(fig, out, "c6_assembled_eval.png")
 
@@ -1233,10 +1286,17 @@ def main() -> None:
                         help="folders with metrics_train/val.jsonl of the conditional MoGen v2 and v3 (r14)")
     parser.add_argument("--s-marginals", type=Path, metavar="EVAL_RUN", help="evaluate_generators run: slide version of s_marginals (r15)")
     parser.add_argument("--s-marginals-model", default="mogen_v3")
+    parser.add_argument("--s-marginals-name", default="v3", help="legend name of the model: a key of MODEL_NAMES (v3, v4, A, vae_flow) or the text")
+    parser.add_argument("--s-marginals-floor", default="real_poisson", help="real spines through the model's chain: real_poisson (MoGen) / real_mc (VAE)")
+    parser.add_argument("--s-marginals-file", default="r15_s_marginals_mogen.png")
+    parser.add_argument("--species-marginals", type=Path, metavar="REPORT", help="compare_species_generation report of v4 (r16, needs the stage-8 tables)")
     args = parser.parse_args()
 
     if args.s_marginals:
-        fig_a13_s_marginals(args.out, args.s_marginals, args.s_marginals_model)
+        fig_a13_s_marginals(args.out, args.s_marginals, args.s_marginals_model, MODEL_NAMES.get(args.s_marginals_name, args.s_marginals_name),
+                            args.s_marginals_floor, args.s_marginals_file)
+    if args.species_marginals:
+        fig_a14_species_marginals(args.out, args.species_marginals)
     if args.conditional_logs:
         fig_a12_conditional_curves(args.out, *args.conditional_logs)
     if args.static:
@@ -1256,7 +1316,7 @@ def main() -> None:
         fig_c5_t0(args.out, args.t0_run)
     if args.assembled_eval:
         fig_c6_assembled(args.out, args.assembled_eval)
-    if not (args.static or args.conditional_logs or args.s_marginals or args.training or args.evaluation or args.t0_run or args.assembled_eval):
+    if not (args.static or args.conditional_logs or args.s_marginals or args.species_marginals or args.training or args.evaluation or args.t0_run or args.assembled_eval):
         parser.error("nothing to do: give --static and/or --training / --evaluation / --t0-run / --assembled-eval")
 
 
