@@ -55,6 +55,7 @@ def body_html(meta: dict, sources: list, summary_rows: list) -> str:
    {hk.card("Карта форм", '<div id="map" class="plot l"></div><div id="mapLegend" class="legend"></div><div id="mapCounts" class="small muted"></div>', hint="колесо — масштаб, двойной щелчок — сброс")}
    {hk.card("Выбранный шипик", '<div class="row" style="margin-bottom:6px"><button id="pin">Закрепить для сравнения</button><button id="unpin">Открепить</button></div><div id="viewer" class="plot m"></div><div id="viewerNote" class="small muted"></div><div id="keyLine" class="mono muted" style="margin:6px 0"></div><table class="metrics" id="metricTable"></table>', hint="вращение мышью")}
   </div>
+  {hk.card("Ближайшие шипики в латентном пространстве VAE", '<div id="neighbors" class="plot" style="height:760px"></div><div id="neighborsNote" class="small muted"></div>', hint="строка — источник, слева направо по возрастанию расстояния; щелчок по сетке выбирает этот шипик")}
  </div>
 </div>"""
     map_note = hk.note([

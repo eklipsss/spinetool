@@ -144,7 +144,46 @@ function nearestWithMesh(i) {
   return best;
 }
 function select(i) {
-  state.current = i; drawMap(); drawViewer(); drawMetricTable();
+  state.current = i; drawMap(); drawViewer(); drawMetricTable(); drawNeighbors();
+}
+
+// ---------------------------------------------------------------- nearest spines of every source (VAE latent space)
+const NB_SHOWN = ['Length', 'Volume', 'Area', 'JunctionArea', 'OpenAngle'].filter(m => METRICS.includes(m));
+let NB_CELLS = [];
+function nbMetricText(i) {
+  return NB_SHOWN.map(m => `${D.metric_info[m].name}: ${fmt(disp(m, PTS.metrics[m][i]))}${unit(m)}`).join('<br>');
+}
+function drawNeighbors() {
+  const box = $('neighbors'), note = $('neighborsNote');
+  const i = state.current, nb = (i === null || !PTS.neighbors) ? null : PTS.neighbors[i];
+  if (!nb) { Plotly.purge(box); box.innerHTML = '<div class="empty">' + (i === null ? 'Выберите точку на карте' : 'У этого шипика нет латентного кода') + '</div>'; note.textContent = ''; return; }
+  const rows = SRC.filter(s => s.kind !== 'external' && nb[s.index] && nb[s.index].length);
+  const k = Math.max(...rows.map(s => nb[s.index].length));
+  const cells = [];
+  rows.forEach((s, r) => nb[s.index].forEach(([j, d], c) => cells.push({r, c, j, d, src: s})));
+  const meshes = cells.map(x => unpackMesh(D.meshes[PTS.mesh[x.j]]));
+  const range = cubeRange(meshes);
+  const nr = rows.length, gap = 0.012, top = 0.94;
+  const lay = layout({margin: {l: 0, r: 0, t: 8, b: 0}, showlegend: false, annotations: []});
+  const traces = [];
+  cells.forEach((x, n) => {
+    const scene = n === 0 ? 'scene' : 'scene' + (n + 1);
+    const y1 = top - x.r * (top / nr), y0 = y1 - top / nr + gap;
+    const color = x.src.kind === 'real' ? P.mesh_real : x.src.color;
+    traces.push(Object.assign(meshTrace(meshes[n], color, x.src.name), {scene: scene, customdata: [x.j], hoverinfo: 'text',
+      text: `${x.src.name}<br>расстояние ${fmt(x.d)}<br>${nbMetricText(x.j)}`, hoverlabel: {align: 'left'}}));
+    lay[scene] = scene3d(range, {domain: {x: [x.c / k + gap, (x.c + 1) / k - gap], y: [y0, y1 - 0.035]}});
+    const self = x.j === i ? ' · выбранный' : '';
+    lay.annotations.push({text: `<b>${x.src.name}</b> #${x.c + 1}${self} · d = ${fmt(x.d)}`, x: (x.c + 0.5) / k, y: y1, xref: 'paper', yref: 'paper',
+      showarrow: false, yanchor: 'top', font: {size: 11, color: x.j === i ? P.ink : P.ink_secondary}});
+  });
+  if (!box._fullData) box.innerHTML = '';
+  Plotly.react(box, traces, lay, PLOT_CONFIG);
+  NB_CELLS = cells;
+  if (!box._nbClick) { box._nbClick = true; box.on('plotly_click', ev => { const p = ev.points && ev.points[0]; if (p && p.data && p.data.customdata) select(p.data.customdata[0]); }); }
+  note.textContent = 'Расстояние — евклидово между средними апостериорного распределения VAE во всём латентном пространстве (не на плоской карте). '
+    + 'Соседи ищутся только среди шипиков, сетки которых есть на странице; для шипика из того же источника первым идёт он сам (d = 0). '
+    + 'Сетки в одном масштабе; наведите курсор, чтобы увидеть длину, объём и площадь.';
 }
 function drawViewer() {
   const box = $('viewerNote'), shown = [];
@@ -330,5 +369,5 @@ $('pin').onclick = () => { if (state.current === null) return; state.pinned = st
 $('unpin').onclick = () => { state.pinned = null; $('viewer')._synced = false; drawMap(); drawViewer(); drawMetricTable(); };
 buildTraversalControls();
 state.current = (() => { const i = [...Array(N).keys()].find(j => PTS.mesh[j] >= 0 && SRC[PTS.source[j]].kind === 'real'); return i === undefined ? null : i; })();
-drawMap(true); drawMetricTable(); drawViewer(); drawDistribution(); drawCompareTable(); drawCorr(); drawQuality(); drawTraversal();
+drawMap(true); drawMetricTable(); drawViewer(); drawNeighbors(); drawDistribution(); drawCompareTable(); drawCorr(); drawQuality(); drawTraversal();
 $('map').on('plotly_click', ev => { const p = ev.points && ev.points[0]; if (p && p.customdata !== undefined) select(p.customdata); });

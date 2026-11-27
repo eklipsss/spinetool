@@ -46,6 +46,7 @@ train:
   validate_every: 2000
   sample_every: 10000
   checkpoint_every: 2000
+  keep_every: 2000        # loss curves (eval_training_curves.py)
   tracked_metrics: {val_loss: min}
   n_val_batches: 50
   n_samples: 8

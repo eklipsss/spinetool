@@ -920,6 +920,99 @@ def fig_c1_training(out: Path, runs: Mapping[str, Path]) -> None:
     save(fig, out, "c1_training_curves.png")
 
 
+def _metrics_file(run: Path, stream: str) -> Path:
+    run = Path(run)
+    for cand in (run / "logs" / f"metrics_{stream}.jsonl", run / f"metrics_{stream}.jsonl"):
+        if cand.exists():
+            return cand
+    return run / "logs" / f"metrics_{stream}.jsonl"
+
+
+def fig_a12_conditional_curves(out: Path, v2: Path, v3: Path) -> None:
+    """Training loss of the conditional MoGen v2 -> v3 as it was LOGGED (no kept checkpoints, so no curves
+    recomputed with one estimator): the train loss is the mean over the 100 training batches before each
+    log line (condition dropout on), the validation loss exists only at the end of each run."""
+    parts = []
+    offset = 0
+    for name, run in (("v2", v2), ("v3", v3)):
+        df = read_jsonl(_metrics_file(run, "train"))
+        val = read_jsonl(_metrics_file(run, "val"))
+        if df.empty:
+            print(f"[figures] a12: no train log in {run}")
+            return
+        parts.append((name, df.assign(gstep=df["step"] + offset), val.assign(gstep=val["step"] + offset) if not val.empty else val))
+        offset += int(df["step"].max())
+    fig, (ax, axd) = plt.subplots(2, 1, figsize=(9.5, 7.6), gridspec_kw={"height_ratios": [1.6, 1]})
+    for (name, df, val), col in zip(parts, (PINK, GREEN)):
+        window = max(5, int(round(1000 / float(np.median(np.diff(df["step"]))))))
+        ax.plot(df["gstep"], df["loss"], color=col, alpha=0.25, lw=0.8)
+        ax.plot(df["gstep"], df["loss"].rolling(window, min_periods=window // 2, center=True).mean(), color=col, lw=2.2,
+                label=f"{name}: обучающая потеря (среднее по 1000 шагам)")
+        if not val.empty:
+            ax.scatter(val["gstep"], val["val_loss"], color=col, s=70, marker="D", edgecolor="white", zorder=5,
+                       label=f"{name}: проверочная потеря {val['val_loss'].iloc[-1]:.4f}".replace(".", ","))
+    lo = min(p[1]["loss"].quantile(0.01) for p in parts)
+    hi = max(p[1]["loss"].quantile(0.99) for p in parts)
+    ax.set_ylim(lo - 0.012, hi + 0.004)
+    ax.axvline(parts[0][1]["gstep"].max(), color=GREY, lw=1, ls="--")
+    ax.text(parts[0][1]["gstep"].max() + 300, hi + 0.003, "старт v3 от весов v2,\nlr слоя условий ×100", va="top", fontsize=9, color=INK,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85))
+    ax.set_xlabel("шаг обучения (v2: 0–30 000, v3: 30 000–45 000)")
+    ax.set_ylabel("потеря сопоставления потоков")
+    ax.set_title("а) Условная MoGen v2 → v3: потеря по журналу обучения")
+    ax.legend(fontsize=8, loc="lower left", ncol=2, frameon=True)
+    # v3 was started with the same data seed, so its batches repeat the first steps of v2: paired difference
+    (_, d2, _), (_, d3, _) = parts
+    m = d2[["step", "loss"]].merge(d3[["step", "loss"]], on="step", suffixes=("_v2", "_v3"))
+    diff = m["loss_v3"] - m["loss_v2"]
+    corr = float(np.corrcoef(m["loss_v2"], m["loss_v3"])[0, 1])
+    se = float(diff.std(ddof=1) / np.sqrt(len(diff)))
+    w = max(5, int(round(1000 / float(np.median(np.diff(m["step"]))))))
+    axd.axhline(0, color=GREY, lw=1)
+    axd.plot(m["step"], diff, color=VIOLET, alpha=0.3, lw=0.8)
+    axd.plot(m["step"], diff.rolling(w, min_periods=w // 2, center=True).mean(), color=VIOLET, lw=2.2)
+    axd.set_xlabel("шаг внутри запуска (одинаковые пакеты у v2 и v3)")
+    axd.set_ylabel("v3 − v2")
+    axd.set_title(f"б) Те же пакеты: корреляция журналов {corr:.3f}, средняя разность {diff.mean():+.5f} ± {se:.5f}".replace(".", ","), fontsize=11)
+    fig.tight_layout()
+    save(fig, out, "r14_conditional_v2_v3_loss.png")
+
+    # slide version: only the logged training loss, legend "v2" / "v3", no end-of-run validation points
+    # (they come from another estimator: EMA weights, fixed t and noise, no condition dropout)
+    fig, ax = plt.subplots(figsize=(9.5, 4.4))
+    for (name, df, _), col in zip(parts, (PINK, GREEN)):
+        window = max(5, int(round(1000 / float(np.median(np.diff(df["step"]))))))
+        ax.plot(df["gstep"], df["loss"], color=col, alpha=0.25, lw=0.8)
+        ax.plot(df["gstep"], df["loss"].rolling(window, min_periods=window // 2, center=True).mean(), color=col, lw=2.2, label=name)
+    ax.set_ylim(lo - 0.004, hi + 0.004)
+    ax.axvline(parts[0][1]["gstep"].max(), color=GREY, lw=1, ls="--")
+    ax.set_xlabel("шаг обучения")
+    ax.set_ylabel("потеря сопоставления потоков")
+    ax.legend(fontsize=10, loc="lower right", frameon=True)
+    fig.tight_layout()
+    save(fig, out, "r14b_conditional_v2_v3_train_loss.png")
+
+
+def fig_a13_s_marginals(out: Path, evaluation: Path, model: str = "mogen_v3", name: str = "MoGen") -> None:
+    """Slide version of ``s_marginals.png`` of the quality report: densities of the 11 morphometrics, real spines of the
+    evaluation neurons, the same real spines after the reconstruction chain (floor) and ONE generator."""
+    from src.neuron_model import quality_report as qr
+
+    pp = Path(evaluation) / "postprocessed"
+    real = pd.read_parquet(Path(evaluation) / "real_test_morphometrics.parquet", columns=["spine_key", *qr.S_METRICS])
+    sets = qr._read_gen_sets(pp)
+    if model not in sets:
+        print(f"[figures] a13: no {model} in {pp} ({sorted(sets)})")
+        return
+    cap = lambda t: t[:1].upper() + t[1:]
+    labels = {m: cap(t) for m, t in qr.S_LABELS.items()}
+    log_cols = [m for m in qr.S_METRICS if m not in ("OpenAngle", "CVD", "ConvexHullRatio")]
+    qr.distribution_grid(real, {name: sets[model]}, sets.get("real_poisson"), labels, Path(out) / "r15_s_marginals_mogen.png", "hist", log_cols,
+                         "Морфометрики шипиков: реальные против сгенерированных", scale={m: f for m, (f, _) in qr.S_DISPLAY.items()},
+                         labels={"real": "Реальные", "floor": "Реальные после постобработки"})
+    print(f"[figures] {Path(out) / 'r15_s_marginals_mogen.png'}")
+
+
 def _eval_dir(evaluation: Path, kind: str) -> Path:
     return Path(evaluation) / kind
 
@@ -1136,8 +1229,16 @@ def main() -> None:
     parser.add_argument("--kind", default="postprocessed", choices=("raw", "postprocessed"))
     parser.add_argument("--t0-run", type=Path, help="<id>_t0 run directory (c5)")
     parser.add_argument("--assembled-eval", type=Path, help="assembly directory with evaluation_branches.csv (c6)")
+    parser.add_argument("--conditional-logs", nargs=2, type=Path, metavar=("V2", "V3"),
+                        help="folders with metrics_train/val.jsonl of the conditional MoGen v2 and v3 (r14)")
+    parser.add_argument("--s-marginals", type=Path, metavar="EVAL_RUN", help="evaluate_generators run: slide version of s_marginals (r15)")
+    parser.add_argument("--s-marginals-model", default="mogen_v3")
     args = parser.parse_args()
 
+    if args.s_marginals:
+        fig_a13_s_marginals(args.out, args.s_marginals, args.s_marginals_model)
+    if args.conditional_logs:
+        fig_a12_conditional_curves(args.out, *args.conditional_logs)
     if args.static:
         for fn in STATIC:
             fn(args.out)
@@ -1155,7 +1256,7 @@ def main() -> None:
         fig_c5_t0(args.out, args.t0_run)
     if args.assembled_eval:
         fig_c6_assembled(args.out, args.assembled_eval)
-    if not (args.static or args.training or args.evaluation or args.t0_run or args.assembled_eval):
+    if not (args.static or args.conditional_logs or args.s_marginals or args.training or args.evaluation or args.t0_run or args.assembled_eval):
         parser.error("nothing to do: give --static and/or --training / --evaluation / --t0-run / --assembled-eval")
 
 

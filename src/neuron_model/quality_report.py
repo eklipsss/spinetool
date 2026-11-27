@@ -113,7 +113,8 @@ def _density(ax, v: np.ndarray, grid: np.ndarray, log: bool, **kw) -> None:
     ax.plot(grid, dens, **kw)
 
 
-def _hist_panel(ax, real: np.ndarray, gens: Dict[str, np.ndarray], floor: Optional[np.ndarray], title: str, log: bool):
+def _hist_panel(ax, real: np.ndarray, gens: Dict[str, np.ndarray], floor: Optional[np.ndarray], title: str, log: bool,
+                real_label: str = "реальные", floor_label: str = "пол (реальные через цепочку)"):
     """Smoothed densities (Gaussian KDE; on the log scale for size-like quantities): real filled grey, floor dashed green,
     generated lines. With a log x axis the density is per unit of log x, so the areas stay comparable."""
     vals = [v for v in [real, floor, *gens.values()] if v is not None and len(v)]
@@ -138,9 +139,9 @@ def _hist_panel(ax, real: np.ndarray, gens: Dict[str, np.ndarray], floor: Option
         x = np.log(r) if log else r
         if len(x) > 20000:
             x = np.random.default_rng(0).choice(x, 20000, replace=False)
-        ax.fill_between(grid, gaussian_kde(x)(np.log(grid) if log else grid), color=REAL_C, alpha=0.45, label="реальные", lw=0)
+        ax.fill_between(grid, gaussian_kde(x)(np.log(grid) if log else grid), color=REAL_C, alpha=0.45, label=real_label, lw=0)
     if floor is not None and len(floor):
-        _density(ax, floor, grid, log, color=FLOOR_C, lw=1.6, ls="--", label="пол (реальные через цепочку)")
+        _density(ax, floor, grid, log, color=FLOOR_C, lw=1.6, ls="--", label=floor_label)
     for (name, v), c in zip(gens.items(), GEN_EXTRA):
         _density(ax, v, grid, log, color=c, lw=1.8, label=name)
     if log:
@@ -154,14 +155,14 @@ def _hist_panel(ax, real: np.ndarray, gens: Dict[str, np.ndarray], floor: Option
     ax.set_yticks([])
 
 
-def _ecdf_panel(ax, real, gens, floor, title, log):
+def _ecdf_panel(ax, real, gens, floor, title, log, real_label: str = "реальные", floor_label: str = "пол"):
     def line(v, **kw):
         v = np.sort(v[np.isfinite(v)])
         if len(v):
             ax.plot(v, np.arange(1, len(v) + 1) / len(v), **kw)
-    line(real, color=REAL_C, lw=2.5, label="реальные")
+    line(real, color=REAL_C, lw=2.5, label=real_label)
     if floor is not None:
-        line(floor, color=FLOOR_C, lw=1.5, ls="--", label="пол")
+        line(floor, color=FLOOR_C, lw=1.5, ls="--", label=floor_label)
     for (name, v), c in zip(gens.items(), GEN_EXTRA):
         line(v, color=c, lw=1.5, label=name)
     if log:
@@ -172,7 +173,8 @@ def _ecdf_panel(ax, real, gens, floor, title, log):
 
 def distribution_grid(real: pd.DataFrame, gens: Dict[str, pd.DataFrame], floor: Optional[pd.DataFrame], columns: Dict[str, str],
                       path: Path, kind: str = "hist", log_columns: Sequence[str] = (), suptitle: str = "", ncols: int = 4,
-                      scale: Optional[Dict[str, float]] = None) -> Path:
+                      scale: Optional[Dict[str, float]] = None, labels: Optional[Dict[str, str]] = None) -> Path:
+    """``labels``: legend names of the real set / the floor ({"real": ..., "floor": ...}); default: the report names."""
     plt = _plt()
     cols = [c for c in columns if c in real.columns]
     nrows = int(np.ceil(len(cols) / ncols))
@@ -183,7 +185,8 @@ def distribution_grid(real: pd.DataFrame, gens: Dict[str, pd.DataFrame], floor: 
         r = real[c].to_numpy(float) * k
         g = {n: f[c].to_numpy(float) * k for n, f in gens.items() if c in f.columns}
         fl = floor[c].to_numpy(float) * k if floor is not None and c in floor.columns else None
-        (_hist_panel if kind == "hist" else _ecdf_panel)(ax, r, g, fl, columns[c], c in log_columns)
+        (_hist_panel if kind == "hist" else _ecdf_panel)(ax, r, g, fl, columns[c], c in log_columns,
+                                                         **{f"{k}_label": v for k, v in (labels or {}).items()})
     for ax in axes.ravel()[len(cols):]:
         ax.axis("off")
     h, lab = axes.ravel()[0].get_legend_handles_labels()

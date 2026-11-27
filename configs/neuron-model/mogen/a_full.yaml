@@ -13,6 +13,6 @@ train:
   max_steps: 12000          # A plateaus in size from step ~3000 (chain AJ); 12 000 = 6.4 epochs of 60 000 at batch 32
   validate_every: 2000
   checkpoint_every: 2000
-  keep_every: 4000
+  keep_every: 2000          # every checkpoint kept: train / val curves by eval_training_curves.py (always build loss curves)
 flow:
   size_monitor: {n_batches: 10, t_min: 0.0, t_max: 0.8, n_steps: 10}   # val_size_gap_radial / _axial (no gradients)

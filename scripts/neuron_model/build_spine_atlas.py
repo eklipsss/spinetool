@@ -63,6 +63,35 @@ def _model_arg(value: str):
     return name, Path(path)
 
 
+def latent_neighbors(records, mesh_ref, source_of, n_sources: int, k: int = 3):
+    """For every point: the ``k`` nearest spines of EACH source in the VAE latent space (Euclidean distance between the
+    posterior means, the full latent dimension, not the 2-D map), among the points that have a mesh in the page.
+    The point itself is its own nearest neighbour (distance 0) inside its source. -> per point: [[ [index, distance], ...]
+    per source] or None (no latent code)."""
+    has = [i for i, r in enumerate(records) if r.latent is not None]
+    out = [None] * len(records)
+    if not has or k <= 0:
+        return out
+    Z = np.stack([np.asarray(records[i].latent, float) for i in has])
+    pos = {i: j for j, i in enumerate(has)}
+    pools = []
+    for s in range(n_sources):
+        cand = [i for i in has if source_of[i] == s and mesh_ref[i] >= 0]
+        pools.append((np.array(cand, int), Z[[pos[i] for i in cand]] if cand else np.zeros((0, Z.shape[1]))))
+    for i in has:
+        z = Z[pos[i]]
+        row = []
+        for cand, zc in pools:
+            if not len(cand):
+                row.append([])
+                continue
+            d = np.sqrt(((zc - z) ** 2).sum(axis=1))
+            order = np.argsort(d)[:k]
+            row.append([[int(cand[j]), round(float(d[j]), 3)] for j in order])
+        out[i] = row
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--vae-run", type=Path, required=True)
@@ -88,6 +117,7 @@ def main() -> None:
     parser.add_argument("--traversal-steps", default="-2,-1,0,1,2")
     parser.add_argument("--traversal-resolution", type=int, default=96)
     parser.add_argument("--max-faces", type=int, default=2500, help="display meshes are decimated to at most this many faces")
+    parser.add_argument("--neighbors", type=int, default=3, help="nearest spines of every source shown under the selected one (VAE latent space)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--title", default=DEFAULT_TITLE)
     parser.add_argument("--out", type=Path)
@@ -168,9 +198,12 @@ def main() -> None:
         else:
             mesh_ref.append(-1)
 
+    neighbors = latent_neighbors(records, mesh_ref, [src_index[r.source] for r in records], len(sources), k=args.neighbors)
+
     metric_cols = list(A.METRIC_INFO)
     qual_cols = list(A.QUALITY_INFO)
     points = {
+        "neighbors": neighbors,
         "source": [src_index[r.source] for r in records],
         "key": [r.key for r in records],
         "cell_type": [r.meta.get("cell_type") for r in records],

@@ -18,7 +18,9 @@ optimizer:
   cond_lr_mult: 100                  # the species columns must move from their pretrained values, as the cell-type columns in v3
 train:
   max_steps: 20000
-  validate_every: 20000
+  validate_every: 2000
+  checkpoint_every: 2000
+  keep_every: 2000                   # loss curves are always built (eval_training_curves.py); v2 / v3 / the first v4 run had none
 condition:
   blocks: [species, cell_type_binary, cell_type]
   p_block: {default: 0.15, species: 0.10, cell_type: 0.4}

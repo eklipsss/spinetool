@@ -37,7 +37,7 @@ if not exist %MA%\config.yaml (echo NO run A & goto :end)
 
 echo ===== [AQ1] A continued with the size penalty ===== %date% %time%
 python scripts\neuron_model\train_mogen.py --config %MA%\config.yaml name=mogen-a-cont-size model.init=run model.init_run=%MA% ^
-  model.init_checkpoint=latest train.max_steps=6000 train.validate_every=2000 train.checkpoint_every=2000 "%PEN%" "%MON%"
+  model.init_checkpoint=latest train.max_steps=6000 train.validate_every=2000 train.checkpoint_every=1000 train.keep_every=1000 "%PEN%" "%MON%"
 echo ===== [AQ2] A on splits_v1 (60 000) with the size penalty ===== %date% %time%
 python scripts\neuron_model\train_mogen.py --config configs\neuron-model\mogen\a_full_size.yaml "data.manifests=['%CACHE%']" data.splits=%SPLITS%\splits_v1.parquet
 echo ===== [AQ3] A on splits_v1 (60 000) without the penalty ===== %date% %time%
@@ -50,6 +50,11 @@ for %%n in (a-cont-size a-full-size a-full) do (
   )
 )
 echo runs: !RUN_a-cont-size! / !RUN_a-full-size! / !RUN_a-full!
+
+echo ===== [AQ3c] loss curves of the three runs (train and val, one estimator, from the kept checkpoints) ===== %date% %time%
+for %%n in (a-cont-size a-full-size a-full) do (
+  if defined RUN_%%n python scripts\neuron_model\eval_training_curves.py --run !RUN_%%n! --include-init
+)
 
 echo ===== [AQ4] 300 clouds per model and their size ===== %date% %time%
 set SIZEGEN=
