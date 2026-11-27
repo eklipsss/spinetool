@@ -65,6 +65,7 @@ echo ===== [AT4] slide figures: morphometric densities of VAE_flow and of MoGen 
 set FIG=%ANA%\2026-11-27_slide-figures
 rem VAE_flow (model C): its final evaluation on the untouched test (chain S); the floor is real_mc = real spines through exact SDF -> Marching Cubes
 set EVS=%ANA%\2026-11-10_010917_generator-evaluation-final
+if not exist %EVS%\postprocessed set EVS=O:\neuron-model\%ANA%\2026-11-10_010917_generator-evaluation-final
 if exist %EVS%\postprocessed\morphometrics_VAE_flow_seed1.parquet (
   python scripts\neuron_model\make_sprint_figures.py --out %FIG% --s-marginals %EVS% --s-marginals-model VAE_flow --s-marginals-floor real_mc ^
     --s-marginals-name vae_flow --s-marginals-file r17_s_marginals_vae_flow.png

@@ -21,9 +21,11 @@ if exist %EVAI%\real_test_morphometrics.parquet (
 ) else (echo NO evaluation %EVAI%)
 
 echo ===== [AU2] final evaluation: VAE_flow and A ===== %date% %time%
+rem the final evaluation and its real controls were moved to the NAS on 2026-11-24 (O:\neuron-model\runs\..., same structure)
 set EVS=%ANA%\2026-11-10_010917_generator-evaluation-final
+if not exist %EVS%\real_test_morphometrics.parquet set EVS=O:\neuron-model\%ANA%\2026-11-10_010917_generator-evaluation-final
 if exist %EVS%\real_test_morphometrics.parquet (
-  python scripts\neuron_model\ks_spine_models.py --eval-run %EVS% --model VAE_flow:real_mc --model mogen_A:real_poisson --out %OUT%\final
+  python scripts\neuron_model\ks_spine_models.py --eval-run %EVS% --alt-root O:\neuron-model --model VAE_flow:real_mc --model mogen_A:real_poisson --out %OUT%\final
 ) else (echo NO evaluation %EVS%)
 
 echo ===== [AU3] v4 by organism and binary cell type ===== %date% %time%

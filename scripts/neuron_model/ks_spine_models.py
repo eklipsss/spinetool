@@ -43,9 +43,17 @@ def _neuron(key) -> str | None:
     return parts[1] if len(parts) > 1 else None
 
 
+ALT_ROOTS: list = []  # --alt-root: where old runs were moved (e.g. O:\neuron-model, same runs\... structure)
+
+
 def _resolve(p) -> Path:
     p = Path(str(p))
-    return p if p.is_absolute() else REPO_ROOT / p
+    if p.is_absolute():
+        return p
+    for root in [REPO_ROOT, *ALT_ROOTS]:
+        if (root / p).exists():
+            return root / p
+    return REPO_ROOT / p
 
 
 def sample_neurons(folder: Path, sample_ids, seeds=None) -> list:
@@ -131,8 +139,11 @@ def main() -> None:
     parser.add_argument("--metadata-root", type=Path, default=REPO_ROOT / "datasets")
     parser.add_argument("--splits", type=int, default=1000, help="random halves of the reference neurons")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--alt-root", type=Path, action="append", default=[],
+                        help="extra root for relative run paths that are not under the repository (runs moved to the NAS)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    ALT_ROOTS.extend(args.alt_root)
     args.out.mkdir(parents=True, exist_ok=True)
     lines = ["# КС с нейроном как единицей: морфометрики шипиков", "",
              "D — статистика Колмогорова — Смирнова модели (среднее по разбиениям), в скобках 95-й процентиль D реальной выборки "
